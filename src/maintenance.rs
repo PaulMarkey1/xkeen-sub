@@ -103,7 +103,7 @@ fn detect_asset() -> AppResult<&'static str> {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).lines()
             .filter_map(|line| line.split_whitespace().nth(1))
-            .filter(|arch| *arch != "all")
+            .filter(|arch| *arch != "all" && *arch != "noarch")
             .last()
             .unwrap_or("")
             .to_owned())
@@ -115,20 +115,40 @@ fn detect_asset() -> AppResult<&'static str> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .unwrap_or_default();
 
-    match entware_arch.as_str() {
-        "aarch64-3.10" | "aarch64-k3.10" | "aarch64" => Ok("xkeen-sub-aarch64"),
-        "mipsel-3.4" | "mipsel" => Ok("xkeen-sub-mipsel"),
-        "mips-3.4" | "mips" => Ok("xkeen-sub-mips"),
-        _ => match uname_arch.as_str() {
-            "aarch64" => Ok("xkeen-sub-aarch64"),
-            "mipsel" => Ok("xkeen-sub-mipsel"),
-            "mips" => Ok("xkeen-sub-mips"),
-            _ => Err(format!(
-                "Архитектура не поддерживается (Entware: {}, uname: {}).",
-                if entware_arch.is_empty() { "не определена" } else { &entware_arch },
+    if !entware_arch.is_empty() {
+        return asset_for_entware_arch(&entware_arch).ok_or_else(|| {
+            format!(
+                "Архитектура Entware не поддерживается: {} (uname: {}).",
+                entware_arch,
                 if uname_arch.is_empty() { "не определена" } else { &uname_arch }
-            ).into()),
-        },
+            ).into()
+        });
+    }
+
+    // uname reports "mips" for both MIPS endiannesses. Never guess between
+    // mips and mipsel when opkg cannot provide the Entware ABI.
+    match uname_arch.as_str() {
+        "aarch64" => Ok("xkeen-sub-aarch64"),
+        "mipsel" => Ok("xkeen-sub-mipsel"),
+        "mips" => Err(
+            "Невозможно определить endian MIPS без архитектуры Entware (uname: mips).".into()
+        ),
+        _ => Err(format!(
+            "Архитектура не поддерживается (Entware: не определена, uname: {}).",
+            if uname_arch.is_empty() { "не определена" } else { &uname_arch }
+        ).into()),
+    }
+}
+
+fn asset_for_entware_arch(arch: &str) -> Option<&'static str> {
+    if arch == "aarch64" || arch.starts_with("aarch64-") {
+        Some("xkeen-sub-aarch64")
+    } else if arch == "mipsel" || arch.starts_with("mipsel-") {
+        Some("xkeen-sub-mipsel")
+    } else if arch == "mips" || arch.starts_with("mips-") {
+        Some("xkeen-sub-mips")
+    } else {
+        None
     }
 }
 
@@ -171,4 +191,21 @@ fn read_input(prompt: &str) -> AppResult<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_owned())
+}
+
+
+#[cfg(test)]
+mod architecture_tests {
+    use super::asset_for_entware_arch;
+
+    #[test]
+    fn maps_entware_architecture_suffixes() {
+        assert_eq!(asset_for_entware_arch("mipsel-3.4_kn"), Some("xkeen-sub-mipsel"));
+        assert_eq!(asset_for_entware_arch("mipsel-3.4"), Some("xkeen-sub-mipsel"));
+        assert_eq!(asset_for_entware_arch("mips-3.4_kn"), Some("xkeen-sub-mips"));
+        assert_eq!(asset_for_entware_arch("mips-3.4"), Some("xkeen-sub-mips"));
+        assert_eq!(asset_for_entware_arch("aarch64-3.10"), Some("xkeen-sub-aarch64"));
+        assert_eq!(asset_for_entware_arch("aarch64-k3.10"), Some("xkeen-sub-aarch64"));
+        assert_eq!(asset_for_entware_arch("x86_64"), None);
+    }
 }

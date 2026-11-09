@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use crate::subscriptions::load_subscriptions;
-use crate::terminal::{success, title, YELLOW, CYAN, RESET};
+use crate::terminal::{info, title, YELLOW, CYAN, RESET};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -9,7 +9,8 @@ pub fn run() -> AppResult<()> {
     let store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
-        success("Список подписок пуст.");
+        title("XKEEN-SUB — СПИСОК ПОДПИСОК");
+        info("Список подписок пуст.");
         return Ok(());
     }
 

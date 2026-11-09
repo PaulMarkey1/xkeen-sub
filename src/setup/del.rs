@@ -42,7 +42,7 @@ pub fn run() -> AppResult<()> {
 
         println!();
         title("Вы действительно хотите удалить подписку?");
-        println!("{selected_prefix}");
+        info(&selected_prefix);
         menu_item("1", "Да");
         menu_item("2", "Нет");
 

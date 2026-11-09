@@ -20,6 +20,7 @@ pub fn update() -> AppResult<()> {
     let url = format!("https://github.com/{REPO}/releases/latest/download/{asset}");
     let temporary = temporary_path(&executable, "update");
 
+    title("ОБНОВЛЕНИЕ ПРОГРАММЫ");
     info("Проверка последнего релиза...");
     let download_result = download(&url, &temporary);
     if let Err(error) = download_result {
@@ -58,6 +59,7 @@ pub fn reinstall() -> AppResult<()> {
     let asset = detect_asset()?;
     let releases_file = temporary_path(&executable, "releases");
 
+    title("ПЕРЕУСТАНОВКА ПРОГРАММЫ");
     info("Получение последних пяти релизов GitHub...");
     let releases_url = format!("https://api.github.com/repos/{REPO}/releases?per_page=5");
     let fetch_result = download(&releases_url, &releases_file);
@@ -180,12 +182,12 @@ pub fn uninstall() -> AppResult<()> {
 
     println!();
     title("БУДУТ УДАЛЕНЫ");
-    println!("- исполняемый файл {}", executable.display());
-    println!("- файл {}", config_path.display());
+    info(&format!("• Исполняемый файл: {}", executable.display()));
+    info(&format!("• Файл настроек: {}", config_path.display()));
     if delete_subscriptions {
-        println!("- файл {}", subscriptions_path.display());
+        info(&format!("• Файл подписок: {}", subscriptions_path.display()));
     } else {
-        println!("- файл {} будет сохранён", subscriptions_path.display());
+        info(&format!("• Файл подписок будет сохранён: {}", subscriptions_path.display()));
     }
 
     println!();

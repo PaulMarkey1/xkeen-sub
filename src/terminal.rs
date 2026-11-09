@@ -46,6 +46,8 @@ pub fn read_input(prompt: &str) -> io::Result<String> {
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
+    // Keep one fully empty line between the entered value and the next response.
+    println!();
     println!();
 
     Ok(input.trim().to_owned())

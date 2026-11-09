@@ -4,6 +4,10 @@ use crate::subscriptions::load_subscriptions;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
+const GREEN: &str = "\\x1b[32m";
+const CYAN: &str = "\\x1b[36m";
+const RESET: &str = "\\x1b[0m";
+
 pub fn run() -> AppResult<()> {
     let store = load_subscriptions()?;
 
@@ -12,55 +16,27 @@ pub fn run() -> AppResult<()> {
         return Ok(());
     }
 
-    let rows: Vec<[String; 4]> = store
-        .subscriptions
-        .iter()
-        .map(|subscription| {
-            [
-                subscription.id.clone(),
-                subscription.name.as_deref().unwrap_or("—").to_owned(),
-                subscription.prefix.clone(),
-                subscription.url.clone(),
-            ]
-        })
-        .collect();
-
-    let headers = ["ID", "Имя", "Префикс", "Ссылка"];
-    let mut widths = headers.map(str::len);
-
-    for row in &rows {
-        for (index, value) in row.iter().enumerate() {
-            widths[index] = widths[index].max(value.len());
+    for (index, subscription) in store.subscriptions.iter().enumerate() {
+        if index > 0 {
+            println!();
         }
-    }
 
-    print_row(&headers.map(str::to_owned), &widths);
-    println!(
-        "{}",
-        widths
-            .iter()
-            .map(|width| "-".repeat(*width))
-            .collect::<Vec<_>>()
-            .join("-+-")
-    );
-
-    for row in rows {
-        print_row(&row, &widths);
+        println!("{GREEN}╭────────────────────────────{RESET}");
+        print_field("ID:", &subscription.id, "      ");
+        print_field("Имя:", subscription.name.as_deref().unwrap_or("—"), "     ");
+        print_field("Префикс:", &subscription.prefix, " ");
+        print_label("Ссылка:");
+        println!("{GREEN}│{RESET} {}", subscription.url);
+        println!("{GREEN}╰────────────────────────────{RESET}");
     }
 
     Ok(())
 }
 
-fn print_row(values: &[String; 4], widths: &[usize; 4]) {
-    println!(
-        "{:<width0$} | {:<width1$} | {:<width2$} | {:<width3$}",
-        values[0],
-        values[1],
-        values[2],
-        values[3],
-        width0 = widths[0],
-        width1 = widths[1],
-        width2 = widths[2],
-        width3 = widths[3],
-    );
+fn print_field(label: &str, value: &str, spacing: &str) {
+    println!("{GREEN}│{RESET} {CYAN}{label}{RESET}{spacing}{value}");
+}
+
+fn print_label(label: &str) {
+    println!("{GREEN}│{RESET} {CYAN}{label}{RESET}");
 }

@@ -1,6 +1,6 @@
 use std::error::Error;
 use crate::subscriptions::{load_subscriptions, save_subscriptions};
-use crate::terminal::{error, menu_item, read_input, success, title, warning, separator};
+use crate::terminal::{error, info, menu_item, read_input, success, title, warning, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 

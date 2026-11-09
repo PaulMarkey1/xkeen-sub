@@ -21,7 +21,6 @@ CLI-утилита для управления подписками XKeen на K
 
 ```sh
 opkg update
-opkg install curl
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/PaulMarkey1/xkeen-sub/main/install.sh)"
 ```
 

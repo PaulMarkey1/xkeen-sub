@@ -1,14 +1,16 @@
 use std::error::Error;
-use std::io::{self, Write};
-
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
-use crate::terminal::{error, success};
+use crate::terminal::{error, menu_item, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 pub fn run() -> AppResult<()> {
     let name = loop {
-        println!("Добавить название подписки?\n1 Да\n2 Нет\n0 Вернуться");
+        title("ДОБАВЛЕНИЕ ПОДПИСКИ");
+        println!("Добавить название подписки?");
+        menu_item("1", "Да");
+        menu_item("2", "Нет");
+        menu_item("0", "Вернуться");
         match read_input("Выберите пункт: ")?.as_str() {
             "1" => {
                 let value = read_input("Введите название для подписки: ")?;
@@ -65,10 +67,3 @@ fn validate_url(value: &str) -> Result<String, &'static str> {
     Ok(parsed.to_string())
 }
 
-fn read_input(prompt: &str) -> AppResult<String> {
-    print!("{prompt}");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim_end_matches(['\r', '\n']).to_owned())
-}

@@ -16,14 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
-            asset: xkeen-sub-x86_64
           - target: aarch64-unknown-linux-musl
             asset: xkeen-sub-aarch64
-          - target: armv7-unknown-linux-musleabihf
-            asset: xkeen-sub-armv7
           - target: mipsel-unknown-linux-musl
             asset: xkeen-sub-mipsel
+          - target: mips-unknown-linux-musl
+            asset: xkeen-sub-mips
 
     steps:
       - name: Checkout

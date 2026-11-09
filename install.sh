@@ -3,39 +3,36 @@ set -eu
 
 REPO="PaulMarkey1/xkeen-sub"
 BIN_NAME="xkeen-sub"
-DEST="/opt/bin/${BIN_NAME}"
+DEST="/opt/sbin/${BIN_NAME}"
 
 fail() {
     echo "Ошибка: $*" >&2
     exit 1
 }
 
-# Сначала определяем архитектуру Entware: она точнее uname -m на роутерах.
+# Entware architecture is preferred over uname -m because it reflects the ABI.
 ENTWARE_ARCH=""
 if command -v opkg >/dev/null 2>&1; then
     ENTWARE_ARCH="$(opkg print-architecture 2>/dev/null | awk '$2 != "all" { print $2 }' | tail -n 1)"
 fi
+UNAME_ARCH="$(uname -m)"
 
 case "$ENTWARE_ARCH" in
     aarch64-3.10|aarch64-k3.10|aarch64)
         ASSET="xkeen-sub-aarch64"
         ;;
-    armv7sf-k3.2|armv7-3.2|armv7l)
-        ASSET="xkeen-sub-armv7"
-        ;;
     mipsel-3.4|mipsel)
         ASSET="xkeen-sub-mipsel"
         ;;
-    x86_64-3.2|x86_64)
-        ASSET="xkeen-sub-x86_64"
+    mips-3.4|mips)
+        ASSET="xkeen-sub-mips"
         ;;
     *)
-        case "$(uname -m)" in
+        case "$UNAME_ARCH" in
             aarch64) ASSET="xkeen-sub-aarch64" ;;
-            armv7l|armv7) ASSET="xkeen-sub-armv7" ;;
             mipsel) ASSET="xkeen-sub-mipsel" ;;
-            x86_64) ASSET="xkeen-sub-x86_64" ;;
-            *) fail "Архитектура не поддерживается (Entware: ${ENTWARE_ARCH:-не определена}, uname: $(uname -m))." ;;
+            mips) ASSET="xkeen-sub-mips" ;;
+            *) fail "Архитектура не поддерживается (Entware: ${ENTWARE_ARCH:-не определена}, uname: $UNAME_ARCH)." ;;
         esac
         ;;
 esac
@@ -43,10 +40,12 @@ esac
 URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
 
 echo "Архитектура Entware: ${ENTWARE_ARCH:-не определена}"
+echo "Архитектура ядра: $UNAME_ARCH"
 echo "Загрузка ${ASSET}..."
 
 TMP_FILE="$(mktemp)"
-trap 'rm -f "$TMP_FILE"' EXIT HUP INT TERM
+TMP_BIN="/opt/sbin/.${BIN_NAME}.install.$$"
+trap 'rm -f "$TMP_FILE" "$TMP_BIN"' EXIT HUP INT TERM
 
 if command -v curl >/dev/null 2>&1; then
     curl -fL "$URL" -o "$TMP_FILE" || fail "Не удалось скачать бинарный файл."
@@ -57,15 +56,13 @@ else
 fi
 
 [ -s "$TMP_FILE" ] || fail "Загруженный файл пуст."
-mkdir -p "$(dirname "$DEST")"
-cp "$TMP_FILE" "$DEST"
-chmod 755 "$DEST"
+mkdir -p /opt/sbin
+cp "$TMP_FILE" "$TMP_BIN"
+chmod 755 "$TMP_BIN"
 
-"$DEST" --help >/dev/null 2>&1 || {
-    echo "Файл установлен, но проверка запуска с --help завершилась ошибкой." >&2
-    echo "Проверьте совместимость бинарного файла с системой роутера." >&2
-    exit 1
-}
+"$TMP_BIN" --help >/dev/null 2>&1 || fail "Проверка запуска бинарного файла завершилась ошибкой. Текущая установка не заменена."
+
+mv -f "$TMP_BIN" "$DEST"
 
 echo "Установка завершена: $DEST"
 echo "Запуск: xkeen-sub"

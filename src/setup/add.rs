@@ -1,13 +1,13 @@
 use std::error::Error;
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
-use crate::terminal::{error, menu_item, read_input, success, title};
+use crate::terminal::{error, info, menu_item, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 pub fn run() -> AppResult<()> {
     let name = loop {
         title("ДОБАВЛЕНИЕ ПОДПИСКИ");
-        println!("Добавить название подписки?");
+        info("Добавить название подписки?");
         menu_item("1", "Да");
         menu_item("2", "Нет");
         menu_item("0", "Вернуться");

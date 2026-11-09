@@ -18,23 +18,27 @@ fi
 UNAME_ARCH="$(uname -m)"
 
 case "$ENTWARE_ARCH" in
-    aarch64-3.10|aarch64-k3.10|aarch64)
+    aarch64|aarch64-*)
         ASSET="xkeen-sub-aarch64"
         ;;
-    mipsel-3.4|mipsel)
+    mipsel|mipsel-*)
         ASSET="xkeen-sub-mipsel"
         ;;
-    mips-3.4|mips)
+    mips|mips-*)
         ASSET="xkeen-sub-mips"
         ;;
-    *)
+    "")
+        # uname -m reports "mips" for both MIPS endiannesses, so it cannot
+        # safely select a MIPS binary when Entware architecture is unknown.
         case "$UNAME_ARCH" in
             aarch64) ASSET="xkeen-sub-aarch64" ;;
             mipsel) ASSET="xkeen-sub-mipsel" ;;
-            mips) ASSET="xkeen-sub-mips" ;;
-            *) fail "Архитектура не поддерживается (Entware: ${ENTWARE_ARCH:-не определена}, uname: $UNAME_ARCH)." ;;
+            mips) fail "Невозможно определить endian MIPS без архитектуры Entware (uname: $UNAME_ARCH)." ;;
+            *) fail "Архитектура не поддерживается (Entware не определена, uname: $UNAME_ARCH)." ;;
         esac
         ;;
+    *)
+        fail "Архитектура Entware не поддерживается: $ENTWARE_ARCH (uname: $UNAME_ARCH)." ;;
 esac
 
 URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"

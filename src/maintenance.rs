@@ -168,7 +168,7 @@ pub fn uninstall() -> AppResult<()> {
 
     let delete_subscriptions = loop {
         title("УДАЛЕНИЕ ПРОГРАММЫ");
-        println!("Удалить файл sub.json с подписками?");
+        info("Удалить файл sub.json с подписками?");
         menu_item("1", "Да");
         menu_item("2", "Нет");
         match read_input("Выберите пункт: ")?.as_str() {

@@ -33,7 +33,7 @@ xkeen-sub/
 - \`xkeen-sub setup\` — открыть меню настройки.
 - \`xkeen-sub setup help\` — справка по настройке.
 - \`xkeen-sub setup add\` — добавить подписку.
-- \`xkeen-sub setup list\` — просмотр подписок (пока заглушка).
+- \`xkeen-sub setup list\` — просмотр подписок.
 - \`xkeen-sub setup del\` — удаление подписки (пока заглушка).
 
 Команда \`status\` пока не рассматривается.

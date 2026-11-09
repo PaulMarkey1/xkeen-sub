@@ -1,18 +1,15 @@
 use std::error::Error;
 
 use crate::subscriptions::load_subscriptions;
+use crate::terminal::{success, GREEN, CYAN, RESET};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
-
-const GREEN: &str = "\x1b[32m";
-const CYAN: &str = "\x1b[36m";
-const RESET: &str = "\x1b[0m";
 
 pub fn run() -> AppResult<()> {
     let store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
-        println!("Список подписок пуст.");
+        success("Список подписок пуст.");
         return Ok(());
     }
 

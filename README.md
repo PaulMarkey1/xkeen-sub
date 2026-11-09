@@ -19,7 +19,8 @@ xkeen-sub/
 │   ├── subscriptions.rs
 │   └── setup/
 │       ├── mod.rs
-│       └── add.rs
+│       ├── add.rs
+│       └── list.rs
 └── etc/
     └── xkeen-sub/
         ├── config.json

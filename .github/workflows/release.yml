@@ -9,7 +9,7 @@ on:
       release_tag:
         description: Existing GitHub release tag to attach binaries to
         required: true
-        default: v0.0.1
+        default: v0.0.2
 
 permissions:
   contents: write

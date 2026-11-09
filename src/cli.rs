@@ -39,6 +39,7 @@ fn print_help() -> AppResult<()> {
            xkeen-sub setup list      Просмотреть подписки\n\
            xkeen-sub setup del       Удалить подписку\n\
            xkeen-sub uxs             Обновить программу\n\
+           xkeen-sub reinstall       Выбрать версию и переустановить программу\n\
            xkeen-sub uninstall      Удалить программу"
     );
     Ok(())

@@ -5,14 +5,14 @@ use crate::terminal::{error, info, menu_item, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-pub fn run() -> AppResult<()> {
+pub fn run() -> AppResult<bool> {
     loop {
         let mut store = load_subscriptions()?;
 
         if store.subscriptions.is_empty() {
             title("XKEEN-SUB — РЕДАКТИРОВАНИЕ ПОДПИСОК");
             info("Список подписок пуст.");
-            return Ok(());
+            return Ok(false);
         }
 
         println!();
@@ -27,10 +27,10 @@ pub fn run() -> AppResult<()> {
 
         let choice = read_input("Введите номер подписки для редактирования: ")?;
         if choice == "0" {
-            return Ok(());
+            return Ok(true);
         }
         if choice == return_number.to_string() {
-            return Ok(());
+            return Ok(false);
         }
 
         let index = match choice.parse::<usize>() {
@@ -82,7 +82,7 @@ pub fn run() -> AppResult<()> {
                     success("Ссылка подписки изменена.");
                 }
                 "3" => break,
-                "0" => return Ok(()),
+                "0" => return Ok(true),
                 _ => error("Неизвестный пункт. Введите 1, 2, 3 или 0."),
             }
         }

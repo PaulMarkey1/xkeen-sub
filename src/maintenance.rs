@@ -1,9 +1,11 @@
 use std::error::Error;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -18,7 +20,7 @@ pub fn update() -> AppResult<()> {
     let url = format!("https://github.com/{REPO}/releases/latest/download/{asset}");
     let temporary = temporary_path(&executable, "update");
 
-    println!("Проверка последнего релиза...");
+    info("Проверка последнего релиза...");
     let download_result = download(&url, &temporary);
     if let Err(error) = download_result {
         let _ = fs::remove_file(&temporary);
@@ -47,7 +49,7 @@ pub fn update() -> AppResult<()> {
     }
 
     fs::rename(&temporary, &executable)?;
-    println!("Обновление завершено.");
+    success("Обновление завершено.");
     Ok(())
 }
 
@@ -56,7 +58,7 @@ pub fn reinstall() -> AppResult<()> {
     let asset = detect_asset()?;
     let releases_file = temporary_path(&executable, "releases");
 
-    println!("Получение последних пяти релизов GitHub...");
+    info("Получение последних пяти релизов GitHub...");
     let releases_url = format!("https://api.github.com/repos/{REPO}/releases?per_page=5");
     let fetch_result = download(&releases_url, &releases_file);
     if let Err(error) = fetch_result {
@@ -99,27 +101,28 @@ pub fn reinstall() -> AppResult<()> {
         ).into());
     }
 
-    println!("Доступные версии для этой архитектуры:");
+    println!();
+    title("ДОСТУПНЫЕ ВЕРСИИ ДЛЯ ЭТОЙ АРХИТЕКТУРЫ");
     for (index, (tag, date, _)) in choices.iter().enumerate() {
-        println!("{}. {} ({})", index + 1, tag, date);
+        menu_item(&(index + 1).to_string(), &format!("{tag} ({date})"));
     }
-    println!("0. Отмена");
+    menu_item("0", "Отмена");
 
     let selected = loop {
         let input = read_input("Выберите версию для установки: ")?;
         if input == "0" {
-            println!("Переустановка отменена. Текущая версия не изменена.");
+            warning("Переустановка отменена. Текущая версия не изменена.");
             return Ok(());
         }
         match input.parse::<usize>() {
             Ok(number) if (1..=choices.len()).contains(&number) => break number - 1,
-            _ => println!("Введите номер от 1 до {} или 0 для отмены.", choices.len()),
+            _ => error(&format!("Введите номер от 1 до {} или 0 для отмены.", choices.len())),
         }
     };
 
     let (tag, _, url) = &choices[selected];
     let temporary = temporary_path(&executable, "reinstall");
-    println!("Загрузка {tag}...");
+    info(&format!("Загрузка {tag}..."));
     let download_result = download(url, &temporary);
     if let Err(error) = download_result {
         let _ = fs::remove_file(&temporary);
@@ -153,8 +156,8 @@ pub fn reinstall() -> AppResult<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
     }
-    println!("Установлена версия {tag}.");
-    println!("Файлы sub.json и config.json не изменялись.");
+    success(&format!("Установлена версия {tag}."));
+    info("Файлы sub.json и config.json не изменялись.");
     Ok(())
 }
 
@@ -164,14 +167,19 @@ pub fn uninstall() -> AppResult<()> {
     let config_path = Path::new(CONFIG_FILE);
 
     let delete_subscriptions = loop {
-        match read_input("Удалить файл sub.json с подписками?\n1. Да\n2. Нет\nВыберите пункт: ")?.as_str() {
+        title("УДАЛЕНИЕ ПРОГРАММЫ");
+        println!("Удалить файл sub.json с подписками?");
+        menu_item("1", "Да");
+        menu_item("2", "Нет");
+        match read_input("Выберите пункт: ")?.as_str() {
             "1" => break true,
             "2" => break false,
-            _ => println!("Введите 1 или 2."),
+            _ => error("Введите 1 или 2."),
         }
     };
 
-    println!("Будут удалены:");
+    println!();
+    title("БУДУТ УДАЛЕНЫ");
     println!("- исполняемый файл {}", executable.display());
     println!("- файл {}", config_path.display());
     if delete_subscriptions {
@@ -180,14 +188,18 @@ pub fn uninstall() -> AppResult<()> {
         println!("- файл {} будет сохранён", subscriptions_path.display());
     }
 
-    match read_input("Подтвердить удаление?\n1. Да\n2. Нет\nВыберите пункт: ")?.as_str() {
+    println!();
+    title("ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ");
+    menu_item("1", "Да");
+    menu_item("2", "Нет");
+    match read_input("Выберите пункт: ")?.as_str() {
         "1" => {}
         "2" => {
-            println!("Удаление отменено.");
+            warning("Удаление отменено.");
             return Ok(());
         }
         _ => {
-            println!("Неизвестный пункт. Удаление отменено.");
+            error("Неизвестный пункт. Удаление отменено.");
             return Ok(());
         }
     }
@@ -204,7 +216,7 @@ pub fn uninstall() -> AppResult<()> {
     }
 
     remove_if_exists(&executable)?;
-    println!("xkeen-sub удалён.");
+    success("xkeen-sub удалён.");
     Ok(())
 }
 
@@ -298,13 +310,6 @@ fn remove_if_exists(path: &Path) -> AppResult<()> {
     }
 }
 
-fn read_input(prompt: &str) -> AppResult<String> {
-    print!("{prompt}");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_owned())
-}
 
 
 #[cfg(test)]

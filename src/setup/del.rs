@@ -1,8 +1,6 @@
 use std::error::Error;
-use std::io::{self, Write};
-
 use crate::subscriptions::{load_subscriptions, save_subscriptions};
-use crate::terminal::{error, success, warning, YELLOW, RESET};
+use crate::terminal::{error, menu_item, read_input, success, title, warning, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -16,18 +14,17 @@ pub fn run() -> AppResult<()> {
     }
 
     loop {
-        println!("\n{YELLOW}XKEEN-SUB — УДАЛЕНИЕ ПОДПИСКИ{RESET}");
-        println!("{YELLOW}──────────────────────────────{RESET}");
+        println!();
+        title("XKEEN-SUB — УДАЛЕНИЕ ПОДПИСКИ");
+        separator("──────────────────────────────");
 
         for (index, subscription) in store.subscriptions.iter().enumerate() {
-            println!("{}. {}", index + 1, subscription.prefix);
+            menu_item(&(index + 1).to_string(), &subscription.prefix);
         }
 
-        println!("\n0. Вернуться");
+        menu_item("0", "Вернуться");
 
-        let choice = read_input(&format!(
-            "{YELLOW}Введите номер подписки для удаления: {RESET}"
-        ))?;
+        let choice = read_input("Введите номер подписки для удаления: ")?;
 
         if choice == "0" {
             return Ok(());
@@ -43,13 +40,13 @@ pub fn run() -> AppResult<()> {
 
         let selected_prefix = store.subscriptions[index].prefix.clone();
 
-        println!(
-            "\n{YELLOW}Вы действительно хотите удалить подписку?{RESET}\n{selected_prefix}"
-        );
-        println!("1. Да");
-        println!("2. Нет");
+        println!();
+        title("Вы действительно хотите удалить подписку?");
+        println!("{selected_prefix}");
+        menu_item("1", "Да");
+        menu_item("2", "Нет");
 
-        match read_input(&format!("{YELLOW}Введите номер: {RESET}"))?.as_str() {
+        match read_input("Введите номер: ")?.as_str() {
             "1" => {
                 store.subscriptions.remove(index);
 
@@ -78,12 +75,3 @@ pub fn run() -> AppResult<()> {
     }
 }
 
-fn read_input(prompt: &str) -> AppResult<String> {
-    print!("{prompt}");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().to_owned())
-}

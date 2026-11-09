@@ -1,0 +1,45 @@
+use std::error::Error;
+
+use crate::setup;
+
+type AppResult<T> = Result<T, Box<dyn Error>>;
+
+pub fn run() -> AppResult<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.is_empty() || args == ["help"] {
+        return print_help();
+    }
+
+    match args.as_slice() {
+        [root, subcommand] if root == "setup" && subcommand == "help" => print_setup_help(),
+        [root] if root == "setup" => setup::run_menu(),
+        [root, action] if root == "setup" && action == "add" => setup::add::run(),
+        [root, action] if root == "setup" && action == "list" => {
+            println!("Просмотр подписок пока не реализован.");
+            Ok(())
+        }
+        [root, action] if root == "setup" && action == "del" => {
+            println!("Удаление подписки пока не реализовано.");
+            Ok(())
+        }
+        _ => {
+            print_help()?;
+            Ok(())
+        }
+    }
+}
+
+fn print_help() -> AppResult<()> {
+    println!(
+        "xkeen-sub — управление подписками XKeen\n\n         Использование:\n           xkeen-sub                 Показать справку\n           xkeen-sub help            Показать справку\n           xkeen-sub setup           Открыть меню настройки\n           xkeen-sub setup help      Справка по настройке\n           xkeen-sub setup add       Добавить подписку\n           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n           xkeen-sub setup del       Удалить подписку (пока не реализовано)"
+    );
+    Ok(())
+}
+
+fn print_setup_help() -> AppResult<()> {
+    println!(
+        "xkeen-sub setup — настройка подписок\n\n         Использование:\n           xkeen-sub setup           Открыть меню настройки\n           xkeen-sub setup add       Добавить подписку\n           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n           xkeen-sub setup del       Удалить подписку (пока не реализовано)"
+    );
+    Ok(())
+}

@@ -21,6 +21,7 @@ pub fn update() -> AppResult<()> {
     let temporary = temporary_path(&executable, "update");
 
     title("ОБНОВЛЕНИЕ ПРОГРАММЫ");
+    info(&format!("Текущая версия: xkeen-sub {}", env!("XKEEN_SUB_VERSION")));
     info("Проверка последнего релиза...");
     let download_result = download(&url, &temporary);
     if let Err(error) = download_result {
@@ -49,8 +50,11 @@ pub fn update() -> AppResult<()> {
         return Err("Проверка новой версии не пройдена. Текущий бинарный файл не изменён.".into());
     }
 
+    let new_version = binary_version(&temporary)?;
+    info(&format!("Устанавливаемая версия: {new_version}"));
+
     fs::rename(&temporary, &executable)?;
-    success("Обновление завершено.");
+    success(&format!("Обновление до {new_version} завершено."));
     Ok(())
 }
 
@@ -60,6 +64,7 @@ pub fn reinstall() -> AppResult<()> {
     let releases_file = temporary_path(&executable, "releases");
 
     title("ПЕРЕУСТАНОВКА ПРОГРАММЫ");
+    info(&format!("Текущая версия: xkeen-sub {}", env!("XKEEN_SUB_VERSION")));
     info("Получение последних пяти релизов GitHub...");
     let releases_url = format!("https://api.github.com/repos/{REPO}/releases?per_page=5");
     let fetch_result = download(&releases_url, &releases_file);
@@ -124,6 +129,7 @@ pub fn reinstall() -> AppResult<()> {
 
     let (tag, _, url) = &choices[selected];
     let temporary = temporary_path(&executable, "reinstall");
+    info(&format!("Выбрана версия: {tag}"));
     info(&format!("Загрузка {tag}..."));
     let download_result = download(url, &temporary);
     if let Err(error) = download_result {
@@ -154,11 +160,20 @@ pub fn reinstall() -> AppResult<()> {
         ).into());
     }
 
+    let installed_version = binary_version(&temporary)?;
+    if installed_version != format!("xkeen-sub {tag}") {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Версия загруженного бинарного файла не совпадает с выбранным релизом: ожидалась xkeen-sub {tag}, получена {installed_version}. Текущая версия не изменена."
+        ).into());
+    }
+    info(&format!("Проверена версия бинарного файла: {installed_version}"));
+
     if let Err(error) = fs::rename(&temporary, &executable) {
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
     }
-    success(&format!("Установлена версия {tag}."));
+    success(&format!("Установлена версия {installed_version}."));
     info("Файлы sub.json и config.json не изменялись.");
     Ok(())
 }
@@ -220,6 +235,18 @@ pub fn uninstall() -> AppResult<()> {
     remove_if_exists(&executable)?;
     success("xkeen-sub удалён.");
     Ok(())
+}
+
+fn binary_version(path: &Path) -> AppResult<String> {
+    let output = Command::new(path).arg("--version").output()?;
+    if !output.status.success() {
+        return Err("Не удалось определить версию загруженного бинарного файла.".into());
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if version.is_empty() {
+        return Err("Загруженный бинарный файл не сообщил свою версию.".into());
+    }
+    Ok(version)
 }
 
 fn detect_asset() -> AppResult<&'static str> {

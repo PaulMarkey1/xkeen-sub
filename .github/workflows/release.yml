@@ -67,6 +67,8 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build
+        env:
+          XKEEN_SUB_VERSION: ${{ inputs.release_tag || github.ref_name }}
         run: cross +${{ matrix.toolchain }} build --release --target ${{ matrix.target }}
 
       - name: Prepare release asset

@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use crate::subscriptions::load_subscriptions;
-use crate::terminal::{success, GREEN, CYAN, RESET};
+use crate::terminal::{success, YELLOW, CYAN, RESET};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -18,22 +18,22 @@ pub fn run() -> AppResult<()> {
             println!();
         }
 
-        println!("{GREEN}╭────────────────────────────{RESET}");
+        println!("{YELLOW}╭────────────────────────────{RESET}");
         print_field("ID:", &subscription.id, "      ");
         print_field("Имя:", subscription.name.as_deref().unwrap_or("—"), "     ");
         print_field("Префикс:", &subscription.prefix, " ");
         print_label("Ссылка:");
-        println!("{GREEN}│{RESET} {}", subscription.url);
-        println!("{GREEN}╰────────────────────────────{RESET}");
+        println!("{YELLOW}│{RESET} {}", subscription.url);
+        println!("{YELLOW}╰────────────────────────────{RESET}");
     }
 
     Ok(())
 }
 
 fn print_field(label: &str, value: &str, spacing: &str) {
-    println!("{GREEN}│{RESET} {CYAN}{label}{RESET}{spacing}{value}");
+    println!("{YELLOW}│{RESET} {CYAN}{label}{RESET}{spacing}{value}");
 }
 
 fn print_label(label: &str) {
-    println!("{GREEN}│{RESET} {CYAN}{label}{RESET}");
+    println!("{YELLOW}│{RESET} {CYAN}{label}{RESET}");
 }

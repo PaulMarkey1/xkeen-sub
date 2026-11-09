@@ -5,8 +5,15 @@ use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
+const VERSION: &str = env!("XKEEN_SUB_VERSION");
+
 pub fn run() -> AppResult<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
+        println!("xkeen-sub {VERSION}");
+        return Ok(());
+    }
 
     if args.is_empty() || (args.len() == 1 && args[0] == "help") {
         return print_help();
@@ -29,7 +36,7 @@ pub fn run() -> AppResult<()> {
 }
 
 fn print_help() -> AppResult<()> {
-    title("XKEEN-SUB — управление подписками XKeen");
+    title(&format!("XKEEN-SUB {VERSION} — управление подписками XKeen"));
     println!();
     separator("Использование:");
     command_item("xkeen-sub", "Показать справку");

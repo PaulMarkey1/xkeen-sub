@@ -2,25 +2,22 @@ use std::error::Error;
 use std::io::{self, Write};
 
 use crate::subscriptions::{load_subscriptions, save_subscriptions};
+use crate::terminal::{error, success, warning, YELLOW, RESET};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RESET: &str = "\x1b[0m";
 
 pub fn run() -> AppResult<()> {
     let mut store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
-        println!("Список подписок пуст.");
+        success("Список подписок пуст.");
         return Ok(());
     }
 
     loop {
-        println!("\n{RED}XKEEN-SUB — УДАЛЕНИЕ ПОДПИСКИ{RESET}");
-        println!("{GREEN}──────────────────────────────{RESET}");
+        println!("\n{YELLOW}XKEEN-SUB — УДАЛЕНИЕ ПОДПИСКИ{RESET}");
+        println!("{YELLOW}──────────────────────────────{RESET}");
 
         for (index, subscription) in store.subscriptions.iter().enumerate() {
             println!("{}. {}", index + 1, subscription.prefix);
@@ -39,7 +36,7 @@ pub fn run() -> AppResult<()> {
         let index = match choice.parse::<usize>() {
             Ok(number) if number > 0 && number <= store.subscriptions.len() => number - 1,
             _ => {
-                println!("Некорректный номер подписки.");
+                error("Некорректный номер подписки.");
                 continue;
             }
         };
@@ -66,15 +63,15 @@ pub fn run() -> AppResult<()> {
                 }
 
                 save_subscriptions(&store)?;
-                println!("Подписка удалена. Нумерация обновлена.");
+                success("Подписка удалена. Нумерация обновлена.");
                 return Ok(());
             }
             "2" => {
-                println!("Удаление отменено.");
+                warning("Удаление отменено.");
                 return Ok(());
             }
             _ => {
-                println!("Неизвестный пункт. Удаление отменено.");
+                error("Неизвестный пункт. Удаление отменено.");
                 return Ok(());
             }
         }

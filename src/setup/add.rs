@@ -2,6 +2,7 @@ use std::error::Error;
 use std::io::{self, Write};
 
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
+use crate::terminal::{error, success};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -13,14 +14,14 @@ pub fn run() -> AppResult<()> {
                 let value = read_input("Введите название для подписки: ")?;
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
-                    println!("Название не может быть пустым. Для подписки без названия выберите «Нет».");
+                    error("Название не может быть пустым. Для подписки без названия выберите «Нет».");
                     continue;
                 }
                 break Some(trimmed.to_owned());
             }
             "2" => break None,
             "0" => return Ok(()),
-            _ => println!("Неизвестный пункт. Введите 1, 2 или 0."),
+            _ => error("Неизвестный пункт. Введите 1, 2 или 0."),
         }
     };
 
@@ -28,7 +29,7 @@ pub fn run() -> AppResult<()> {
         let value = read_input("Введите URL подписки: ")?;
         match validate_url(value.trim()) {
             Ok(valid_url) => break valid_url,
-            Err(message) => println!("Некорректный URL: {message}"),
+            Err(message) => error(&format!("Некорректный URL: {message}")),
         }
     };
 
@@ -48,7 +49,7 @@ pub fn run() -> AppResult<()> {
     });
 
     save_subscriptions(&subscriptions)?;
-    println!("Подписка добавлена.");
+    success("Подписка добавлена.");
     Ok(())
 }
 

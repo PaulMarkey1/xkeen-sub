@@ -13,7 +13,7 @@ fail() {
 # Entware architecture is preferred over uname -m because it reflects the ABI.
 ENTWARE_ARCH=""
 if command -v opkg >/dev/null 2>&1; then
-    ENTWARE_ARCH="$(opkg print-architecture 2>/dev/null | awk '$2 != "all" { print $2 }' | tail -n 1)"
+    ENTWARE_ARCH="$(opkg print-architecture 2>/dev/null | awk '$2 != "all" && $2 != "noarch" { print $2 }' | tail -n 1)"
 fi
 UNAME_ARCH="$(uname -m)"
 

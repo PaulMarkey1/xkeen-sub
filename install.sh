@@ -66,8 +66,11 @@ chmod 755 "$TMP_BIN"
 
 "$TMP_BIN" --help >/dev/null 2>&1 || fail "Проверка запуска бинарного файла завершилась ошибкой. Текущая установка не заменена."
 
-VERSION="$("$TMP_BIN" --version 2>/dev/null)" || fail "Не удалось определить версию загруженной программы."
-[ -n "$VERSION" ] || fail "Загруженная программа не сообщила свою версию."
+VERSION="$("$TMP_BIN" --version 2>/dev/null)" || VERSION=""
+case "$VERSION" in
+    "xkeen-sub "*) ;;
+    *) VERSION="не определена (бинарный файл старого релиза)" ;;
+esac
 echo "Устанавливаемая версия: $VERSION"
 
 mv -f "$TMP_BIN" "$DEST"

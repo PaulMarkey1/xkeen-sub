@@ -35,6 +35,6 @@ pub fn save_subscriptions(store: &SubscriptionStore) -> Result<(), Box<dyn Error
         fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(store)?;
-    fs::write(path, format!("{content}\\n"))?;
+    fs::write(path, format!("{content}\n"))?;
     Ok(())
 }

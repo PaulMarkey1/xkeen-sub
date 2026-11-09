@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use crate::{maintenance, setup};
+use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -28,31 +29,29 @@ pub fn run() -> AppResult<()> {
 }
 
 fn print_help() -> AppResult<()> {
-    println!(
-        "xkeen-sub — управление подписками XKeen\n\n\
-         Использование:\n\
-           xkeen-sub                 Показать справку\n\
-           xkeen-sub help            Показать справку\n\
-           xkeen-sub setup           Открыть меню настройки\n\
-           xkeen-sub setup help      Справка по настройке\n\
-           xkeen-sub setup add       Добавить подписку\n\
-           xkeen-sub setup list      Просмотреть подписки\n\
-           xkeen-sub setup del       Удалить подписку\n\
-           xkeen-sub uxs             Обновить программу\n\
-           xkeen-sub reinstall       Выбрать версию и переустановить программу\n\
-           xkeen-sub uninstall      Удалить программу"
-    );
+    title("XKEEN-SUB — управление подписками XKeen");
+    println!();
+    separator("Использование:");
+    command_item("xkeen-sub", "Показать справку");
+    command_item("xkeen-sub help", "Показать справку");
+    command_item("xkeen-sub setup", "Открыть меню настройки");
+    command_item("xkeen-sub setup help", "Справка по настройке");
+    command_item("xkeen-sub setup add", "Добавить подписку");
+    command_item("xkeen-sub setup list", "Просмотреть подписки");
+    command_item("xkeen-sub setup del", "Удалить подписку");
+    command_item("xkeen-sub uxs", "Обновить программу");
+    command_item("xkeen-sub reinstall", "Выбрать версию и переустановить программу");
+    command_item("xkeen-sub uninstall", "Удалить программу");
     Ok(())
 }
 
 fn print_setup_help() -> AppResult<()> {
-    println!(
-        "xkeen-sub setup — настройка подписок\n\n\
-         Использование:\n\
-           xkeen-sub setup           Открыть меню настройки\n\
-           xkeen-sub setup add       Добавить подписку\n\
-           xkeen-sub setup list      Просмотреть подписки\n\
-           xkeen-sub setup del       Удалить подписку"
-    );
+    title("XKEEN-SUB — настройка подписок");
+    println!();
+    separator("Использование:");
+    command_item("xkeen-sub setup", "Открыть меню настройки");
+    command_item("xkeen-sub setup add", "Добавить подписку");
+    command_item("xkeen-sub setup list", "Просмотреть подписки");
+    command_item("xkeen-sub setup del", "Удалить подписку");
     Ok(())
 }

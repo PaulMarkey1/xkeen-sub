@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use crate::subscriptions::load_subscriptions;
-use crate::terminal::{success, YELLOW, CYAN, RESET};
+use crate::terminal::{success, title, YELLOW, CYAN, RESET};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -12,6 +12,9 @@ pub fn run() -> AppResult<()> {
         success("Список подписок пуст.");
         return Ok(());
     }
+
+    title("XKEEN-SUB — СПИСОК ПОДПИСОК");
+    println!();
 
     for (index, subscription) in store.subscriptions.iter().enumerate() {
         if index > 0 {

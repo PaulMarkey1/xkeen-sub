@@ -137,11 +137,11 @@ pub fn reinstall() -> AppResult<()> {
         ).into());
     }
 
-    let backup = executable.with_file_name("xkeen-sub.bak");
-    fs::copy(&executable, &backup)?;
-    fs::rename(&temporary, &executable)?;
+    if let Err(error) = fs::rename(&temporary, &executable) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     println!("Установлена версия {tag}.");
-    println!("Резервная копия предыдущего бинарного файла: {}", backup.display());
     println!("Файлы sub.json и config.json не изменялись.");
     Ok(())
 }

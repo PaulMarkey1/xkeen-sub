@@ -45,6 +45,107 @@ pub fn update() -> AppResult<()> {
     Ok(())
 }
 
+pub fn reinstall() -> AppResult<()> {
+    let executable = std::env::current_exe()?;
+    let asset = detect_asset()?;
+    let releases_file = temporary_path(&executable, "releases");
+
+    println!("Получение последних пяти релизов GitHub...");
+    let releases_url = format!("https://api.github.com/repos/{REPO}/releases?per_page=5");
+    let fetch_result = download(&releases_url, &releases_file);
+    if let Err(error) = fetch_result {
+        let _ = fs::remove_file(&releases_file);
+        return Err(error);
+    }
+
+    let releases_text = fs::read_to_string(&releases_file)?;
+    let _ = fs::remove_file(&releases_file);
+    let releases: serde_json::Value = serde_json::from_str(&releases_text)
+        .map_err(|_| "GitHub вернул некорректный список релизов.")?;
+    let releases = releases.as_array()
+        .ok_or("GitHub вернул неожиданный формат списка релизов.")?;
+
+    let mut choices = Vec::new();
+    for release in releases {
+        let tag = match release.get("tag_name").and_then(serde_json::Value::as_str) {
+            Some(value) => value,
+            None => continue,
+        };
+        let published_at = release.get("published_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("дата неизвестна");
+        let download_url = release.get("assets")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|assets| assets.iter().find(|item| {
+                item.get("name").and_then(serde_json::Value::as_str) == Some(asset)
+            }))
+            .and_then(|item| item.get("browser_download_url"))
+            .and_then(serde_json::Value::as_str);
+
+        if let Some(url) = download_url {
+            choices.push((tag.to_owned(), published_at.to_owned(), url.to_owned()));
+        }
+    }
+
+    if choices.is_empty() {
+        return Err(format!(
+            "В последних пяти релизах нет бинарного файла {asset} для архитектуры этого роутера."
+        ).into());
+    }
+
+    println!("Доступные версии для этой архитектуры:");
+    for (index, (tag, date, _)) in choices.iter().enumerate() {
+        println!("{}. {} ({})", index + 1, tag, date);
+    }
+    println!("0. Отмена");
+
+    let selected = loop {
+        let input = read_input("Выберите версию для установки: ")?;
+        if input == "0" {
+            println!("Переустановка отменена. Текущая версия не изменена.");
+            return Ok(());
+        }
+        match input.parse::<usize>() {
+            Ok(number) if (1..=choices.len()).contains(&number) => break number - 1,
+            _ => println!("Введите номер от 1 до {} или 0 для отмены.", choices.len()),
+        }
+    };
+
+    let (tag, _, url) = &choices[selected];
+    let temporary = temporary_path(&executable, "reinstall");
+    println!("Загрузка {tag}...");
+    let download_result = download(url, &temporary);
+    if let Err(error) = download_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    if !temporary.is_file() || fs::metadata(&temporary)?.len() == 0 {
+        let _ = fs::remove_file(&temporary);
+        return Err("Загруженный файл пуст или отсутствует.".into());
+    }
+
+    let mut permissions = fs::metadata(&temporary)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&temporary, permissions)?;
+
+    let check = Command::new(&temporary).arg("--help").output()?;
+    if !check.status.success() {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "Проверка {tag} не пройдена. Текущая версия не изменена."
+        ).into());
+    }
+
+    let backup = executable.with_file_name("xkeen-sub.bak");
+    fs::copy(&executable, &backup)?;
+    fs::rename(&temporary, &executable)?;
+    println!("Установлена версия {tag}.");
+    println!("Резервная копия предыдущего бинарного файла: {}", backup.display());
+    println!("Файлы sub.json и config.json не изменялись.");
+    Ok(())
+}
+
 pub fn uninstall() -> AppResult<()> {
     let executable = std::env::current_exe()?;
     let subscriptions_path = Path::new(SUBSCRIPTIONS_FILE);

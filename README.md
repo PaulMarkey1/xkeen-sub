@@ -41,6 +41,7 @@ GitHub Actions собирает бинарники для трёх архите�
 ```text
 xkeen-sub/
 ├── Cargo.toml
+├── build.rs
 ├── .gitignore
 ├── README.md
 ├── install.sh

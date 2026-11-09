@@ -69,5 +69,5 @@ fn read_input(prompt: &str) -> AppResult<String> {
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    Ok(input.trim_end_matches(['\\r', '\\n']).to_owned())
+    Ok(input.trim_end_matches(['\r', '\n']).to_owned())
 }

@@ -1,4 +1,5 @@
 pub mod add;
+pub mod list;
 
 use std::error::Error;
 use std::io::{self, Write};
@@ -19,7 +20,7 @@ pub fn run_menu() -> AppResult<()> {
 
         match choice.trim() {
             "1" => add::run()?,
-            "2" => println!("Просмотр подписок пока не реализован."),
+            "2" => list::run()?,
             "3" => println!("Удаление подписки пока не реализовано."),
             "0" => return Ok(()),
             _ => println!("Неизвестный пункт меню. Введите цифру от 0 до 3."),

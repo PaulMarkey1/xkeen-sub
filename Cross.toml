@@ -1,3 +1,6 @@
+[build.env]
+passthrough = ["XKEEN_SUB_VERSION"]
+
 [target.mipsel-unknown-linux-musl]
 build-std = true
 

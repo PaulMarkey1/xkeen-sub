@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub release tag to attach binaries to
+        required: true
+        default: v0.0.1
 
 permissions:
   contents: write
@@ -18,25 +24,35 @@ jobs:
         include:
           - target: aarch64-unknown-linux-musl
             asset: xkeen-sub-aarch64
+            toolchain: stable
+            rust_targets: aarch64-unknown-linux-musl
+            components: ""
           - target: mipsel-unknown-linux-musl
             asset: xkeen-sub-mipsel
+            toolchain: nightly
+            rust_targets: ""
+            components: rust-src
           - target: mips-unknown-linux-musl
             asset: xkeen-sub-mips
+            toolchain: nightly
+            rust_targets: ""
+            components: rust-src
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@${{ matrix.toolchain }}
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_targets }}
+          components: ${{ matrix.components }}
 
       - name: Install cross
         run: cargo install cross --locked
 
       - name: Build
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross +${{ matrix.toolchain }} build --release --target ${{ matrix.target }}
 
       - name: Prepare release asset
         run: cp target/${{ matrix.target }}/release/xkeen-sub ${{ matrix.asset }}
@@ -63,5 +79,6 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: dist/xkeen-sub-*
           generate_release_notes: true

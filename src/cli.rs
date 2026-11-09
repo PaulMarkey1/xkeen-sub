@@ -40,16 +40,18 @@ fn print_help() -> AppResult<()> {
     println!();
     separator("Использование:");
     command_item("xkeen-sub", "Показать справку");
-    command_item("xkeen-sub help", "Показать справку");
-    command_item("xkeen-sub --version", "Показать номер версии");
-    command_item("xkeen-sub setup", "Открыть меню настройки");
-    command_item("xkeen-sub setup help", "Справка по настройке");
-    command_item("xkeen-sub setup add", "Добавить подписку");
-    command_item("xkeen-sub setup list", "Просмотреть подписки");
-    command_item("xkeen-sub setup del", "Удалить подписку");
-    command_item("xkeen-sub uxs", "Обновить программу");
-    command_item("xkeen-sub reinstall", "Выбрать версию и переустановить программу");
-    command_item("xkeen-sub uninstall", "Удалить программу");
+    command_item("help", "Показать справку");
+    command_item("--version", "Показать номер версии");
+    println!();
+    command_item("setup", "Настройка подписок");
+    command_item("  add", "Добавить подписку");
+    command_item("  list", "Просмотреть подписки");
+    command_item("  del", "Удалить подписку");
+    command_item("  help", "Справка по настройке");
+    println!();
+    command_item("uxs", "Обновить программу");
+    command_item("reinstall", "Выбрать версию и переустановить программу");
+    command_item("uninstall", "Удалить программу");
     Ok(())
 }
 
@@ -57,9 +59,9 @@ fn print_setup_help() -> AppResult<()> {
     title("XKEEN-SUB — настройка подписок");
     println!();
     separator("Использование:");
-    command_item("xkeen-sub setup", "Открыть меню настройки");
-    command_item("xkeen-sub setup add", "Добавить подписку");
-    command_item("xkeen-sub setup list", "Просмотреть подписки");
-    command_item("xkeen-sub setup del", "Удалить подписку");
+    command_item("setup", "Открыть меню настройки");
+    command_item("  add", "Добавить подписку");
+    command_item("  list", "Просмотреть подписки");
+    command_item("  del", "Удалить подписку");
     Ok(())
 }

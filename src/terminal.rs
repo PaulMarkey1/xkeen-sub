@@ -15,7 +15,7 @@ pub fn separator(message: &str) {
 }
 
 pub fn menu_item(number: &str, message: &str) {
-    println!("{YELLOW}{number}{RESET}. {CYAN}{message}{RESET}");
+    println!("{YELLOW}{number}{RESET}. {message}");
 }
 
 pub fn command_item(command: &str, description: &str) {

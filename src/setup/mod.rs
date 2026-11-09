@@ -1,5 +1,6 @@
 pub mod add;
 pub mod del;
+pub mod edit;
 pub mod list;
 
 use std::error::Error;
@@ -15,6 +16,7 @@ pub fn run_menu() -> AppResult<()> {
         menu_item("1", "Добавить подписку");
         menu_item("2", "Просмотреть подписки");
         menu_item("3", "Удалить подписку");
+        menu_item("4", "Редактировать подписку");
         menu_item("0", "Выход");
 
         let choice = read_input("Выберите пункт: ")?;
@@ -23,8 +25,13 @@ pub fn run_menu() -> AppResult<()> {
             "1" => add::run()?,
             "2" => list::run()?,
             "3" => del::run()?,
+            "4" => {
+                if edit::run()? {
+                    return Ok(());
+                }
+            }
             "0" => return Ok(()),
-            _ => error("Неизвестный пункт меню. Введите цифру от 0 до 3."),
+            _ => error("Неизвестный пункт меню. Введите цифру от 0 до 4."),
         }
     }
 }

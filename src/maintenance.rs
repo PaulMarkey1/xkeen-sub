@@ -34,7 +34,13 @@ pub fn update() -> AppResult<()> {
     permissions.set_mode(0o755);
     fs::set_permissions(&temporary, permissions)?;
 
-    let check = Command::new(&temporary).arg("--help").output()?;
+    let check = match Command::new(&temporary).arg("--help").output() {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("Не удалось запустить загруженную версию: {error}").into());
+        }
+    };
     if !check.status.success() {
         let _ = fs::remove_file(&temporary);
         return Err("Проверка новой версии не пройдена. Текущий бинарный файл не изменён.".into());

@@ -18,6 +18,7 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run(),
         [action] if action == "uxs" => maintenance::update(),
+        [action] if action == "reinstall" => maintenance::reinstall(),
         [action] if action == "uninstall" => maintenance::uninstall(),
         _ => {
             print_help()?;

@@ -15,7 +15,7 @@ pub fn run() -> AppResult<()> {
         [root, subcommand] if root == "setup" && subcommand == "help" => print_setup_help(),
         [root] if root == "setup" => setup::run_menu(),
         [root, action] if root == "setup" && action == "add" => setup::add::run(),
-        [root, action] if root == "setup" && action == "list" => setup::list::run()
+        [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => {
             println!("Удаление подписки пока не реализовано.");
             Ok(())
@@ -48,7 +48,7 @@ fn print_setup_help() -> AppResult<()> {
          Использование:\n\
            xkeen-sub setup           Открыть меню настройки\n\
            xkeen-sub setup add       Добавить подписку\n\
-           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n\
+           xkeen-sub setup list      Просмотреть подписки\n\
            xkeen-sub setup del       Удалить подписку (пока не реализовано)"
     );
     Ok(())

@@ -7,7 +7,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 pub fn run() -> AppResult<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty() || args == ["help"] {
+    if args.is_empty() || (args.len() == 1 && args[0] == "help") {
         return print_help();
     }
 
@@ -32,14 +32,27 @@ pub fn run() -> AppResult<()> {
 
 fn print_help() -> AppResult<()> {
     println!(
-        "xkeen-sub — управление подписками XKeen\n\n         Использование:\n           xkeen-sub                 Показать справку\n           xkeen-sub help            Показать справку\n           xkeen-sub setup           Открыть меню настройки\n           xkeen-sub setup help      Справка по настройке\n           xkeen-sub setup add       Добавить подписку\n           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n           xkeen-sub setup del       Удалить подписку (пока не реализовано)"
+        "xkeen-sub — управление подписками XKeen\n\n\
+         Использование:\n\
+           xkeen-sub                 Показать справку\n\
+           xkeen-sub help            Показать справку\n\
+           xkeen-sub setup           Открыть меню настройки\n\
+           xkeen-sub setup help      Справка по настройке\n\
+           xkeen-sub setup add       Добавить подписку\n\
+           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n\
+           xkeen-sub setup del       Удалить подписку (пока не реализовано)"
     );
     Ok(())
 }
 
 fn print_setup_help() -> AppResult<()> {
     println!(
-        "xkeen-sub setup — настройка подписок\n\n         Использование:\n           xkeen-sub setup           Открыть меню настройки\n           xkeen-sub setup add       Добавить подписку\n           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n           xkeen-sub setup del       Удалить подписку (пока не реализовано)"
+        "xkeen-sub setup — настройка подписок\n\n\
+         Использование:\n\
+           xkeen-sub setup           Открыть меню настройки\n\
+           xkeen-sub setup add       Добавить подписку\n\
+           xkeen-sub setup list      Просмотреть подписки (пока не реализовано)\n\
+           xkeen-sub setup del       Удалить подписку (пока не реализовано)"
     );
     Ok(())
 }

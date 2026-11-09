@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::setup;
+use crate::{maintenance, setup};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -17,6 +17,8 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "add" => setup::add::run(),
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run(),
+        [action] if action == "uxs" => maintenance::update(),
+        [action] if action == "uninstall" => maintenance::uninstall(),
         _ => {
             print_help()?;
             Ok(())
@@ -34,7 +36,9 @@ fn print_help() -> AppResult<()> {
            xkeen-sub setup help      Справка по настройке\n\
            xkeen-sub setup add       Добавить подписку\n\
            xkeen-sub setup list      Просмотреть подписки\n\
-           xkeen-sub setup del       Удалить подписку"
+           xkeen-sub setup del       Удалить подписку\n\
+           xkeen-sub uxs             Обновить программу\n\
+           xkeen-sub uninstall      Удалить программу"
     );
     Ok(())
 }

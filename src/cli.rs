@@ -41,6 +41,7 @@ fn print_help() -> AppResult<()> {
     separator("Использование:");
     command_item("xkeen-sub", "Показать справку");
     command_item("xkeen-sub help", "Показать справку");
+    command_item("xkeen-sub --version", "Показать номер версии");
     command_item("xkeen-sub setup", "Открыть меню настройки");
     command_item("xkeen-sub setup help", "Справка по настройке");
     command_item("xkeen-sub setup add", "Добавить подписку");

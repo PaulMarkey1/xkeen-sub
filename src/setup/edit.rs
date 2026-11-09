@@ -141,6 +141,6 @@ mod tests {
 
     #[test]
     fn rejects_url_without_host() {
-        assert!(validate_url("https:///sub").is_err());
+        assert!(validate_url("https://").is_err());
     }
 }

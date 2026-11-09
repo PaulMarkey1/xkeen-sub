@@ -25,6 +25,7 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "add" => setup::add::run(),
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run(),
+        [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()) ,
         [action] if action == "uxs" => maintenance::update(),
         [action] if action == "reinstall" => maintenance::reinstall(),
         [action] if action == "uninstall" => maintenance::uninstall(),
@@ -47,6 +48,7 @@ fn print_help() -> AppResult<()> {
     command_item("  add", "Добавить подписку");
     command_item("  list", "Просмотреть подписки");
     command_item("  del", "Удалить подписку");
+    command_item("  edit", "Редактировать подписку");
     command_item("  help", "Справка по настройке");
     println!();
     command_item("uxs", "Обновить программу");
@@ -63,5 +65,6 @@ fn print_setup_help() -> AppResult<()> {
     command_item("  add", "Добавить подписку");
     command_item("  list", "Просмотреть подписки");
     command_item("  del", "Удалить подписку");
+    command_item("  edit", "Редактировать подписку");
     Ok(())
 }

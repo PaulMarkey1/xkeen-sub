@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod maintenance;
+#[allow(dead_code)]
 mod outbound_compare;
 mod setup;
 mod subscriptions;

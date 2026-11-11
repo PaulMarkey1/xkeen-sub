@@ -106,6 +106,13 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn is_json_config(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("json" | "jsonc")
+    )
+}
+
 struct TemporaryResources {
     outbound_file: PathBuf,
     empty_conf_dir: PathBuf,

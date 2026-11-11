@@ -4,6 +4,7 @@ mod maintenance;
 mod setup;
 mod subscriptions;
 mod terminal;
+mod xray_test;
 
 fn main() {
     if let Err(error) = cli::run() {

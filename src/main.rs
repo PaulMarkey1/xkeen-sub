@@ -9,6 +9,8 @@ mod subscription_download;
 mod terminal;
 #[allow(dead_code)]
 mod xray_test;
+#[allow(dead_code)]
+mod update;
 
 fn main() {
     if let Err(error) = cli::run() {

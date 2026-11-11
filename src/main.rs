@@ -1,8 +1,10 @@
 mod cli;
 mod config;
 mod maintenance;
+mod outbound_compare;
 mod setup;
-mod subscriptions;\nmod subscription_download;
+mod subscriptions;
+mod subscription_download;
 mod terminal;
 #[allow(dead_code)]
 mod xray_test;

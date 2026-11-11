@@ -19,6 +19,9 @@ const DEFAULT_XRAY_BIN: &str = "/opt/sbin/xray";
 /// Checks a prepared Outbound document together with the other active Xray
 /// configuration files, without loading the currently active Outbound file
 /// and without starting the Xray server.
+///
+/// Xray is the authority for protocol and parameter compatibility. This module
+/// must not add stricter project-specific checks for values such as UUIDs.
 pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
     let config_dir = Path::new(CONFIG_DIR);
     let asset_dir = Path::new(ASSET_DIR);

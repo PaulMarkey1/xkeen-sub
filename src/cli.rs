@@ -1,6 +1,7 @@
 use std::error::Error;
 
-use crate::{maintenance, setup};
+use crate::{config, maintenance, setup};
+use crate::config::ValidationMode;
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -26,6 +27,16 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run(),
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
+        [action] if action == "validation" => config::show_validation(),
+        [action, mode] if action == "validation" => {
+            let mode = match mode.as_str() {
+                "on" => ValidationMode::On,
+                "off" => ValidationMode::Off,
+                "alert" => ValidationMode::Alert,
+                _ => return Err("Допустимые режимы: on, off, alert. Использование: xkeen-sub validation on|off|alert".into()),
+            };
+            config::set_validation(mode)
+        }
         [action] if action == "uxs" => maintenance::update(),
         [action] if action == "reinstall" => maintenance::reinstall(),
         [action] if action == "uninstall" => maintenance::uninstall(),
@@ -50,6 +61,9 @@ fn print_help() -> AppResult<()> {
     command_item("  del", "Удалить подписку");
     command_item("  edit", "Редактировать подписку");
     command_item("  help", "Справка по настройке");
+    println!();
+    command_item("validation", "Показать режим проверки подключений");
+    command_item("  on|off|alert", "Установить режим проверки");
     println!();
     command_item("uxs", "Обновить программу");
     command_item("reinstall", "Выбрать версию и переустановить программу");

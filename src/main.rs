@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod maintenance;
 mod setup;
 mod subscriptions;

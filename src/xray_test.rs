@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::terminal::{info, success};
+use crate::terminal::success;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -16,40 +17,93 @@ const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const ACTIVE_OUTBOUND: &str = "04_outbounds.json";
 const DEFAULT_XRAY_BIN: &str = "/opt/sbin/xray";
 
+/// Structured Xray process failure. The streams are kept separately because
+/// Xray may write diagnostics to either stdout or stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrayProcessFailure {
+    pub exit_code: Option<i32>,
+    pub process_status: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl XrayProcessFailure {
+    pub fn combined_diagnostics(&self) -> String {
+        match (self.stdout.trim(), self.stderr.trim()) {
+            ("", "") => String::new(),
+            ("", stderr) => stderr.to_owned(),
+            (stdout, "") => stdout.to_owned(),
+            (stdout, stderr) => format!("{stdout}\n{stderr}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum XrayTestError {
+    Setup(String),
+    Process(XrayProcessFailure),
+}
+
+impl fmt::Display for XrayTestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Setup(message) => formatter.write_str(message),
+            Self::Process(failure) => write!(
+                formatter,
+                "Проверка Xray завершилась ошибкой (код процесса: {}).",
+                failure
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| failure.process_status.clone())
+            ),
+        }
+    }
+}
+
+impl Error for XrayTestError {}
+
 /// Checks a prepared Outbound document together with the other active Xray
 /// configuration files, without loading the currently active Outbound file
 /// and without starting the Xray server.
-///
-/// Xray is the authority for protocol and parameter compatibility. This module
-/// must not add stricter project-specific checks for values such as UUIDs.
-pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
+pub fn test_outbounds_detailed(outbounds_json: &str) -> Result<(), XrayTestError> {
     let config_dir = Path::new(CONFIG_DIR);
     let asset_dir = Path::new(ASSET_DIR);
 
     if !config_dir.is_dir() {
-        return Err(format!("Каталог конфигурации Xray не найден: {}", config_dir.display()).into());
+        return Err(XrayTestError::Setup(format!(
+            "Каталог конфигурации Xray не найден: {}",
+            config_dir.display()
+        )));
     }
     if !asset_dir.is_dir() {
-        return Err(format!("Каталог данных Xray не найден: {}", asset_dir.display()).into());
+        return Err(XrayTestError::Setup(format!(
+            "Каталог данных Xray не найден: {}",
+            asset_dir.display()
+        )));
     }
 
     let xray_bin = std::env::var_os("XRAY_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_XRAY_BIN));
 
-    let resources = TemporaryResources::create(config_dir)?;
-    fs::write(&resources.outbound_file, outbounds_json)
-        .map_err(|error| format!("Не удалось записать временный Outbound: {error}"))?;
+    let resources = TemporaryResources::create(config_dir)
+        .map_err(|error| XrayTestError::Setup(error.to_string()))?;
+    fs::write(&resources.outbound_file, outbounds_json).map_err(|error| {
+        XrayTestError::Setup(format!("Не удалось записать временный Outbound: {error}"))
+    })?;
 
     let mut json_configs = Vec::new();
     let mut jsonc_configs = Vec::new();
-    for entry in fs::read_dir(config_dir)? {
-        let entry = entry?;
+    let entries = fs::read_dir(config_dir)
+        .map_err(|error| XrayTestError::Setup(error.to_string()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| XrayTestError::Setup(error.to_string()))?;
         let path = entry.path();
 
-        // Match the shell globs used in the validated router-side test:
-        // hidden files are not part of the active configuration set.
-        if path.file_name().and_then(OsStr::to_str)
+        if path
+            .file_name()
+            .and_then(OsStr::to_str)
             .map(|name| name.starts_with('.'))
             .unwrap_or(false)
         {
@@ -66,15 +120,10 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
         }
     }
 
-    // Preserve the tested shell-glob order: *.json first, then *.jsonc.
     json_configs.sort();
     jsonc_configs.sort();
     let mut config_files = json_configs;
     config_files.extend(jsonc_configs);
-
-    info("Проверка конфигурации Xray...");
-    info("Действующий 04_outbounds.json исключён из проверки.");
-    info("Рабочий сервер Xray не запускается.");
 
     let mut command = Command::new(&xray_bin);
     command
@@ -87,26 +136,47 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
     for path in &config_files {
         command.arg("-c").arg(path);
     }
-    // The candidate Outbound is always supplied last and is never written
-    // over the live 04_outbounds.json file.
     command.arg("-c").arg(&resources.outbound_file);
 
     let output = command.output().map_err(|error| {
-        format!("Не удалось запустить проверку Xray ({}): {error}", xray_bin.display())
+        XrayTestError::Setup(format!(
+            "Не удалось запустить проверку Xray ({}): {error}",
+            xray_bin.display()
+        ))
     })?;
 
-    io::stdout().write_all(&output.stdout)?;
-    io::stderr().write_all(&output.stderr)?;
-
     if !output.status.success() {
-        return Err(format!(
-            "Проверка конфигурации Xray завершилась ошибкой (код: {}). Рабочая конфигурация не изменена.",
-            output.status
-        ).into());
+        return Err(XrayTestError::Process(XrayProcessFailure {
+            exit_code: output.status.code(),
+            process_status: output.status.to_string(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }));
     }
 
-    success("Проверка конфигурации Xray завершена успешно.");
     Ok(())
+}
+
+/// Backwards-compatible wrapper for callers that only need success/failure.
+/// The update pipeline should use test_outbounds_detailed to retain the
+/// original Xray streams and process exit code for diagnostics.
+pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
+    println!("Проверка конфигурации Xray...");
+    println!("Действующий 04_outbounds.json исключён из проверки.");
+    println!("Рабочий сервер Xray не запускается.");
+
+    match test_outbounds_detailed(outbounds_json) {
+        Ok(()) => {
+            success("Проверка конфигурации Xray завершена успешно.");
+            Ok(())
+        }
+        Err(XrayTestError::Process(failure)) => {
+            io::stdout().write_all(failure.stdout.as_bytes())?;
+            io::stderr().write_all(failure.stderr.as_bytes())?;
+            Err(XrayTestError::Process(failure).into())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn is_json_config(path: &Path) -> bool {
@@ -164,7 +234,7 @@ impl Drop for TemporaryResources {
 
 #[cfg(test)]
 mod tests {
-    use super::is_json_config;
+    use super::{is_json_config, XrayProcessFailure};
     use std::path::Path;
 
     #[test]
@@ -177,5 +247,21 @@ mod tests {
     fn ignores_other_file_extensions() {
         assert!(!is_json_config(Path::new("/etc/xray/README.md")));
         assert!(!is_json_config(Path::new("/etc/xray/config.yaml")));
+    }
+
+    #[test]
+    fn structured_failure_preserves_both_streams_and_exit_code() {
+        let failure = XrayProcessFailure {
+            exit_code: Some(23),
+            process_status: "exit status: 23".to_owned(),
+            stdout: "stdout diagnostic".to_owned(),
+            stderr: "stderr diagnostic".to_owned(),
+        };
+
+        assert_eq!(failure.exit_code, Some(23));
+        assert_eq!(
+            failure.combined_diagnostics(),
+            "stdout diagnostic\nstderr diagnostic"
+        );
     }
 }

@@ -38,6 +38,12 @@ impl XrayProcessFailure {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrayTestOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
 #[derive(Debug)]
 pub enum XrayTestError {
     Setup(String),
@@ -65,7 +71,7 @@ impl Error for XrayTestError {}
 /// Checks a prepared Outbound document together with the other active Xray
 /// configuration files, without loading the currently active Outbound file
 /// and without starting the Xray server.
-pub fn test_outbounds_detailed(outbounds_json: &str) -> Result<(), XrayTestError> {
+pub fn test_outbounds_detailed(outbounds_json: &str) -> Result<XrayTestOutput, XrayTestError> {
     let config_dir = Path::new(CONFIG_DIR);
     let asset_dir = Path::new(ASSET_DIR);
 
@@ -145,16 +151,19 @@ pub fn test_outbounds_detailed(outbounds_json: &str) -> Result<(), XrayTestError
         ))
     })?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
     if !output.status.success() {
         return Err(XrayTestError::Process(XrayProcessFailure {
             exit_code: output.status.code(),
             process_status: output.status.to_string(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout,
+            stderr,
         }));
     }
 
-    Ok(())
+    Ok(XrayTestOutput { stdout, stderr })
 }
 
 /// Backwards-compatible wrapper for callers that only need success/failure.
@@ -166,7 +175,9 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
     println!("Рабочий сервер Xray не запускается.");
 
     match test_outbounds_detailed(outbounds_json) {
-        Ok(()) => {
+        Ok(output) => {
+            io::stdout().write_all(output.stdout.as_bytes())?;
+            io::stderr().write_all(output.stderr.as_bytes())?;
             success("Проверка конфигурации Xray завершена успешно.");
             Ok(())
         }

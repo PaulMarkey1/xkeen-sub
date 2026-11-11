@@ -51,7 +51,7 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
         {
             continue;
         }
-        if !entry.file_type()?.is_file() || !is_json_config(&path) {
+        if !path.is_file() || !is_json_config(&path) {
             continue;
         }
         if path.file_name() == Some(OsStr::new(ACTIVE_OUTBOUND)) {

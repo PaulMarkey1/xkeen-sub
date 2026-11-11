@@ -2,7 +2,7 @@ mod cli;
 mod config;
 mod maintenance;
 mod setup;
-mod subscriptions;
+mod subscriptions;\nmod subscription_download;
 mod terminal;
 #[allow(dead_code)]
 mod xray_test;

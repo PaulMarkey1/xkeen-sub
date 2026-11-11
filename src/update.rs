@@ -263,8 +263,15 @@ fn print_report(subscription: &Subscription, report: &ComparisonReport) {
         ));
     }
 
-    if report.added.is_empty() && report.removed.is_empty() && report.changed.is_empty() {
+    if report.added.is_empty()
+        && report.removed.is_empty()
+        && report.changed.is_empty()
+        && report.unrecognized_current == 0
+        && report.unrecognized_previous == 0
+    {
         success("Изменений нет. Подписка актуальна.");
+    } else if report.added.is_empty() && report.removed.is_empty() && report.changed.is_empty() {
+        warning("Изменений среди распознанных подключений нет; часть данных не распознана.");
     }
 }
 

@@ -38,12 +38,13 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
     fs::write(&resources.outbound_file, outbounds_json)
         .map_err(|error| format!("Не удалось записать временный Outbound: {error}"))?;
 
-    let mut config_files = Vec::new();
+    let mut json_configs = Vec::new();
+    let mut jsonc_configs = Vec::new();
     for entry in fs::read_dir(config_dir)? {
         let entry = entry?;
         let path = entry.path();
 
-        // Match the shell glob used in the validated router-side test:
+        // Match the shell globs used in the validated router-side test:
         // hidden files are not part of the active configuration set.
         if path.file_name().and_then(OsStr::to_str)
             .map(|name| name.starts_with('.'))
@@ -51,16 +52,22 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
         {
             continue;
         }
-        if !path.is_file() || !is_json_config(&path) {
-            continue;
-        }
-        if path.file_name() == Some(OsStr::new(ACTIVE_OUTBOUND)) {
+        if !path.is_file() || path.file_name() == Some(OsStr::new(ACTIVE_OUTBOUND)) {
             continue;
         }
 
-        config_files.push(path);
+        match path.extension().and_then(OsStr::to_str) {
+            Some("json") => json_configs.push(path),
+            Some("jsonc") => jsonc_configs.push(path),
+            _ => {}
+        }
     }
-    config_files.sort();
+
+    // Preserve the tested shell-glob order: *.json first, then *.jsonc.
+    json_configs.sort();
+    jsonc_configs.sort();
+    let mut config_files = json_configs;
+    config_files.extend(jsonc_configs);
 
     info("Проверка конфигурации Xray...");
     info("Действующий 04_outbounds.json исключён из проверки.");
@@ -97,13 +104,6 @@ pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
 
     success("Проверка конфигурации Xray завершена успешно.");
     Ok(())
-}
-
-fn is_json_config(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(OsStr::to_str),
-        Some("json" | "jsonc")
-    )
 }
 
 struct TemporaryResources {

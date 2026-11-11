@@ -12,22 +12,30 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const BASELINE_DIR: &str = "/opt/etc/xkeen-sub";
 
-#[derive(Debug, Default)]
-struct PreparationSummary {
-    downloaded: usize,
-    prepared: usize,
-    failed: usize,
+#[derive(Debug)]
+pub struct PreparedSubscription {
+    pub subscription_id: String,
+    pub original_body: Vec<u8>,
+    pub baseline_path: PathBuf,
+    pub comparison: ComparisonReport,
 }
 
-/// Prepares subscription updates without changing the live XKeen configuration
-/// or writing baselines. Applying the prepared result is intentionally a
-/// separate stage until backup, atomic replacement and rollback are agreed.
-pub fn prepare_updates(target_id: Option<&str>) -> AppResult<()> {
+#[derive(Debug, Default)]
+pub struct UpdatePreparation {
+    pub prepared: Vec<PreparedSubscription>,
+    pub downloaded: usize,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Downloads and compares subscriptions in sequence. It does not change the
+/// live XKeen configuration or write baselines; those operations belong to
+/// the later application stage after backup and rollback are agreed.
+pub fn prepare_updates(target_id: Option<&str>) -> AppResult<UpdatePreparation> {
     let store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
         info("Список подписок пуст. Добавьте подписку через xkeen-sub setup add.");
-        return Ok(());
+        return Ok(UpdatePreparation::default());
     }
 
     let selected: Vec<&Subscription> = match target_id {
@@ -42,7 +50,7 @@ pub fn prepare_updates(target_id: Option<&str>) -> AppResult<()> {
         None => store.subscriptions.iter().collect(),
     };
 
-    let mut summary = PreparationSummary::default();
+    let mut preparation = UpdatePreparation::default();
 
     for subscription in selected {
         println!();
@@ -58,14 +66,12 @@ pub fn prepare_updates(target_id: Option<&str>) -> AppResult<()> {
         info("Загрузка подписки...");
         let downloaded = match download_subscription(subscription) {
             Ok(bytes) => {
-                summary.downloaded += 1;
+                preparation.downloaded += 1;
                 success("Загрузка завершена.");
                 bytes
             }
             Err(download_error) => {
-                summary.failed += 1;
-                error(&format!("Ошибка загрузки: {download_error}"));
-                warning("Подготовка этой подписки пропущена. Рабочая конфигурация не изменена.");
+                record_failure(&mut preparation, subscription, download_error.to_string());
                 continue;
             }
         };
@@ -74,9 +80,7 @@ pub fn prepare_updates(target_id: Option<&str>) -> AppResult<()> {
         let baseline_path = match baseline_path(subscription) {
             Ok(path) => path,
             Err(path_error) => {
-                summary.failed += 1;
-                error(&format!("Не удалось определить файл baseline: {path_error}"));
-                warning("Рабочая конфигурация не изменена.");
+                record_failure(&mut preparation, subscription, path_error.to_string());
                 continue;
             }
         };
@@ -91,35 +95,44 @@ pub fn prepare_updates(target_id: Option<&str>) -> AppResult<()> {
                 None
             }
             Err(read_error) => {
-                summary.failed += 1;
-                error(&format!(
-                    "Не удалось прочитать baseline {}: {read_error}",
-                    baseline_path.display()
-                ));
-                warning("Рабочая конфигурация не изменена.");
+                record_failure(
+                    &mut preparation,
+                    subscription,
+                    format!(
+                        "Не удалось прочитать baseline {}: {read_error}",
+                        baseline_path.display()
+                    ),
+                );
                 continue;
             }
         };
 
         info("Сравнение подключений...");
-        let report = match compare_subscription(previous.as_deref(), &downloaded) {
+        let comparison = match compare_subscription(previous.as_deref(), &downloaded) {
             Ok(report) => {
                 success("Сравнение завершено.");
                 report
             }
             Err(compare_error) => {
-                summary.failed += 1;
-                error(&format!("Не удалось обработать подписку: {compare_error}"));
-                warning("Старый baseline и рабочая конфигурация сохранены.");
+                record_failure(
+                    &mut preparation,
+                    subscription,
+                    format!("Не удалось обработать подписку: {compare_error}"),
+                );
                 continue;
             }
         };
 
-        print_report(subscription, &report);
-        summary.prepared += 1;
+        print_report(subscription, &comparison);
+        preparation.prepared.push(PreparedSubscription {
+            subscription_id: subscription.id.clone(),
+            original_body: downloaded,
+            baseline_path,
+            comparison,
+        });
     }
 
-    if summary.downloaded == 0 {
+    if preparation.downloaded == 0 {
         println!();
         info("Ни одна подписка не ответила. Проверка интернет-соединения...");
         if has_internet_connection() {
@@ -132,18 +145,34 @@ pub fn prepare_updates(target_id: Option<&str>) -> AppResult<()> {
 
     println!();
     title("Итог подготовки");
-    info(&format!("Успешно загружено: {}", summary.downloaded));
-    info(&format!("Подготовлено отчётов: {}", summary.prepared));
-    if summary.failed > 0 {
-        warning(&format!("Ошибок обработки: {}", summary.failed));
+    info(&format!("Успешно загружено: {}", preparation.downloaded));
+    info(&format!("Подготовлено отчётов: {}", preparation.prepared.len()));
+    if !preparation.failed.is_empty() {
+        warning(&format!("Ошибок обработки: {}", preparation.failed.len()));
     }
     info("Изменения в XKeen и baseline не записывались.");
 
-    Ok(())
+    Ok(preparation)
+}
+
+fn record_failure(
+    preparation: &mut UpdatePreparation,
+    subscription: &Subscription,
+    message: String,
+) {
+    error(&format!("Ошибка подписки {}: {message}", subscription.id));
+    warning("Подготовка этой подписки пропущена. Прежняя конфигурация сохранена.");
+    preparation.failed.push((subscription.id.clone(), message));
 }
 
 fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
-    let filename = if subscription.name.as_deref().is_some_and(|name| !name.is_empty()) {
+    let has_name = subscription
+        .name
+        .as_deref()
+        .map(|name| !name.is_empty())
+        .unwrap_or(false);
+
+    let filename = if has_name {
         subscription
             .prefix
             .strip_suffix("--")
@@ -315,10 +344,7 @@ mod tests {
     #[test]
     fn named_subscription_uses_prefix_without_final_separator() {
         let path = baseline_path(&subscription(Some("Germany"), "sub1--Germany--")).unwrap();
-        assert_eq!(
-            path,
-            Path::new("/opt/etc/xkeen-sub/sub1--Germany.json")
-        );
+        assert_eq!(path, Path::new("/opt/etc/xkeen-sub/sub1--Germany.json"));
     }
 
     #[test]

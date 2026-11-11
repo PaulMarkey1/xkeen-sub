@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::process::{Command, Output};
+use url::Url;
 
 use crate::subscriptions::Subscription;
 
@@ -18,10 +19,18 @@ const MAX_REDIRECTS: &str = "5";
 /// responses are reported to the caller. The response is deliberately not
 /// parsed here.
 pub fn download_subscription(subscription: &Subscription) -> AppResult<Vec<u8>> {
+    validate_url(&subscription.url).map_err(|error| {
+        format!("Некорректный URL подписки {}: {error}", subscription.id)
+    })?;
+
     let output = if command_exists("curl") {
-        run_curl(&subscription.url)?
+        run_curl(&subscription.url).map_err(|error| {
+            format!("Не удалось запустить curl для подписки {}: {error}", subscription.id)
+        })?
     } else if command_exists("wget") {
-        run_wget(&subscription.url)?
+        run_wget(&subscription.url).map_err(|error| {
+            format!("Не удалось запустить wget для подписки {}: {error}", subscription.id)
+        })?
     } else {
         return Err("Для загрузки подписок требуется curl или wget.".into());
     };
@@ -42,6 +51,17 @@ pub fn download_subscription(subscription: &Subscription) -> AppResult<Vec<u8>> 
     }
 
     Ok(output.stdout)
+}
+
+fn validate_url(value: &str) -> Result<(), String> {
+    let parsed = Url::parse(value).map_err(|error| error.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("разрешены только схемы HTTP и HTTPS".to_owned());
+    }
+    if parsed.host_str().is_none() {
+        return Err("в URL отсутствует host".to_owned());
+    }
+    Ok(())
 }
 
 fn run_curl(url: &str) -> std::io::Result<Output> {
@@ -84,6 +104,16 @@ fn command_exists(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::validate_url;
+
+    #[test]
+    fn only_http_and_https_urls_are_allowed() {
+        assert!(validate_url("https://example.com/sub").is_ok());
+        assert!(validate_url("http://example.com/sub").is_ok());
+        assert!(validate_url("ftp://example.com/sub").is_err());
+        assert!(validate_url("not a url").is_err());
+    }
+
     #[test]
     fn empty_response_is_detected() {
         let response: Vec<u8> = Vec::new();

@@ -124,16 +124,18 @@ impl TemporaryResources {
             format!("Не удалось создать временный каталог Xray: {error}")
         })?;
 
-        let file = OpenOptions::new()
+        let file = match OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&outbound_file);
-
-        if let Err(error) = file {
-            let _ = fs::remove_dir(&empty_conf_dir);
-            return Err(format!("Не удалось создать временный Outbound: {error}").into());
-        }
+            .open(&outbound_file)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = fs::remove_dir(&empty_conf_dir);
+                return Err(format!("Не удалось создать временный Outbound: {error}").into());
+            }
+        };
 
         drop(file);
         Ok(Self {

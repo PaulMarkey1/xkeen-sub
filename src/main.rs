@@ -4,6 +4,7 @@ mod maintenance;
 mod setup;
 mod subscriptions;
 mod terminal;
+#[allow(dead_code)]
 mod xray_test;
 
 fn main() {

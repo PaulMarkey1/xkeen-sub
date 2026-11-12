@@ -11,7 +11,8 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const XRAY_CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const OBSERVATORY_FILE: &str = "observatory.json";
-const OBSERVATORY_PLACEHOLDER: &[u8] = b"{}\n";
+const OBSERVATORY_TEMPLATE: &str =
+    "\n  \"observatory\": {\n    \"subjectSelector\": []\n  }";
 
 /// Called by install.sh after the shell installer has verified XKeen, Xray,
 /// and the required Xray directories. Reads every JSON/JSONC file in the
@@ -50,11 +51,7 @@ pub fn ensure_observatory() -> AppResult<()> {
             format!("Не удалось разобрать конфигурационный файл {}: {error}", path.display())
         })?;
 
-        let keys = find_observatory_objects(&document).map_err(|error| {
-            format!("Некорректный объект в файле {}: {error}", path.display())
-        })?;
-
-        for key in keys {
+        for key in find_observatory_objects(&document) {
             found.push(format!("{} ({key})", path.display()));
         }
     }
@@ -67,7 +64,7 @@ pub fn ensure_observatory() -> AppResult<()> {
         return Ok(());
     }
 
-    create_observatory_placeholder(config_dir)
+    ensure_observatory_template(config_dir)
 }
 
 fn is_json_config(path: &Path) -> bool {
@@ -80,95 +77,129 @@ fn is_json_config(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn find_observatory_objects(document: &Value) -> Result<Vec<&'static str>, String> {
-    let root = match document.as_object() {
-        Some(root) => root,
-        None => return Ok(Vec::new()),
+/// Only a top-level Observatory object with subjectSelector counts.
+/// Incomplete or malformed values do not prevent checking other files.
+fn find_observatory_objects(document: &Value) -> Vec<&'static str> {
+    let Some(root) = document.as_object() else {
+        return Vec::new();
     };
 
-    let mut found = Vec::new();
-
-    for key in ["observatory", "burstobservatory"] {
-        let Some(value) = root.get(key) else {
-            continue;
-        };
-
-        let object = value
-            .as_object()
-            .ok_or_else(|| format!("объект верхнего уровня `{key}` должен быть JSON-объектом"))?;
-
-        if !object.contains_key("subjectSelector") {
-            return Err(format!(
-                "в объекте верхнего уровня `{key}` отсутствует обязательное поле `subjectSelector`"
-            ));
-        }
-
-        found.push(key);
-    }
-
-    Ok(found)
+    ["observatory", "burstobservatory"]
+        .into_iter()
+        .filter(|key| {
+            root.get(*key)
+                .and_then(Value::as_object)
+                .map(|object| object.contains_key("subjectSelector"))
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
-fn create_observatory_placeholder(config_dir: &Path) -> AppResult<()> {
+fn ensure_observatory_template(config_dir: &Path) -> AppResult<()> {
     let path: PathBuf = config_dir.join(OBSERVATORY_FILE);
 
     match fs::read_to_string(&path) {
         Ok(existing) => {
-            let parsed: Value = json5::from_str(&existing).map_err(|error| {
+            let document: Value = json5::from_str(&existing).map_err(|error| {
                 format!(
-                    "Объект Observatory не найден. Файл {} уже существует, но не является корректным JSON: {error}. Файл не изменён.",
+                    "Не удалось добавить Observatory в {}: файл содержит некорректный JSON: {error}",
                     path.display()
                 )
             })?;
 
-            if parsed.as_object().map(|object| object.is_empty()).unwrap_or(false) {
-                info(&format!(
-                    "Файл {} уже существует как пустой шаблон; он оставлен без изменений.",
+            if !document.is_object() {
+                return Err(format!(
+                    "Не удалось добавить Observatory в {}: корневое значение должно быть JSON-объектом.",
                     path.display()
-                ));
-                return Ok(());
+                )
+                .into());
             }
 
-            return Err(format!(
-                "Объекты `observatory` и `burstobservatory` с полем `subjectSelector` не найдены. Файл {} уже существует и не будет перезаписан.",
+            let updated = insert_observatory_at_root(&existing, &document)?;
+            fs::write(&path, updated).map_err(|error| {
+                format!("Не удалось обновить файл {}: {error}", path.display())
+            })?;
+
+            success(&format!(
+                "Объекты Observatory не найдены. Шаблон добавлен в начало файла {}; прежние настройки сохранены.",
                 path.display()
-            )
-            .into());
+            ));
+            Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "Не удалось проверить файл {}: {error}",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&path)
+                .map_err(|error| {
+                    format!("Не удалось создать файл {}: {error}", path.display())
+                })?;
+
+            let new_file = format!("{{{}\n}}\n", OBSERVATORY_TEMPLATE);
+            if let Err(error) = file.write_all(new_file.as_bytes()) {
+                let _ = fs::remove_file(&path);
+                return Err(format!("Не удалось записать файл {}: {error}", path.display()).into());
+            }
+
+            success(&format!(
+                "Объекты Observatory не найдены. Создан файл {}.",
                 path.display()
-            )
-            .into());
+            ));
+            Ok(())
         }
+        Err(error) => Err(format!(
+            "Не удалось проверить файл {}: {error}",
+            path.display()
+        )
+        .into()),
+    }
+}
+
+/// Inserts the template immediately after the opening brace of the root
+/// object. Existing members and their formatting are retained.
+fn insert_observatory_at_root(existing: &str, document: &Value) -> AppResult<String> {
+    let first = existing
+        .find('{')
+        .ok_or("В файле отсутствует открывающая фигурная скобка")?;
+    if !existing[..first].trim().is_empty() {
+        return Err("Перед корневым JSON-объектом обнаружен посторонний текст".into());
     }
 
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&path)
-        .map_err(|error| {
-            format!("Не удалось создать файл {}: {error}", path.display())
-        })?;
+    let after_open = first + 1;
+    let remainder = &existing[after_open..];
+    let first_non_whitespace = remainder
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace());
 
-    if let Err(error) = file.write_all(OBSERVATORY_PLACEHOLDER) {
-        let _ = fs::remove_file(&path);
-        return Err(format!("Не удалось записать файл {}: {error}", path.display()).into());
+    let Some((offset, character)) = first_non_whitespace else {
+        return Err("Файл содержит незавершённый JSON-объект".into());
+    };
+
+    let insertion_point = after_open + offset;
+    if character == '}' {
+        if !document.as_object().map(|object| object.is_empty()).unwrap_or(false) {
+            return Err("Не удалось определить начало содержимого корневого объекта".into());
+        }
+
+        let mut updated = String::with_capacity(existing.len() + OBSERVATORY_TEMPLATE.len() + 2);
+        updated.push_str(&existing[..after_open]);
+        updated.push_str(OBSERVATORY_TEMPLATE);
+        updated.push_str(&existing[insertion_point..]);
+        return Ok(updated);
     }
 
-    success(&format!(
-        "Объекты Observatory не найдены. Создан файл {} с пустым JSON-шаблоном.",
-        path.display()
-    ));
-    Ok(())
+    let mut updated = String::with_capacity(existing.len() + OBSERVATORY_TEMPLATE.len() + 2);
+    updated.push_str(&existing[..after_open]);
+    updated.push_str(OBSERVATORY_TEMPLATE);
+    updated.push_str(",\n");
+    updated.push_str(&existing[insertion_point..]);
+    Ok(updated)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{find_observatory_objects, is_json_config};
+    use super::{find_observatory_objects, insert_observatory_at_root, is_json_config};
     use serde_json::Value;
     use std::path::Path;
 
@@ -178,11 +209,7 @@ mod tests {
             r#"{"observatory":{"subjectSelector":["proxy"]}}"#,
         )
         .unwrap();
-
-        assert_eq!(
-            find_observatory_objects(&value).unwrap(),
-            vec!["observatory"]
-        );
+        assert_eq!(find_observatory_objects(&value), vec!["observatory"]);
     }
 
     #[test]
@@ -191,20 +218,16 @@ mod tests {
             r#"{"burstobservatory":{"subjectSelector":["proxy"]}}"#,
         )
         .unwrap();
-
-        assert_eq!(
-            find_observatory_objects(&value).unwrap(),
-            vec!["burstobservatory"]
-        );
+        assert_eq!(find_observatory_objects(&value), vec!["burstobservatory"]);
     }
 
     #[test]
-    fn rejects_observatory_without_subject_selector() {
-        let value: Value =
-            serde_json::from_str(r#"{"observatory":{"probeURL":"https://example.com"}}"#)
-                .unwrap();
-
-        assert!(find_observatory_objects(&value).is_err());
+    fn ignores_observatory_without_subject_selector() {
+        let value: Value = serde_json::from_str(
+            r#"{"observatory":{"probeURL":"https://example.com"}}"#,
+        )
+        .unwrap();
+        assert!(find_observatory_objects(&value).is_empty());
     }
 
     #[test]
@@ -213,8 +236,26 @@ mod tests {
             r#"{"routing":{"observatory":{"subjectSelector":["proxy"]}}}"#,
         )
         .unwrap();
+        assert!(find_observatory_objects(&value).is_empty());
+    }
 
-        assert!(find_observatory_objects(&value).unwrap().is_empty());
+    #[test]
+    fn inserts_template_before_existing_root_members() {
+        let original = "{\n  \"log\": { \"loglevel\": \"warning\" }\n}\n";
+        let parsed: Value = json5::from_str(original).unwrap();
+        let updated = insert_observatory_at_root(original, &parsed).unwrap();
+        let expected = "{\n  \"observatory\": {\n    \"subjectSelector\": []\n  },\n  \"log\": { \"loglevel\": \"warning\" }\n}\n";
+        assert_eq!(updated, expected);
+        let _: Value = json5::from_str(&updated).unwrap();
+    }
+
+    #[test]
+    fn inserts_template_into_empty_root_object() {
+        let original = "{}";
+        let parsed: Value = json5::from_str(original).unwrap();
+        let updated = insert_observatory_at_root(original, &parsed).unwrap();
+        let _: Value = json5::from_str(&updated).unwrap();
+        assert!(updated.contains("\"subjectSelector\": []"));
     }
 
     #[test]

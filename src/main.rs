@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod install;
 mod maintenance;
 #[allow(dead_code)]
 mod outbound_compare;

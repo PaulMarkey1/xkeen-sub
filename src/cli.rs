@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{config, maintenance, setup};
+use crate::{config, install, maintenance, setup};
 use crate::config::ValidationMode;
 use crate::terminal::{command_item, title, separator};
 
@@ -37,6 +37,8 @@ pub fn run() -> AppResult<()> {
             };
             config::set_validation(mode)
         }
+        // Internal command used by install.sh before replacing the installed binary.
+        [action] if action == "install-check" => install::ensure_observatory(),
         [action] if action == "uxs" => maintenance::update(),
         [action] if action == "reinstall" => maintenance::reinstall(),
         [action] if action == "uninstall" => maintenance::uninstall(),

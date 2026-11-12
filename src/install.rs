@@ -12,7 +12,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const XRAY_CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const OBSERVATORY_FILE: &str = "observatory.json";
 const OBSERVATORY_TEMPLATE: &str =
-    "\n  \"observatory\": {\n    \"subjectSelector\": []\n  }";
+    "\n  \"observatory\": {\n    \"subjectSelector\": [],\n    \"probeUrl\": \"https://www.google.com/generate_204\",\n    \"probeInterval\": \"60s\",\n    \"enableConcurrency\": true\n  }";
 
 /// Called by install.sh after the shell installer has verified XKeen, Xray,
 /// and the required Xray directories. Reads every JSON/JSONC file in the
@@ -244,7 +244,7 @@ mod tests {
         let original = "{\n  \"log\": { \"loglevel\": \"warning\" }\n}\n";
         let parsed: Value = json5::from_str(original).unwrap();
         let updated = insert_observatory_at_root(original, &parsed).unwrap();
-        let expected = "{\n  \"observatory\": {\n    \"subjectSelector\": []\n  },\n  \"log\": { \"loglevel\": \"warning\" }\n}\n";
+        let expected = "{\n  \"observatory\": {\n    \"subjectSelector\": [],\n    \"probeUrl\": \"https://www.google.com/generate_204\",\n    \"probeInterval\": \"60s\",\n    \"enableConcurrency\": true\n  },\n  \"log\": { \"loglevel\": \"warning\" }\n}\n";
         assert_eq!(updated, expected);
         let _: Value = json5::from_str(&updated).unwrap();
     }

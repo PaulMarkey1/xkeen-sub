@@ -233,7 +233,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         return;
     }
 
-    let outbounds = match extract_outbounds(&downloaded) {
+    let outbounds: Vec<Value> = match extract_outbounds(&downloaded) {
         Ok(items) => items.into_iter().map(|mut item| {
             let tag = format!("{}{}", subscription.prefix, item.tag);
             if let Some(object) = item.outbound.as_object_mut() {

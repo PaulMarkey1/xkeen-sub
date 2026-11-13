@@ -282,6 +282,7 @@ mod tests {
             prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
 
         assert_eq!(result.case, BalancerCase::OneExistingBalancer);
+        assert_eq!(result.tag, "user-balancer");
         assert!(!result.created);
         assert!(result.updated_existing);
         assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 1);

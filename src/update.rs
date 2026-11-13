@@ -33,7 +33,6 @@ struct PreparedSubscription {
     id: String,
     original: Vec<u8>,
     baseline: PathBuf,
-    report: ComparisonReport,
     outbounds: Vec<Value>,
 }
 
@@ -237,7 +236,6 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         id: subscription.id.clone(),
         original: downloaded,
         baseline,
-        report,
         outbounds,
     });
 }
@@ -446,7 +444,13 @@ fn validate_all(
     }).collect();
     test_config_set_detailed(&inputs).map(|_| ()).map_err(|err| match err {
         crate::xray_test::XrayTestError::Process(failure) => {
-            format!("Xray config test: {}{}", failure, if failure.combined_diagnostics().is_empty() { String::new() } else { format!("\n{}", failure.combined_diagnostics()) })
+            let code = failure.exit_code.map(|value| value.to_string()).unwrap_or_else(|| failure.process_status.clone());
+            let details = failure.combined_diagnostics();
+            if details.is_empty() {
+                format!("Xray config test завершился с ошибкой (код {code}).")
+            } else {
+                format!("Xray config test завершился с ошибкой (код {code}):\\n{details}")
+            }
         }
         other => format!("Xray config test: {other}"),
     })

@@ -57,6 +57,7 @@ pub fn prepare_balancers(
 
     let mut created = false;
     let mut updated_existing = false;
+    let mut effective_tag = PROGRAM_BALANCER_TAG.to_owned();
 
     match case {
         BalancerCase::NoExistingBalancers => {
@@ -92,6 +93,11 @@ pub fn prepare_balancers(
                 if selector.is_some() && working_tags.iter().all(|tag| selector_tags.contains(tag)) {
                     // Extra selector entries are allowed; the complete selector
                     // is replaced with the final outbound list.
+                    effective_tag = balancers[0]
+                        .get("tag")
+                        .and_then(Value::as_str)
+                        .ok_or("У существующего балансировщика отсутствует строковый tag.")?
+                        .to_owned();
                     set_selector(&mut balancers[0], final_tags)?;
                     updated_existing = true;
                 } else {
@@ -115,7 +121,7 @@ pub fn prepare_balancers(
     routing.insert("balancers".to_owned(), Value::Array(balancers));
     Ok(BalancerPreparation {
         case,
-        tag: PROGRAM_BALANCER_TAG.to_owned(),
+        tag: effective_tag,
         created,
         updated_existing,
         transformed_rules: 0,

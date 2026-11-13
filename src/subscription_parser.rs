@@ -309,7 +309,9 @@ fn stream_settings(
 }
 
 fn make_tag(fragment: &str, host: &str, port: u16) -> String {
-    let decoded = fragment.replace("%20", " ").replace('+', " ");
+    let encoded = format!("name={fragment}");
+    let decoded = url::form_urlencoded::parse(encoded.as_bytes())
+        .next().map(|(_, value)| value.into_owned()).unwrap_or_default();
     let cleaned: String = decoded.chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' ))
         .collect();
@@ -397,6 +399,15 @@ mod tests {
         let encoded = STANDARD.encode(links);
         let parsed = parse_subscription(encoded.as_bytes()).unwrap();
         assert_eq!(parsed.outbounds.len(), 1);
+    }
+
+    #[test]
+    fn decodes_url_safe_base64_subscription_body() {
+        let links = b"vless://uuid@example.com:443#Node";
+        let encoded = URL_SAFE_NO_PAD.encode(links);
+        let parsed = parse_subscription(encoded.as_bytes()).unwrap();
+        assert_eq!(parsed.outbounds.len(), 1);
+        assert_eq!(parsed.outbounds[0]["tag"], "Node");
     }
 
     #[test]

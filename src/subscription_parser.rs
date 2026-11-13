@@ -192,7 +192,8 @@ fn parse_vmess(raw: &str) -> Result<Value, String> {
         return Err("VMess: отсутствует сервер или UUID".to_owned());
     }
     let port = number_field(&data, "port").unwrap_or(443);
-    let network = default(&string_field(&data, "net"), "tcp");
+    let network_value = string_field(&data, "net");
+    let network = default(&network_value, "tcp");
     if !["tcp", "raw", "ws", "grpc"].contains(&network) {
         return Err(format!("VMess: неподдерживаемый транспорт {network}"));
     }

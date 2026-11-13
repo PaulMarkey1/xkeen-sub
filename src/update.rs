@@ -192,7 +192,7 @@ fn format_elapsed(duration: Duration) -> String {
     parts.join(" ")
 }
 
-fn russian_plural(value: u64, one: &str, few: &str, many: &str) -> &'static str {
+fn russian_plural(value: u64, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
     let last_two = value % 100;
     let last = value % 10;
     if (11..=14).contains(&last_two) {

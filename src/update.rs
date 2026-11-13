@@ -500,8 +500,7 @@ fn print_prepared_documents(docs: &[ConfigDocument]) {
     title("ПОДГОТОВЛЕННЫЕ ДОКУМЕНТЫ (В ПАМЯТИ)");
     for doc in docs {
         let text = serde_json::to_string_pretty(&doc.value).unwrap_or_else(|_| doc.original.clone());
-        title(&format!("{} — {} байт", doc.file_name, text.len()));
-        println!("{text}");
+        info(&format!("{} — {} байт подготовлено.", doc.file_name, text.len()));
     }
 }
 

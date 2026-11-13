@@ -111,6 +111,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let (final_outbounds, replacements, conflicts) =
         merge_outbounds(&working, &store.subscriptions, &updated_groups, &mut archive)?;
     let tags = collect_tags(&final_outbounds)?;
+    print_json_section("ИТОГОВЫЙ OUTBOUND", &Value::Array(final_outbounds.clone()));
 
     let mut outbound_doc = docs[outbound_index].value.clone();
     outbound_doc.as_object_mut()

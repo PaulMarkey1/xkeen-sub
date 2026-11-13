@@ -402,6 +402,7 @@ mod tests {
 
         assert_eq!(result.case, BalancerCase::MultipleExistingBalancers);
         assert!(result.created);
+        assert_eq!(result.user_balancer_tags, vec!["user-a", "user-b"]);
         assert_eq!(config["routing"]["balancers"][0], before[0]);
         assert_eq!(config["routing"]["balancers"][1], before[1]);
         assert_eq!(config["routing"]["rules"][0]["outboundTag"], "direct");

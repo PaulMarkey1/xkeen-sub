@@ -15,6 +15,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -49,6 +50,14 @@ struct RunState {
 /// proposed documents in memory, validates them and prints the complete plan.
 /// No active configuration, archive or baseline file is written.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
+    let started_at = Instant::now();
+    let result = run_inner(target_id);
+    println!();
+    info(&format!("Время выполнения: {}.", format_elapsed(started_at.elapsed())));
+    result
+}
+
+fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     println!();
     title("XKEEN-SUB — КОНТРОЛЬНЫЙ ЗАПУСК UPDATE");
     warning("Рабочие файлы, архив и baseline не изменяются.");
@@ -148,12 +157,12 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     title("КОНТРОЛЬНЫЙ ЗАПУСК ЗАВЕРШЁН");
     warning("Ничего не применялось. Рабочие конфигурации, архив и baseline не изменены.");
     if balancer.created {
-        warning(&format!(
-            "После успешного применения будет выведено уведомление: балансировщик не был найден; создан балансировщик с Tag {}.",
+        success(&format!(
+            "Подготовлено создание отдельного балансировщика программы с Tag {}.",
             PROGRAM_BALANCER_TAG
         ));
         if balancer.case != BalancerCase::NoExistingBalancers {
-            warning("Для дополнительного балансировщика routing rule потребуется настроить самостоятельно.");
+            warning("Для нового балансировщика routing rule потребуется настроить самостоятельно; существующие пользовательские балансировщики и их правила не изменялись.");
         }
     }
     if validation.is_err() && mode == ValidationMode::On {
@@ -162,6 +171,66 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
         success("План обновления подготовлен.");
     }
     Ok(())
+}
+
+fn format_elapsed(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    let mut parts = Vec::new();
+    if hours > 0 {
+        parts.push(format!("{hours} {}", russian_plural(hours, "час", "часа", "часов")));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes} {}", russian_plural(minutes, "минута", "минуты", "минут")));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{seconds} {}", russian_plural(seconds, "секунда", "секунды", "секунд")));
+    }
+    parts.join(" ")
+}
+
+fn russian_plural(value: u64, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    let last_two = value % 100;
+    let last = value % 10;
+    if (11..=14).contains(&last_two) {
+        // The returned literals have static lifetime.
+        many
+    } else {
+        match last {
+            1 => one,
+            2..=4 => few,
+            _ => many,
+        }
+    }
+}
+
+#[cfg(test)]
+mod elapsed_time_tests {
+    use super::format_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn formats_only_non_zero_units() {
+        assert_eq!(format_elapsed(Duration::from_secs(5)), "5 секунд");
+        assert_eq!(format_elapsed(Duration::from_secs(65)), "1 минута 5 секунд");
+        assert_eq!(format_elapsed(Duration::from_secs(3600)), "1 час");
+        assert_eq!(format_elapsed(Duration::from_secs(3661)), "1 час 1 минута 1 секунда");
+    }
+
+    #[test]
+    fn formats_russian_plural_forms() {
+        assert_eq!(format_elapsed(Duration::from_secs(2)), "2 секунды");
+        assert_eq!(format_elapsed(Duration::from_secs(11)), "11 секунд");
+        assert_eq!(format_elapsed(Duration::from_secs(21)), "21 секунда");
+    }
+
+    #[test]
+    fn zero_duration_still_shows_seconds() {
+        assert_eq!(format_elapsed(Duration::ZERO), "0 секунд");
+    }
 }
 
 fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
@@ -427,8 +496,8 @@ fn print_updated_outbound(prepared: &[PreparedSubscription]) {
 }
 
 fn print_json_section(label: &str, value: &Value) {
-    title(label);
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
+    let count = value.as_array().map(Vec::len).unwrap_or(0);
+    info(&format!("{label}: {count} элементов подготовлено; содержимое скрыто."));
 }
 
 fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &ArchivePlan) {
@@ -440,8 +509,7 @@ fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &
     for item in conflicts { warning(item); }
     info(&format!("Будет добавлено в архив: {}. Путь: {}.", archive.added, USER_ARCHIVE));
     if archive.added > 0 {
-        title("ПРЕДВАРИТЕЛЬНОЕ СОДЕРЖИМОЕ АРХИВА");
-        println!("{}", serde_json::to_string_pretty(&archive.outbounds).unwrap_or_default());
+        info(&format!("В архив подготовлено {} подключений; содержимое скрыто.", archive.added));
     }
 }
 
@@ -455,10 +523,19 @@ fn print_configuration_summary(
     info(&format!("Outbound: {}", docs[outbound_index].path.display()));
     info(&format!("Routing: {}", docs[routing_index].path.display()));
     for item in obs { success(&format!("subjectSelector обновлён: {} ({})", item.file_name, item.object_name)); }
+    if balancer.user_balancer_tags.is_empty() {
+        info("Пользовательские балансировщики не обнаружены.");
+    } else {
+        info(&format!(
+            "Обнаружены пользовательские балансировщики ({}): {}.",
+            balancer.user_balancer_tags.len(),
+            balancer.user_balancer_tags.join(", ")
+        ));
+    }
     match balancer.case {
-        BalancerCase::NoExistingBalancers => warning("Существующие балансировщики не найдены."),
-        BalancerCase::OneExistingBalancer => info("Найден один существующий балансировщик."),
-        BalancerCase::MultipleExistingBalancers => info("Найдено несколько существующих балансировщиков."),
+        BalancerCase::NoExistingBalancers => info("Существующих балансировщиков нет."),
+        BalancerCase::OneExistingBalancer => info("Обнаружен один существующий балансировщик."),
+        BalancerCase::MultipleExistingBalancers => info("Обнаружено несколько существующих балансировщиков."),
     }
     if balancer.created { success(&format!("Подготовлено создание {}.", balancer.tag)); }
     if balancer.updated_existing { success(&format!("Обновлён selector балансировщика {}.", balancer.tag)); }
@@ -499,9 +576,8 @@ fn print_prepared_documents(docs: &[ConfigDocument]) {
     println!();
     title("ПОДГОТОВЛЕННЫЕ ДОКУМЕНТЫ (В ПАМЯТИ)");
     for doc in docs {
-        let text = serde_json::to_string_pretty(&doc.value).unwrap_or_else(|_| doc.original.clone());
-        title(&format!("{} — {} байт", doc.file_name, text.len()));
-        println!("{text}");
+        let text = serde_json::to_string(&doc.value).unwrap_or_else(|_| doc.original.clone());
+        info(&format!("{} — {} байт подготовлено.", doc.file_name, text.len()));
     }
 }
 

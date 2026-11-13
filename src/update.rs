@@ -614,4 +614,79 @@ mod tests {
         assert_eq!(archive.outbounds[1]["tag"], "custom--1");
         assert!(!outbound_parameters_equal(&archive.outbounds[0], &archive.outbounds[1]));
     }
+
+    #[test]
+    fn replaces_only_changed_subscription_group_and_archives_exact_user_match() {
+        use std::collections::BTreeMap;
+        use crate::subscriptions::Subscription;
+        use super::merge_outbounds;
+
+        let subscription = Subscription {
+            id: "sub1".to_owned(),
+            name: Some("Germany".to_owned()),
+            url: "https://example.com/sub".to_owned(),
+            prefix: "sub1--Germany--".to_owned(),
+        };
+        let working = vec![
+            json!({"tag":"sub1--Germany--old","protocol":"vless"}),
+            json!({"tag":"sub2--Japan--keep","protocol":"vless"}),
+            json!({"tag":"same-name","protocol":"vless","settings":{"id":"same"}}),
+        ];
+        let updated = BTreeMap::from([(
+            1,
+            vec![
+                json!({"tag":"sub1--Germany--new","protocol":"vless"}),
+                json!({"tag":"sub1--Germany--same-name","protocol":"vless","settings":{"id":"same"}}),
+            ],
+        )]);
+        let mut archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let (final_outbounds, replacements, conflicts) =
+            merge_outbounds(&working, &[subscription], &updated, &mut archive).unwrap();
+
+        let tags: Vec<&str> = final_outbounds.iter()
+            .map(|item| item["tag"].as_str().unwrap()).collect();
+        assert_eq!(tags, vec![
+            "sub1--Germany--new",
+            "sub1--Germany--same-name",
+            "sub2--Japan--keep",
+        ]);
+        assert_eq!(replacements.len(), 1);
+        assert!(conflicts.is_empty());
+        assert_eq!(archive.added, 1);
+        assert_eq!(archive.outbounds[0]["tag"], "same-name");
+    }
+
+    #[test]
+    fn keeps_user_connection_when_matching_subscription_parameters_differ() {
+        use std::collections::BTreeMap;
+        use crate::subscriptions::Subscription;
+        use super::merge_outbounds;
+
+        let subscription = Subscription {
+            id: "sub1".to_owned(),
+            name: None,
+            url: "https://example.com/sub".to_owned(),
+            prefix: "sub1--".to_owned(),
+        };
+        let working = vec![
+            json!({"tag":"sub1--old","protocol":"vless"}),
+            json!({"tag":"node","protocol":"vless","settings":{"id":"user"}}),
+        ];
+        let updated = BTreeMap::from([(
+            1,
+            vec![json!({"tag":"sub1--node","protocol":"vless","settings":{"id":"subscription"}})],
+        )]);
+        let mut archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let (final_outbounds, replacements, conflicts) =
+            merge_outbounds(&working, &[subscription], &updated, &mut archive).unwrap();
+
+        let tags: Vec<&str> = final_outbounds.iter()
+            .map(|item| item["tag"].as_str().unwrap()).collect();
+        assert_eq!(tags, vec!["sub1--node", "node"]);
+        assert!(replacements.is_empty());
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(archive.added, 0);
+    }
 }

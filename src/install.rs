@@ -192,7 +192,8 @@ fn insert_observatory_at_root(existing: &str, document: &Value) -> AppResult<Str
     let mut updated = String::with_capacity(existing.len() + OBSERVATORY_TEMPLATE.len() + 2);
     updated.push_str(&existing[..after_open]);
     updated.push_str(OBSERVATORY_TEMPLATE);
-    updated.push_str(",\n");
+    updated.push_str(",");
+    updated.push_str(&remainder[..offset]);
     updated.push_str(&existing[insertion_point..]);
     Ok(updated)
 }

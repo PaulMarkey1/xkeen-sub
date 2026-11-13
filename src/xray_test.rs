@@ -1,19 +1,15 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::terminal::success;
-
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
-const ACTIVE_OUTBOUND: &str = "04_outbounds.json";
 const DEFAULT_XRAY_BIN: &str = "/opt/sbin/xray";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,78 +174,6 @@ pub fn test_config_set_detailed(
     Ok(XrayTestOutput { stdout, stderr })
 }
 
-/// Reads the active configuration files and substitutes only the Outbound
-/// document in the in-memory list before running the isolated Xray test.
-pub fn test_outbounds_detailed(
-    outbounds_json: &str,
-) -> Result<XrayTestOutput, XrayTestError> {
-    let config_dir = Path::new(CONFIG_DIR);
-    if !config_dir.is_dir() {
-        return Err(XrayTestError::Setup(format!(
-            "Каталог конфигурации Xray не найден: {}",
-            config_dir.display()
-        )));
-    }
-
-    let mut configs = Vec::new();
-    let entries = fs::read_dir(config_dir)
-        .map_err(|error| XrayTestError::Setup(error.to_string()))?;
-
-    for entry in entries {
-        let entry = entry.map_err(|error| XrayTestError::Setup(error.to_string()))?;
-        let path = entry.path();
-        if !path.is_file() || !is_json_config(&path) {
-            continue;
-        }
-
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned();
-
-        if file_name == ACTIVE_OUTBOUND {
-            configs.push(XrayConfigInput::new(ACTIVE_OUTBOUND, outbounds_json));
-        } else {
-            let content = fs::read_to_string(&path).map_err(|error| {
-                XrayTestError::Setup(format!(
-                    "Не удалось прочитать конфигурацию {}: {error}",
-                    path.display()
-                ))
-            })?;
-            configs.push(XrayConfigInput::new(file_name, content));
-        }
-    }
-
-    if !configs.iter().any(|config| config.file_name == ACTIVE_OUTBOUND) {
-        configs.push(XrayConfigInput::new(ACTIVE_OUTBOUND, outbounds_json));
-    }
-
-    test_config_set_detailed(&configs)
-}
-
-/// Backwards-compatible wrapper for callers that only need success/failure.
-pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
-    println!("Проверка конфигурации Xray...");
-    println!("Активные файлы открываются только для чтения.");
-    println!("Временные копии создаются вне каталога активной конфигурации.");
-
-    match test_outbounds_detailed(outbounds_json) {
-        Ok(output) => {
-            io::stdout().write_all(output.stdout.as_bytes())?;
-            io::stderr().write_all(output.stderr.as_bytes())?;
-            success("Проверка конфигурации Xray завершена успешно.");
-            Ok(())
-        }
-        Err(XrayTestError::Process(failure)) => {
-            io::stdout().write_all(failure.stdout.as_bytes())?;
-            io::stderr().write_all(failure.stderr.as_bytes())?;
-            Err(XrayTestError::Process(failure).into())
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
 fn safe_file_name(value: &str) -> Option<&str> {
     let path = Path::new(value);
     if path.components().count() != 1 || path.file_name()?.to_str()? != value {
@@ -259,13 +183,6 @@ fn safe_file_name(value: &str) -> Option<&str> {
         Some("json" | "jsonc") => Some(value),
         _ => None,
     }
-}
-
-fn is_json_config(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("json" | "jsonc")
-    )
 }
 
 struct TemporaryResources {
@@ -299,20 +216,7 @@ impl Drop for TemporaryResources {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_json_config, safe_file_name, XrayProcessFailure};
-    use std::path::Path;
-
-    #[test]
-    fn recognizes_json_and_jsonc_configuration_files() {
-        assert!(is_json_config(Path::new("/etc/xray/inbounds.json")));
-        assert!(is_json_config(Path::new("/etc/xray/custom.jsonc")));
-    }
-
-    #[test]
-    fn ignores_other_file_extensions() {
-        assert!(!is_json_config(Path::new("/etc/xray/README.md")));
-        assert!(!is_json_config(Path::new("/etc/xray/config.yaml")));
-    }
+    use super::{safe_file_name, XrayProcessFailure};
 
     #[test]
     fn rejects_paths_and_unsupported_extensions() {

@@ -8,7 +8,7 @@ use std::path::Path;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-const USER_ARCHIVE: &str = "/opt/etc/xkeen-sub/old-user-outbound.json";
+pub(crate) const USER_ARCHIVE: &str = "/opt/etc/xkeen-sub/old-user-outbound.json";
 
 pub(crate) struct ArchivePlan {
     pub(crate) outbounds: Vec<Value>,

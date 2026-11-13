@@ -2,7 +2,7 @@ use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROG
 use crate::config::{self, ValidationMode};
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::outbound_compare::{compare_subscription, extract_outbounds, ComparisonReport};
-use crate::update_merge::{collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan};
+use crate::update_merge::{collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan, USER_ARCHIVE};
 use crate::subscription_download::download_subscription;
 use crate::subscriptions::{load_subscriptions, Subscription};
 use crate::terminal::{error, info, success, title, warning};

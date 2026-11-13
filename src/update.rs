@@ -579,7 +579,7 @@ fn command_exists(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_outbound, subscription_number, ArchivePlan};
+    use super::{archive_outbound, subscription_id_number, subscription_number, ArchivePlan};
     use crate::outbound_compare::outbound_parameters_equal;
     use serde_json::json;
 

@@ -209,6 +209,17 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     };
     print_comparison(&report);
 
+    if report.unrecognized_current > 0 {
+        let message = format!(
+            "В новой загрузке {} нераспознанных элементов. Безопасное сопоставление частично распознанной подписки ещё не реализовано.",
+            report.unrecognized_current
+        );
+        state.failed.push((subscription.id.clone(), message.clone()));
+        warning(&message);
+        warning("Группа подписки оставлена из Рабочего Outbound, чтобы не потерять существующие подключения.");
+        return;
+    }
+
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;

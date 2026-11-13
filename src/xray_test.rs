@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;

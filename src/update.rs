@@ -41,6 +41,7 @@ struct RunState {
     prepared: Vec<PreparedSubscription>,
     failed: Vec<(String, String)>,
     downloaded: usize,
+    processed: usize,
 }
 
 struct ArchivePlan {
@@ -63,12 +64,13 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
         return Ok(());
     }
 
-    let selected: Vec<&Subscription> = match target_id {
+    let mut selected: Vec<&Subscription> = match target_id {
         Some(id) => vec![store.subscriptions.iter()
             .find(|item| item.id == id)
             .ok_or_else(|| format!("Подписка {id} не найдена."))?],
         None => store.subscriptions.iter().collect(),
     };
+    selected.sort_by_key(|item| subscription_id_number(&item.id).unwrap_or(u64::MAX));
 
     let mut docs = load_config_documents()?;
     let outbound_index = find_doc(&docs, OUTBOUND_FILE)
@@ -100,6 +102,11 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
         }
         print_subscription_summary(&state);
         warning("Подготовка конфигурации прекращена. Рабочие файлы не изменены.");
+        return Ok(());
+    }
+    if state.processed == 0 {
+        print_subscription_summary(&state);
+        warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
         return Ok(());
     }
 
@@ -209,6 +216,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
 
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
+        state.processed += 1;
         success("Изменений среди распознанных подключений нет. Рабочая группа сохранится.");
         if report.unrecognized_current > 0 {
             warning("Нераспознанные элементы новой загрузки не будут добавлены в Outbound.");
@@ -231,6 +239,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
+    state.processed += 1;
     success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));
     state.prepared.push(PreparedSubscription {
         id: subscription.id.clone(),
@@ -483,6 +492,7 @@ fn print_subscription_summary(state: &RunState) {
     println!();
     title("ОТЧЁТ ПО ПОДПИСКАМ");
     info(&format!("Успешно загружено: {}", state.downloaded));
+    info(&format!("Успешно обработано: {}", state.processed));
     info(&format!("Подписок с изменениями: {}", state.prepared.len()));
     info(&format!("Ошибок: {}", state.failed.len()));
     for (id, message) in &state.failed { error(&format!("  {id}: {message}")); }

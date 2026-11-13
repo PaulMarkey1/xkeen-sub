@@ -180,9 +180,11 @@ fn safe_file_name(value: &str) -> Option<&str> {
     if path.components().count() != 1 || path.file_name()?.to_str()? != value {
         return None;
     }
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("json" | "jsonc") => Some(value),
-        _ => None,
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("json") || extension.eq_ignore_ascii_case("jsonc") {
+        Some(value)
+    } else {
+        None
     }
 }
 

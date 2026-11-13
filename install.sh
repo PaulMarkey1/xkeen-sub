@@ -4,11 +4,41 @@ set -eu
 REPO="PaulMarkey1/xkeen-sub"
 BIN_NAME="xkeen-sub"
 DEST="/opt/sbin/${BIN_NAME}"
+XRAY_BIN="${XRAY_BIN:-/opt/sbin/xray}"
+XRAY_CONFIG_DIR="/opt/etc/xray/configs"
+XRAY_ASSET_DIR="/opt/etc/xray/dat"
+
+RED='\033[31m'
+CYAN='\033[36m'
+RESET='\033[0m'
 
 fail() {
-    echo "Ошибка: $*" >&2
+    printf '%b%s%b\n' "$RED" "$*" "$RESET" >&2
     exit 1
 }
+
+# Check prerequisites before downloading or replacing xkeen-sub.
+if ! command -v xkeen >/dev/null 2>&1; then
+    printf '%b%s%b\n' "$RED" "XKeen — отсутствует." "$RESET" >&2
+    printf '%b%s%b\n' "$RED" "Установите XKeen, после чего запустите установку xkeen-sub повторно." "$RESET" >&2
+    exit 1
+fi
+
+if [ ! -x "$XRAY_BIN" ]; then
+    printf '%b%s%b\n' "$RED" "Xray — не найден." "$RESET" >&2
+    printf '%b%s' "$RED" "Переустановите Xray с помощью команды " >&2
+    printf '%b%s%b' "$CYAN" "xkeen -ux" "$RESET" >&2
+    printf '%b%s%b\n' "$RED" "." "$RESET" >&2
+    exit 1
+fi
+
+if [ ! -d "$XRAY_CONFIG_DIR" ]; then
+    fail "Каталог конфигурации Xray не найден: $XRAY_CONFIG_DIR"
+fi
+
+if [ ! -d "$XRAY_ASSET_DIR" ]; then
+    fail "Каталог данных Xray не найден: $XRAY_ASSET_DIR"
+fi
 
 # Entware architecture is preferred over uname -m because it reflects the ABI.
 ENTWARE_ARCH=""
@@ -38,7 +68,8 @@ case "$ENTWARE_ARCH" in
         esac
         ;;
     *)
-        fail "Архитектура Entware не поддерживается: $ENTWARE_ARCH (uname: $UNAME_ARCH)." ;;
+        fail "Архитектура Entware не поддерживается: $ENTWARE_ARCH (uname: $UNAME_ARCH)."
+        ;;
 esac
 
 URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
@@ -65,6 +96,10 @@ cp "$TMP_FILE" "$TMP_BIN"
 chmod 755 "$TMP_BIN"
 
 "$TMP_BIN" --help >/dev/null 2>&1 || fail "Проверка запуска бинарного файла завершилась ошибкой. Текущая установка не заменена."
+
+# Inspect every JSON/JSONC file and create the Observatory placeholder only
+# after the prerequisite checks above have succeeded.
+"$TMP_BIN" install-check || fail "Проверка конфигурации Observatory не пройдена. Установка xkeen-sub отменена."
 
 VERSION="$("$TMP_BIN" --version 2>/dev/null)" || VERSION=""
 case "$VERSION" in

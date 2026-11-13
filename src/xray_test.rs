@@ -1,181 +1,247 @@
 use std::error::Error;
-use std::ffi::OsStr;
+use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::terminal::{info, success};
-
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
-const ACTIVE_OUTBOUND: &str = "04_outbounds.json";
 const DEFAULT_XRAY_BIN: &str = "/opt/sbin/xray";
 
-/// Checks a prepared Outbound document together with the other active Xray
-/// configuration files, without loading the currently active Outbound file
-/// and without starting the Xray server.
-///
-/// Xray is the authority for protocol and parameter compatibility. This module
-/// must not add stricter project-specific checks for values such as UUIDs.
-pub fn test_outbounds(outbounds_json: &str) -> AppResult<()> {
-    let config_dir = Path::new(CONFIG_DIR);
-    let asset_dir = Path::new(ASSET_DIR);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrayConfigInput {
+    pub file_name: String,
+    pub content: String,
+}
 
-    if !config_dir.is_dir() {
-        return Err(format!("Каталог конфигурации Xray не найден: {}", config_dir.display()).into());
+impl XrayConfigInput {
+    pub fn new(file_name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            file_name: file_name.into(),
+            content: content.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrayProcessFailure {
+    pub exit_code: Option<i32>,
+    pub process_status: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl XrayProcessFailure {
+    pub fn combined_diagnostics(&self) -> String {
+        match (self.stdout.trim(), self.stderr.trim()) {
+            ("", "") => String::new(),
+            ("", stderr) => stderr.to_owned(),
+            (stdout, "") => stdout.to_owned(),
+            (stdout, stderr) => format!("{stdout}\n{stderr}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrayTestOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug)]
+pub enum XrayTestError {
+    Setup(String),
+    Process(XrayProcessFailure),
+}
+
+impl fmt::Display for XrayTestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Setup(message) => formatter.write_str(message),
+            Self::Process(failure) => write!(
+                formatter,
+                "Проверка Xray завершилась ошибкой (код процесса: {}).",
+                failure
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| failure.process_status.clone())
+            ),
+        }
+    }
+}
+
+impl Error for XrayTestError {}
+
+/// Validates a complete prepared configuration set using temporary copies.
+/// The active XKeen/Xray configuration directory is read-only throughout
+/// this operation; all generated files are placed under the OS temp directory.
+pub fn test_config_set_detailed(
+    configs: &[XrayConfigInput],
+) -> Result<XrayTestOutput, XrayTestError> {
+    let asset_dir = Path::new(ASSET_DIR);
+    if !Path::new(CONFIG_DIR).is_dir() {
+        return Err(XrayTestError::Setup(format!(
+            "Каталог конфигурации Xray не найден: {}",
+            CONFIG_DIR
+        )));
     }
     if !asset_dir.is_dir() {
-        return Err(format!("Каталог данных Xray не найден: {}", asset_dir.display()).into());
+        return Err(XrayTestError::Setup(format!(
+            "Каталог данных Xray не найден: {}",
+            asset_dir.display()
+        )));
+    }
+    if configs.is_empty() {
+        return Err(XrayTestError::Setup(
+            "Не переданы файлы для проверки конфигурации Xray.".to_owned(),
+        ));
     }
 
     let xray_bin = std::env::var_os("XRAY_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_XRAY_BIN));
 
-    let resources = TemporaryResources::create(config_dir)?;
-    fs::write(&resources.outbound_file, outbounds_json)
-        .map_err(|error| format!("Не удалось записать временный Outbound: {error}"))?;
+    let resources =
+        TemporaryResources::create().map_err(|error| XrayTestError::Setup(error.to_string()))?;
 
-    let mut json_configs = Vec::new();
-    let mut jsonc_configs = Vec::new();
-    for entry in fs::read_dir(config_dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let mut sorted: Vec<&XrayConfigInput> = configs.iter().collect();
+    sorted.sort_by(|left, right| left.file_name.cmp(&right.file_name));
 
-        // Match the shell globs used in the validated router-side test:
-        // hidden files are not part of the active configuration set.
-        if path.file_name().and_then(OsStr::to_str)
-            .map(|name| name.starts_with('.'))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if !path.is_file() || path.file_name() == Some(OsStr::new(ACTIVE_OUTBOUND)) {
-            continue;
-        }
-
-        match path.extension().and_then(OsStr::to_str) {
-            Some("json") => json_configs.push(path),
-            Some("jsonc") => jsonc_configs.push(path),
-            _ => {}
-        }
+    let mut config_paths = Vec::with_capacity(sorted.len());
+    for config in sorted {
+        let file_name = safe_file_name(&config.file_name).ok_or_else(|| {
+            XrayTestError::Setup(format!(
+                "Недопустимое имя конфигурационного файла: {}",
+                config.file_name
+            ))
+        })?;
+        let path = resources.directory.join(file_name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| {
+                XrayTestError::Setup(format!(
+                    "Не удалось создать временную копию {}: {error}",
+                    config.file_name
+                ))
+            })?;
+        file.write_all(config.content.as_bytes()).map_err(|error| {
+            XrayTestError::Setup(format!(
+                "Не удалось записать временную копию {}: {error}",
+                config.file_name
+            ))
+        })?;
+        config_paths.push(path);
     }
-
-    // Preserve the tested shell-glob order: *.json first, then *.jsonc.
-    json_configs.sort();
-    jsonc_configs.sort();
-    let mut config_files = json_configs;
-    config_files.extend(jsonc_configs);
-
-    info("Проверка конфигурации Xray...");
-    info("Действующий 04_outbounds.json исключён из проверки.");
-    info("Рабочий сервер Xray не запускается.");
 
     let mut command = Command::new(&xray_bin);
     command
         .arg("run")
         .arg("-test")
         .arg("-format=json")
-        .env("XRAY_LOCATION_CONFDIR", &resources.empty_conf_dir)
+        .env("XRAY_LOCATION_CONFDIR", &resources.directory)
         .env("XRAY_LOCATION_ASSET", asset_dir);
 
-    for path in &config_files {
+    for path in &config_paths {
         command.arg("-c").arg(path);
     }
-    // The candidate Outbound is always supplied last and is never written
-    // over the live 04_outbounds.json file.
-    command.arg("-c").arg(&resources.outbound_file);
 
     let output = command.output().map_err(|error| {
-        format!("Не удалось запустить проверку Xray ({}): {error}", xray_bin.display())
+        XrayTestError::Setup(format!(
+            "Не удалось запустить проверку Xray ({}): {error}",
+            xray_bin.display()
+        ))
     })?;
 
-    io::stdout().write_all(&output.stdout)?;
-    io::stderr().write_all(&output.stderr)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     if !output.status.success() {
-        return Err(format!(
-            "Проверка конфигурации Xray завершилась ошибкой (код: {}). Рабочая конфигурация не изменена.",
-            output.status
-        ).into());
+        return Err(XrayTestError::Process(XrayProcessFailure {
+            exit_code: output.status.code(),
+            process_status: output.status.to_string(),
+            stdout,
+            stderr,
+        }));
     }
 
-    success("Проверка конфигурации Xray завершена успешно.");
-    Ok(())
+    Ok(XrayTestOutput { stdout, stderr })
 }
 
-fn is_json_config(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(OsStr::to_str),
-        Some("json" | "jsonc")
-    )
+fn safe_file_name(value: &str) -> Option<&str> {
+    let path = Path::new(value);
+    if path.components().count() != 1 || path.file_name()?.to_str()? != value {
+        return None;
+    }
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("json") || extension.eq_ignore_ascii_case("jsonc") {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 struct TemporaryResources {
-    outbound_file: PathBuf,
-    empty_conf_dir: PathBuf,
+    directory: PathBuf,
 }
 
 impl TemporaryResources {
-    fn create(config_dir: &Path) -> AppResult<Self> {
+    fn create() -> AppResult<Self> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_nanos();
-        let suffix = format!("{}-{nonce}", std::process::id());
-        let outbound_file = config_dir.join(format!(".xkeen-sub-test-{suffix}.json"));
-        let empty_conf_dir = std::env::temp_dir().join(format!("xkeen-sub-confdir-{suffix}"));
-
-        fs::create_dir(&empty_conf_dir).map_err(|error| {
-            format!("Не удалось создать временный каталог Xray: {error}")
+        let directory = std::env::temp_dir().join(format!(
+            "xkeen-sub-xray-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).map_err(|error| {
+            format!(
+                "Не удалось создать временный каталог проверки Xray {}: {error}",
+                directory.display()
+            )
         })?;
-
-        let file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&outbound_file)
-        {
-            Ok(file) => file,
-            Err(error) => {
-                let _ = fs::remove_dir(&empty_conf_dir);
-                return Err(format!("Не удалось создать временный Outbound: {error}").into());
-            }
-        };
-
-        drop(file);
-        Ok(Self {
-            outbound_file,
-            empty_conf_dir,
-        })
+        Ok(Self { directory })
     }
 }
 
 impl Drop for TemporaryResources {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.outbound_file);
-        let _ = fs::remove_dir(&self.empty_conf_dir);
+        let _ = fs::remove_dir_all(&self.directory);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_json_config;
-    use std::path::Path;
+    use super::{safe_file_name, XrayProcessFailure};
 
     #[test]
-    fn recognizes_json_and_jsonc_configuration_files() {
-        assert!(is_json_config(Path::new("/etc/xray/inbounds.json")));
-        assert!(is_json_config(Path::new("/etc/xray/custom.jsonc")));
+    fn rejects_paths_and_unsupported_extensions() {
+        assert_eq!(safe_file_name("05_routing.json"), Some("05_routing.json"));
+        assert_eq!(safe_file_name("../05_routing.json"), None);
+        assert_eq!(safe_file_name("folder/file.json"), None);
+        assert_eq!(safe_file_name("file.yaml"), None);
     }
 
     #[test]
-    fn ignores_other_file_extensions() {
-        assert!(!is_json_config(Path::new("/etc/xray/README.md")));
-        assert!(!is_json_config(Path::new("/etc/xray/config.yaml")));
+    fn structured_failure_preserves_both_streams_and_exit_code() {
+        let failure = XrayProcessFailure {
+            exit_code: Some(23),
+            process_status: "exit status: 23".to_owned(),
+            stdout: "stdout diagnostic".to_owned(),
+            stderr: "stderr diagnostic".to_owned(),
+        };
+
+        assert_eq!(failure.exit_code, Some(23));
+        assert_eq!(
+            failure.combined_diagnostics(),
+            "stdout diagnostic\nstderr diagnostic"
+        );
     }
 }

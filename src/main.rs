@@ -1,14 +1,17 @@
+mod balancer;
 mod cli;
 mod config;
+mod install;
 mod maintenance;
-#[allow(dead_code)]
+mod observatory;
 mod outbound_compare;
 mod setup;
 mod subscriptions;
 mod subscription_download;
 mod terminal;
-#[allow(dead_code)]
 mod xray_test;
+mod update;
+mod update_merge;
 
 fn main() {
     if let Err(error) = cli::run() {

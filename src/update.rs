@@ -296,7 +296,7 @@ fn collect_api_tags(docs: &[ConfigDocument]) -> HashSet<String> {
 
 fn updated_groups(prepared: &[PreparedSubscription]) -> BTreeMap<u64, Vec<Value>> {
     prepared.iter().filter_map(|item| {
-        subscription_number(&item.id).map(|n| (n, item.outbounds.clone()))
+        subscription_id_number(&item.id).map(|n| (n, item.outbounds.clone()))
     }).collect()
 }
 
@@ -329,7 +329,7 @@ fn merge_outbounds(
         let user_tag = user.get("tag").and_then(Value::as_str).unwrap_or_default();
         let mut replaced = false;
         for subscription in subscriptions {
-            let Some(number) = subscription_number(&subscription.id) else { continue };
+            let Some(number) = subscription_id_number(&subscription.id) else { continue };
             if !updated.contains_key(&number) { continue; }
             if let Some(group) = groups.get(&number) {
                 for subscribed in group {
@@ -357,13 +357,21 @@ fn merge_outbounds(
     Ok((final_outbounds, replacements, conflicts))
 }
 
-fn subscription_number(tag: &str) -> Option<u64> {
-    let rest = tag.strip_prefix("sub")?;
-    let (number, suffix) = rest.split_once("--")?;
-    if number.is_empty() || suffix.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+fn subscription_id_number(id: &str) -> Option<u64> {
+    let number = id.strip_prefix("sub")?;
+    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     number.parse().ok()
+}
+
+fn subscription_number(tag: &str) -> Option<u64> {
+    let rest = tag.strip_prefix("sub")?;
+    let (number, suffix) = rest.split_once("--")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    subscription_id_number(&format!("sub{number}"))
 }
 
 fn load_archive() -> AppResult<ArchivePlan> {
@@ -578,6 +586,7 @@ mod tests {
     #[test]
     fn identifies_subscription_tags() {
         assert_eq!(subscription_number("sub1--Germany--node"), Some(1));
+        assert_eq!(subscription_id_number("sub20"), Some(20));
         assert_eq!(subscription_number("sub20--node"), Some(20));
         assert_eq!(subscription_number("custom"), None);
     }

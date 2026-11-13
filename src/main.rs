@@ -8,6 +8,7 @@ mod outbound_compare;
 mod setup;
 mod subscriptions;
 mod subscription_download;
+mod subscription_parser;
 mod terminal;
 mod xray_test;
 mod update;

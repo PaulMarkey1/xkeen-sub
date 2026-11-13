@@ -1,7 +1,8 @@
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
 use crate::config::{self, ValidationMode};
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
-use crate::outbound_compare::{compare_subscription, extract_outbounds, ComparisonReport};
+use crate::outbound_compare::{compare_subscription, ComparisonReport};
+use crate::subscription_parser::parse_subscription;
 use crate::update_merge::{collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan, USER_ARCHIVE};
 use crate::subscription_download::download_subscription;
 use crate::subscriptions::{load_subscriptions, Subscription};
@@ -201,52 +202,76 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
-    info("Сравнение с baseline...");
-    let report = match compare_subscription(previous.as_deref(), &downloaded) {
-        Ok(report) => report,
+    let current = match parse_subscription(&downloaded) {
+        Ok(parsed) => parsed,
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Ошибка обработки подписки: {err}"));
             return;
         }
     };
+
+    let previous_parsed = match previous.as_deref() {
+        Some(bytes) => match parse_subscription(bytes) {
+            Ok(parsed) => Some(parsed),
+            Err(err) => {
+                let message = format!("Не удалось разобрать предыдущий baseline: {err}");
+                state.failed.push((subscription.id.clone(), message.clone()));
+                error(&message);
+                return;
+            }
+        },
+        None => None,
+    };
+
+    let previous_json = previous_parsed.as_ref().map(|parsed| {
+        serde_json::to_vec(&serde_json::json!({"outbounds": parsed.outbounds}))
+            .unwrap_or_default()
+    });
+    let current_json = serde_json::to_vec(&serde_json::json!({"outbounds": current.outbounds})) 
+        .unwrap_or_default();
+
+    info("Разбор подключений и сравнение с baseline...");
+    let mut report = match compare_subscription(previous_json.as_deref(), &current_json) {
+        Ok(report) => report,
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&format!("Ошибка сравнения подписки: {err}"));
+            return;
+        }
+    };
+    report.unrecognized_current += current.unrecognized;
+    if let Some(previous) = &previous_parsed {
+        report.unrecognized_previous += previous.unrecognized;
+    }
     print_comparison(&report);
 
-    if report.unrecognized_current > 0 {
-        let message = format!(
-            "В новой загрузке {} нераспознанных элементов. Безопасное сопоставление частично распознанной подписки ещё не реализовано.",
-            report.unrecognized_current
-        );
-        state.failed.push((subscription.id.clone(), message.clone()));
-        warning(&message);
-        warning("Группа подписки оставлена из Рабочего Outbound, чтобы не потерять существующие подключения.");
-        return;
+    if current.unrecognized > 0 {
+        warning(&format!(
+            "Частично распознано: {} подключений пропущено. Ошибки разбора:",
+            current.unrecognized
+        ));
+        for detail in current.errors.iter().take(10) {
+            warning(&format!("  {detail}"));
+        }
+        warning("Распознанные подключения будут обработаны. Старые подключения без однозначного соответствия не добавляются.");
     }
 
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;
         success("Изменений среди распознанных подключений нет. Рабочая группа сохранится.");
-        if report.unrecognized_current > 0 {
-            warning("Нераспознанные элементы новой загрузки не будут добавлены в Outbound.");
-        }
         return;
     }
 
-    let outbounds: Vec<Value> = match extract_outbounds(&downloaded) {
-        Ok(items) => items.into_iter().map(|mut item| {
-            let tag = format!("{}{}", subscription.prefix, item.tag);
-            if let Some(object) = item.outbound.as_object_mut() {
-                object.insert("tag".to_owned(), Value::String(tag));
-            }
-            item.outbound
-        }).collect(),
-        Err(err) => {
-            state.failed.push((subscription.id.clone(), err.to_string()));
-            error(&format!("Не удалось сформировать группу: {err}"));
-            return;
+    let outbounds: Vec<Value> = current.outbounds.into_iter().map(|mut outbound| {
+        let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
+        let tag = format!("{}{}", subscription.prefix, original_tag);
+        if let Some(object) = outbound.as_object_mut() {
+            object.insert("tag".to_owned(), Value::String(tag));
         }
-    };
+        outbound
+    }).collect();
 
     state.processed += 1;
     success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));

@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{config, install, maintenance, setup};
+use crate::{config, install, maintenance, setup, update};
 use crate::config::ValidationMode;
 use crate::terminal::{command_item, title, separator};
 
@@ -27,6 +27,8 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run(),
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
+        [action] if action == "update" => update::run(None),
+        [action, target] if action == "update" => update::run(Some(target)),
         [action] if action == "validation" => config::show_validation(),
         [action, mode] if action == "validation" => {
             let mode = match mode.as_str() {
@@ -63,6 +65,9 @@ fn print_help() -> AppResult<()> {
     command_item("  del", "Удалить подписку");
     command_item("  edit", "Редактировать подписку");
     command_item("  help", "Справка по настройке");
+    println!();
+    command_item("update", "Контрольный запуск обновления всех подписок");
+    command_item("  subN", "Контрольный запуск одной подписки");
     println!();
     command_item("validation", "Показать режим проверки подключений");
     command_item("  on|off|alert", "Установить режим проверки");

@@ -382,7 +382,7 @@ mod tests {
     fn parses_trojan_shadowsocks_and_hysteria2() {
         let ss = STANDARD.encode("aes-128-gcm:secret");
         let body = format!(
-            "trojan://pass@trojan.example:443?sni=example.com#T\\nss://{ss}@ss.example:8388#S\\nhysteria2://auth@hy.example:443?sni=hy.example#H"
+            "trojan://pass@trojan.example:443?sni=example.com#T\nss://{ss}@ss.example:8388#S\nhysteria2://auth@hy.example:443?sni=hy.example#H"
         );
         let parsed = parse_subscription(body.as_bytes()).unwrap();
         assert_eq!(parsed.outbounds.len(), 3);
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn partial_parse_keeps_supported_entries_and_reports_failures() {
-        let body = b"vless://uuid@example.com:443#Good\\nunsupported://bad#Bad";
+        let body = b"vless://uuid@example.com:443#Good\nunsupported://bad#Bad";
         let parsed = parse_subscription(body).unwrap();
         assert_eq!(parsed.outbounds.len(), 1);
         assert_eq!(parsed.unrecognized, 1);

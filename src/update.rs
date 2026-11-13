@@ -392,6 +392,10 @@ fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &
     for item in replacements { success(item); }
     for item in conflicts { warning(item); }
     info(&format!("Будет добавлено в архив: {}. Путь: {}.", archive.added, USER_ARCHIVE));
+    if archive.added > 0 {
+        title("ПРЕДВАРИТЕЛЬНОЕ СОДЕРЖИМОЕ АРХИВА");
+        println!("{}", serde_json::to_string_pretty(&archive.outbounds).unwrap_or_default());
+    }
 }
 
 fn print_configuration_summary(

@@ -296,7 +296,13 @@ fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
 }
 
 fn is_json_config(path: &Path) -> bool {
-    matches!(path.extension().and_then(|e| e.to_str()), Some("json" | "jsonc"))
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            extension.eq_ignore_ascii_case("json")
+                || extension.eq_ignore_ascii_case("jsonc")
+        })
+        .unwrap_or(false)
 }
 
 fn find_doc(docs: &[ConfigDocument], name: &str) -> Option<usize> {

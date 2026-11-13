@@ -361,13 +361,13 @@ mod tests {
     #[test]
     fn parses_vless_reality_and_xhttp() {
         let parsed = parse_subscription(
-            b"vless://uuid@example.com:443?type=xhttp&security=reality&sni=site.test&pbk=pub&sid=01&spx=%2F#My%20Node"
+            b"vless://uuid@example.com:443?type=xhttp&security=reality&sni=site.test&pbk=pub&sid=01&spx=%2F&path=%2Fupload#My%20Node"
         ).unwrap();
         assert_eq!(parsed.outbounds.len(), 1);
         assert_eq!(parsed.outbounds[0]["protocol"], "vless");
         assert_eq!(parsed.outbounds[0]["tag"], "My Node");
         assert_eq!(parsed.outbounds[0]["streamSettings"]["security"], "reality");
-        assert_eq!(parsed.outbounds[0]["streamSettings"]["xhttpSettings"]["path"], "");
+        assert_eq!(parsed.outbounds[0]["streamSettings"]["xhttpSettings"]["path"], "/upload");
     }
 
     #[test]

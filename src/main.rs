@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod balancer;
 mod cli;
 mod config;

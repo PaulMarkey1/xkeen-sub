@@ -78,18 +78,18 @@ pub fn prepare_balancers(
                 set_selector(&mut balancers[index], final_tags)?;
                 updated_existing = true;
             } else {
-                let selector = balancers[0]
-                    .get("selector")
-                    .and_then(Value::as_array)
-                    .ok_or("У существующего балансировщика отсутствует массив selector.")?;
+                let selector = balancers[0].get("selector").and_then(Value::as_array);
                 let working_tags: HashSet<&str> = working_outbounds
                     .iter()
                     .filter_map(|outbound| outbound.get("tag").and_then(Value::as_str))
                     .collect();
-                let selector_tags: HashSet<&str> =
-                    selector.iter().filter_map(Value::as_str).collect();
+                let selector_tags: HashSet<&str> = selector
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
 
-                if working_tags.iter().all(|tag| selector_tags.contains(tag)) {
+                if selector.is_some() && working_tags.iter().all(|tag| selector_tags.contains(tag)) {
                     // Extra selector entries are allowed; the complete selector
                     // is replaced with the final outbound list.
                     set_selector(&mut balancers[0], final_tags)?;
@@ -146,10 +146,12 @@ fn redirect_rules_to_program_balancer(
     working_outbounds: &[Value],
     api_tags: &HashSet<String>,
 ) -> AppResult<usize> {
-    let rules = routing
-        .get_mut("rules")
-        .and_then(Value::as_array_mut)
-        .ok_or("В routing отсутствует массив rules.")?;
+    let Some(rules_value) = routing.get_mut("rules") else {
+        return Ok(0);
+    };
+    let rules = rules_value
+        .as_array_mut()
+        .ok_or("Поле routing.rules должно быть массивом.")?;
 
     let protocols: std::collections::HashMap<&str, &str> = working_outbounds
         .iter()

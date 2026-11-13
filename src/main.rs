@@ -12,6 +12,7 @@ mod subscription_download;
 mod terminal;
 mod xray_test;
 mod update;
+mod update_merge;
 
 fn main() {
     if let Err(error) = cli::run() {

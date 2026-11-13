@@ -84,7 +84,7 @@ fn find_observatory_objects(document: &Value) -> Vec<&'static str> {
         return Vec::new();
     };
 
-    ["observatory", "burstobservatory"]
+    ["observatory", "burstObservatory", "burstobservatory"]
         .into_iter()
         .filter(|key| {
             root.get(*key)

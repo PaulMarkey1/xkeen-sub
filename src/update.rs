@@ -459,18 +459,27 @@ fn validate_all(
         let content = serde_json::to_string_pretty(&doc.value).unwrap_or_else(|_| doc.original.clone());
         XrayConfigInput::new(doc.file_name.clone(), content)
     }).collect();
-    test_config_set_detailed(&inputs).map(|_| ()).map_err(|err| match err {
-        crate::xray_test::XrayTestError::Process(failure) => {
+    match test_config_set_detailed(&inputs) {
+        Ok(output) => {
+            if !output.stdout.trim().is_empty() {
+                println!("{}", output.stdout.trim_end());
+            }
+            if !output.stderr.trim().is_empty() {
+                eprintln!("{}", output.stderr.trim_end());
+            }
+            Ok(())
+        }
+        Err(crate::xray_test::XrayTestError::Process(failure)) => {
             let code = failure.exit_code.map(|value| value.to_string()).unwrap_or_else(|| failure.process_status.clone());
             let details = failure.combined_diagnostics();
             if details.is_empty() {
-                format!("Xray config test завершился с ошибкой (код {code}).")
+                Err(format!("Xray config test завершился с ошибкой (код {code})."))
             } else {
-                format!("Xray config test завершился с ошибкой (код {code}):\n{details}")
+                Err(format!("Xray config test завершился с ошибкой (код {code}):\\n{details}"))
             }
         }
-        other => format!("Xray config test: {other}"),
-    })
+        Err(other) => Err(format!("Xray config test: {other}")),
+    }
 }
 
 fn print_comparison(report: &ComparisonReport) {

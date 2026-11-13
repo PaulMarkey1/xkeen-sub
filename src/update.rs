@@ -136,7 +136,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     }
 
     let mode = config::load()?.validation;
-    let validation = validate_all(mode, &docs, &final_outbounds, &tags, &balancer);
+    let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
 
     print_subscription_summary(&state);
     print_merge_summary(&replacements, &conflicts, &archive);
@@ -437,13 +437,11 @@ fn collect_tags(outbounds: &[Value]) -> AppResult<Vec<String>> {
 }
 
 fn validate_all(
-    mode: ValidationMode,
     docs: &[ConfigDocument],
     outbounds: &[Value],
     tags: &[String],
     balancer: &BalancerPreparation,
 ) -> Result<(), String> {
-    if mode == ValidationMode::Off { return Ok(()); }
     let routing = docs.iter().find(|d| d.file_name == ROUTING_FILE)
         .or_else(|| docs.iter().find(|d| d.value.get("routing").is_some()))
         .ok_or_else(|| "Не найдена конфигурация routing.".to_owned())?;
@@ -541,13 +539,19 @@ fn print_validation(mode: ValidationMode, result: &Result<(), String>) {
     println!();
     title("ВАЛИДАЦИЯ");
     info(&format!("validation: {}.", mode.as_str()));
-    match mode {
-        ValidationMode::Off => warning("Проверка Xray отключена."),
-        ValidationMode::On | ValidationMode::Alert => match result {
-            Ok(()) => success("Xray config test завершился успешно."),
-            Err(message) if mode == ValidationMode::On => error(&format!("Ошибка; применение будет запрещено: {message}")),
-            Err(message) => warning(&format!("Предупреждение; режим alert допускает продолжение: {message}")),
+    match result {
+        Ok(()) => success("Обязательная итоговая проверка Xray завершилась успешно."),
+        Err(message) if mode == ValidationMode::Alert => {
+            warning(&format!("Xray отклонил итоговую конфигурацию: {message}"));
+            error("Применять такую конфигурацию нельзя. Сначала необходимо устранить ошибку Xray.");
         }
+        Err(message) => {
+            error(&format!("Xray отклонил итоговую конфигурацию: {message}"));
+            error("Применять такую конфигурацию нельзя.");
+        }
+    }
+    if mode == ValidationMode::Off {
+        info("Режим off отключает только предварительные проверки отдельных Outbound; итоговая проверка Xray обязательна.");
     }
 }
 

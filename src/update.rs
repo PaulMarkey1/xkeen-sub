@@ -496,8 +496,8 @@ fn print_updated_outbound(prepared: &[PreparedSubscription]) {
 }
 
 fn print_json_section(label: &str, value: &Value) {
-    title(label);
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
+    let count = value.as_array().map(Vec::len).unwrap_or(0);
+    info(&format!("{label}: {count} элементов подготовлено; содержимое скрыто."));
 }
 
 fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &ArchivePlan) {
@@ -509,8 +509,7 @@ fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &
     for item in conflicts { warning(item); }
     info(&format!("Будет добавлено в архив: {}. Путь: {}.", archive.added, USER_ARCHIVE));
     if archive.added > 0 {
-        title("ПРЕДВАРИТЕЛЬНОЕ СОДЕРЖИМОЕ АРХИВА");
-        println!("{}", serde_json::to_string_pretty(&archive.outbounds).unwrap_or_default());
+        info(&format!("В архив подготовлено {} подключений; содержимое скрыто.", archive.added));
     }
 }
 
@@ -577,9 +576,8 @@ fn print_prepared_documents(docs: &[ConfigDocument]) {
     println!();
     title("ПОДГОТОВЛЕННЫЕ ДОКУМЕНТЫ (В ПАМЯТИ)");
     for doc in docs {
-        let text = serde_json::to_string_pretty(&doc.value).unwrap_or_else(|_| doc.original.clone());
-        title(&format!("{} — {} байт", doc.file_name, text.len()));
-        println!("{text}");
+        let text = serde_json::to_string(&doc.value).unwrap_or_else(|_| doc.original.clone());
+        info(&format!("{} — {} байт подготовлено.", doc.file_name, text.len()));
     }
 }
 

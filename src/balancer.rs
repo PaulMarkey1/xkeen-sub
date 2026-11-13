@@ -84,13 +84,17 @@ pub fn prepare_balancers(
                     .iter()
                     .filter_map(|outbound| outbound.get("tag").and_then(Value::as_str))
                     .collect();
-                let selector_tags: HashSet<&str> = selector
+                let selector_prefixes: Vec<&str> = selector
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
                     .collect();
 
-                if selector.is_some() && working_tags.iter().all(|tag| selector_tags.contains(tag)) {
+                if selector.is_some()
+                    && working_tags.iter().all(|tag| {
+                        selector_prefixes.iter().any(|prefix| tag.starts_with(prefix))
+                    })
+                {
                     // Extra selector entries are allowed; the complete selector
                     // is replaced with the final outbound list.
                     effective_tag = balancers[0]
@@ -291,6 +295,31 @@ mod tests {
             json!(["sub1--node", "custom"])
         );
         assert_eq!(config["routing"]["balancers"][0]["strategy"]["type"], "random");
+    }
+
+    #[test]
+    fn case_two_accepts_selector_prefixes_that_cover_working_tags() {
+        let mut config = json!({
+            "routing": {
+                "rules": [],
+                "balancers": [{
+                    "tag":"user-balancer",
+                    "selector":["sub1--", "direct", "my-freedom"],
+                    "strategy":{"type":"random"}
+                }]
+            }
+        });
+
+        let result =
+            prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
+
+        assert!(!result.created);
+        assert_eq!(result.tag, "user-balancer");
+        assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            config["routing"]["balancers"][0]["selector"],
+            json!(["sub1--node", "custom"])
+        );
     }
 
     #[test]

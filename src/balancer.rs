@@ -21,6 +21,9 @@ pub struct BalancerPreparation {
     pub created: bool,
     pub updated_existing: bool,
     pub transformed_rules: usize,
+    /// Tags of pre-existing user-defined balancers. The program-managed
+    /// balancer is intentionally excluded.
+    pub user_balancer_tags: Vec<String>,
 }
 
 /// Prepares routing.balancers in memory. The caller owns persistence; this
@@ -72,6 +75,7 @@ pub fn prepare_balancers(
                 created,
                 updated_existing,
                 transformed_rules,
+                user_balancer_tags: Vec::new(),
             });
         }
         BalancerCase::OneExistingBalancer => {
@@ -123,12 +127,20 @@ pub fn prepare_balancers(
     }
 
     routing.insert("balancers".to_owned(), Value::Array(balancers));
+    let user_balancer_tags = balancers
+        .iter()
+        .filter_map(|item| item.get("tag").and_then(Value::as_str))
+        .filter(|tag| *tag != PROGRAM_BALANCER_TAG)
+        .map(str::to_owned)
+        .collect();
+
     Ok(BalancerPreparation {
         case,
         tag: effective_tag,
         created,
         updated_existing,
         transformed_rules: 0,
+        user_balancer_tags,
     })
 }
 
@@ -339,7 +351,9 @@ mod tests {
             prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
 
         assert!(result.created);
+        assert_eq!(result.user_balancer_tags, vec!["user-balancer"]);
         assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 2);
+        assert_eq!(config["routing"]["balancers"][0]["tag"], "user-balancer");
         assert_eq!(
             config["routing"]["balancers"][1]["tag"],
             PROGRAM_BALANCER_TAG

@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod install;
 mod maintenance;
+mod observatory;
 #[allow(dead_code)]
 mod outbound_compare;
 mod setup;
@@ -12,7 +13,6 @@ mod subscription_download;
 mod terminal;
 #[allow(dead_code)]
 mod xray_test;
-#[allow(dead_code)]
 mod update;
 
 fn main() {

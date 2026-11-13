@@ -148,12 +148,12 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     title("КОНТРОЛЬНЫЙ ЗАПУСК ЗАВЕРШЁН");
     warning("Ничего не применялось. Рабочие конфигурации, архив и baseline не изменены.");
     if balancer.created {
-        warning(&format!(
-            "После успешного применения будет выведено уведомление: балансировщик не был найден; создан балансировщик с Tag {}.",
+        success(&format!(
+            "Подготовлено создание отдельного балансировщика программы с Tag {}.",
             PROGRAM_BALANCER_TAG
         ));
         if balancer.case != BalancerCase::NoExistingBalancers {
-            warning("Для дополнительного балансировщика routing rule потребуется настроить самостоятельно.");
+            warning("Для нового балансировщика routing rule потребуется настроить самостоятельно; существующие пользовательские балансировщики и их правила не изменялись.");
         }
     }
     if validation.is_err() && mode == ValidationMode::On {
@@ -455,10 +455,19 @@ fn print_configuration_summary(
     info(&format!("Outbound: {}", docs[outbound_index].path.display()));
     info(&format!("Routing: {}", docs[routing_index].path.display()));
     for item in obs { success(&format!("subjectSelector обновлён: {} ({})", item.file_name, item.object_name)); }
+    if balancer.user_balancer_tags.is_empty() {
+        info("Пользовательские балансировщики не обнаружены.");
+    } else {
+        info(&format!(
+            "Обнаружены пользовательские балансировщики ({}): {}.",
+            balancer.user_balancer_tags.len(),
+            balancer.user_balancer_tags.join(", ")
+        ));
+    }
     match balancer.case {
-        BalancerCase::NoExistingBalancers => warning("Существующие балансировщики не найдены."),
-        BalancerCase::OneExistingBalancer => info("Найден один существующий балансировщик."),
-        BalancerCase::MultipleExistingBalancers => info("Найдено несколько существующих балансировщиков."),
+        BalancerCase::NoExistingBalancers => info("Существующих балансировщиков нет."),
+        BalancerCase::OneExistingBalancer => info("Обнаружен один существующий балансировщик."),
+        BalancerCase::MultipleExistingBalancers => info("Обнаружено несколько существующих балансировщиков."),
     }
     if balancer.created { success(&format!("Подготовлено создание {}.", balancer.tag)); }
     if balancer.updated_existing { success(&format!("Обновлён selector балансировщика {}.", balancer.tag)); }

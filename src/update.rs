@@ -80,6 +80,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     info(&format!("Рабочий Outbound: {} ({} подключений).",
         docs[outbound_index].path.display(), working.len()));
     info(&format!("Routing: {}.", docs[routing_index].path.display()));
+    print_json_section("РАБОЧИЙ OUTBOUND", &Value::Array(working.clone()));
 
     let api_tags = collect_api_tags(&docs);
     let mut state = RunState::default();
@@ -134,6 +135,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
 
     print_subscription_summary(&state);
+    print_updated_outbound(&state.prepared);
     print_merge_summary(&replacements, &conflicts, &archive);
     print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
     print_validation(mode, &validation);
@@ -388,6 +390,19 @@ fn print_subscription_summary(state: &RunState) {
     info(&format!("Подписок с изменениями: {}", state.prepared.len()));
     info(&format!("Ошибок: {}", state.failed.len()));
     for (id, message) in &state.failed { error(&format!("  {id}: {message}")); }
+}
+
+fn print_updated_outbound(prepared: &[PreparedSubscription]) {
+    let outbounds: Vec<Value> = prepared
+        .iter()
+        .flat_map(|item| item.outbounds.iter().cloned())
+        .collect();
+    print_json_section("ОБНОВЛЁННЫЙ OUTBOUND", &Value::Array(outbounds));
+}
+
+fn print_json_section(label: &str, value: &Value) {
+    title(label);
+    println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()));
 }
 
 fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &ArchivePlan) {

@@ -92,6 +92,25 @@ pub fn compare_subscription(
     Ok(report)
 }
 
+/// Extracts every recognized Outbound from a subscription document using
+/// the same duplicate-Tag normalization as the comparison stage.
+pub fn extract_outbounds(bytes: &[u8]) -> AppResult<Vec<TaggedOutbound>> {
+    normalize_document(bytes).map(|(outbounds, _, _)| outbounds)
+}
+
+/// Compares two Outbound objects while ignoring their Tag fields.
+pub fn outbound_parameters_equal(left: &Value, right: &Value) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    if let Some(object) = left.as_object_mut() {
+        object.remove("tag");
+    }
+    if let Some(object) = right.as_object_mut() {
+        object.remove("tag");
+    }
+    left == right
+}
+
 fn normalize_document(bytes: &[u8]) -> AppResult<(Vec<TaggedOutbound>, usize, usize)> {
     let document: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("Некорректный JSON подписки: {error}"))?;

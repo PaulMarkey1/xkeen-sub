@@ -1,368 +1,594 @@
+use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
+use crate::config::{self, ValidationMode};
+use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
+use crate::outbound_compare::{compare_subscription, extract_outbounds, outbound_parameters_equal, ComparisonReport};
+use crate::subscription_download::download_subscription;
+use crate::subscriptions::{load_subscriptions, Subscription};
+use crate::terminal::{error, info, success, title, warning};
+use crate::xray_test::{test_config_set_detailed, XrayConfigInput};
+
+use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::outbound_compare::{compare_subscription, ComparisonReport};
-use crate::subscription_download::download_subscription;
-use crate::subscriptions::{load_subscriptions, Subscription};
-use crate::terminal::{error, info, success, title, warning};
-
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const BASELINE_DIR: &str = "/opt/etc/xkeen-sub";
+const CONFIG_DIR: &str = "/opt/etc/xray/configs";
+const OUTBOUND_FILE: &str = "04_outbounds.json";
+const ROUTING_FILE: &str = "05_routing.json";
+const USER_ARCHIVE: &str = "/opt/etc/xkeen-sub/old-user-outbound.json";
 
-#[derive(Debug)]
-pub struct PreparedSubscription {
-    pub subscription_id: String,
-    pub original_body: Vec<u8>,
-    pub baseline_path: PathBuf,
-    pub comparison: ComparisonReport,
+struct ConfigDocument {
+    file_name: String,
+    path: PathBuf,
+    original: String,
+    value: Value,
 }
 
-#[derive(Debug, Default)]
-pub struct UpdatePreparation {
-    pub prepared: Vec<PreparedSubscription>,
-    pub downloaded: usize,
-    pub failed: Vec<(String, String)>,
+struct PreparedSubscription {
+    id: String,
+    original: Vec<u8>,
+    baseline: PathBuf,
+    report: ComparisonReport,
+    outbounds: Vec<Value>,
 }
 
-/// Downloads and compares subscriptions in sequence. It does not change the
-/// live XKeen configuration or write baselines; those operations belong to
-/// the later application stage after backup and rollback are agreed.
-pub fn prepare_updates(target_id: Option<&str>) -> AppResult<UpdatePreparation> {
+#[derive(Default)]
+struct RunState {
+    prepared: Vec<PreparedSubscription>,
+    failed: Vec<(String, String)>,
+    downloaded: usize,
+}
+
+struct ArchivePlan {
+    outbounds: Vec<Value>,
+    added: usize,
+}
+
+/// Control run only: downloads and analyses subscriptions, constructs all
+/// proposed documents in memory, validates them and prints the complete plan.
+/// No active configuration, archive or baseline file is written.
+pub fn run(target_id: Option<&str>) -> AppResult<()> {
+    println!();
+    title("XKEEN-SUB — КОНТРОЛЬНЫЙ ЗАПУСК UPDATE");
+    warning("Рабочие файлы, архив и baseline не изменяются.");
+    info("Резервное копирование и применение конфигурации будут реализованы отдельно.");
+
     let store = load_subscriptions()?;
-
     if store.subscriptions.is_empty() {
-        info("Список подписок пуст. Добавьте подписку через xkeen-sub setup add.");
-        return Ok(UpdatePreparation::default());
+        info("Список подписок пуст.");
+        return Ok(());
     }
 
     let selected: Vec<&Subscription> = match target_id {
-        Some(id) => {
-            let subscription = store
-                .subscriptions
-                .iter()
-                .find(|subscription| subscription.id == id)
-                .ok_or_else(|| format!("Подписка {id} не найдена."))?;
-            vec![subscription]
-        }
+        Some(id) => vec![store.subscriptions.iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| format!("Подписка {id} не найдена."))?],
         None => store.subscriptions.iter().collect(),
     };
 
-    let mut preparation = UpdatePreparation::default();
+    let mut docs = load_config_documents()?;
+    let outbound_index = find_doc(&docs, OUTBOUND_FILE)
+        .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
+    let routing_index = find_doc(&docs, ROUTING_FILE)
+        .or_else(|| docs.iter().position(|doc| doc.value.get("routing").is_some()))
+        .ok_or("Не найдена конфигурация routing.")?;
 
+    let working = docs[outbound_index].value.get("outbounds")
+        .and_then(Value::as_array).cloned()
+        .ok_or("В рабочем Outbound отсутствует массив outbounds.")?;
+    info(&format!("Рабочий Outbound: {} ({} подключений).",
+        docs[outbound_index].path.display(), working.len()));
+    info(&format!("Routing: {}.", docs[routing_index].path.display()));
+
+    let api_tags = collect_api_tags(&docs);
+    let mut state = RunState::default();
     for subscription in selected {
-        println!();
-        title(&format!(
-            "Подготовка обновления: {}",
-            subscription
-                .name
-                .as_deref()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(&subscription.id)
-        ));
-
-        info("Загрузка подписки...");
-        let downloaded = match download_subscription(subscription) {
-            Ok(bytes) => {
-                preparation.downloaded += 1;
-                success("Загрузка завершена.");
-                bytes
-            }
-            Err(download_error) => {
-                record_failure(&mut preparation, subscription, download_error.to_string());
-                continue;
-            }
-        };
-
-        info("Чтение baseline...");
-        let baseline_path = match baseline_path(subscription) {
-            Ok(path) => path,
-            Err(path_error) => {
-                record_failure(&mut preparation, subscription, path_error.to_string());
-                continue;
-            }
-        };
-
-        let previous = match fs::read(&baseline_path) {
-            Ok(bytes) => {
-                success(&format!("Baseline найден: {}", baseline_path.display()));
-                Some(bytes)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                warning("Baseline отсутствует. Все распознанные подключения будут считаться новыми.");
-                None
-            }
-            Err(read_error) => {
-                record_failure(
-                    &mut preparation,
-                    subscription,
-                    format!(
-                        "Не удалось прочитать baseline {}: {read_error}",
-                        baseline_path.display()
-                    ),
-                );
-                continue;
-            }
-        };
-
-        info("Сравнение подключений...");
-        let comparison = match compare_subscription(previous.as_deref(), &downloaded) {
-            Ok(report) => {
-                success("Сравнение завершено.");
-                report
-            }
-            Err(compare_error) => {
-                record_failure(
-                    &mut preparation,
-                    subscription,
-                    format!("Не удалось обработать подписку: {compare_error}"),
-                );
-                continue;
-            }
-        };
-
-        print_report(subscription, &comparison);
-        preparation.prepared.push(PreparedSubscription {
-            subscription_id: subscription.id.clone(),
-            original_body: downloaded,
-            baseline_path,
-            comparison,
-        });
+        prepare_subscription(subscription, &mut state);
     }
 
-    if preparation.downloaded == 0 {
+    if state.downloaded == 0 {
         println!();
-        info("Ни одна подписка не ответила. Проверка интернет-соединения...");
+        info("Ни одна подписка не была успешно загружена. Проверка интернет-соединения...");
         if has_internet_connection() {
-            warning("Интернет-соединение доступно, но серверы подписок не ответили.");
+            warning("Интернет доступен, но серверы подписок не ответили.");
         } else {
             error("Отсутствует интернет-соединение.");
         }
-        warning("Конфигурация XKeen не изменена.");
+        print_subscription_summary(&state);
+        warning("Подготовка конфигурации прекращена. Рабочие файлы не изменены.");
+        return Ok(());
     }
+
+    let updated_groups = updated_groups(&state.prepared);
+    let mut archive = load_archive()?;
+    let (final_outbounds, replacements, conflicts) =
+        merge_outbounds(&working, &store.subscriptions, &updated_groups, &mut archive)?;
+    let tags = collect_tags(&final_outbounds)?;
+
+    let mut outbound_doc = docs[outbound_index].value.clone();
+    outbound_doc.as_object_mut()
+        .ok_or("Корень Outbound должен быть JSON-объектом.")?
+        .insert("outbounds".to_owned(), Value::Array(final_outbounds.clone()));
+    docs[outbound_index].value = outbound_doc;
+
+    let balancer = prepare_balancers(
+        &mut docs[routing_index].value, &working, &tags, &api_tags
+    )?;
+
+    let mut obs_docs: Vec<(String, Value)> =
+        docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
+    let obs_updates = synchronize_subject_selectors(&mut obs_docs, &tags)?;
+    for (name, value) in obs_docs {
+        if let Some(doc) = docs.iter_mut().find(|doc| doc.file_name == name) {
+            doc.value = value;
+        }
+    }
+
+    let mode = config::load()?.validation;
+    let validation = validate_all(mode, &docs, &final_outbounds, &tags, &balancer);
+
+    print_subscription_summary(&state);
+    print_merge_summary(&replacements, &conflicts, &archive);
+    print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
+    print_validation(mode, &validation);
+    print_baseline_plan(&state.prepared);
+    print_prepared_documents(&docs);
 
     println!();
-    title("Итог подготовки");
-    info(&format!("Успешно загружено: {}", preparation.downloaded));
-    info(&format!("Подготовлено отчётов: {}", preparation.prepared.len()));
-    if !preparation.failed.is_empty() {
-        warning(&format!("Ошибок обработки: {}", preparation.failed.len()));
+    title("КОНТРОЛЬНЫЙ ЗАПУСК ЗАВЕРШЁН");
+    warning("Ничего не применялось. Рабочие конфигурации, архив и baseline не изменены.");
+    if balancer.created {
+        warning(&format!(
+            "После успешного применения будет выведено уведомление: балансировщик не был найден; создан балансировщик с Tag {}.",
+            PROGRAM_BALANCER_TAG
+        ));
+        if balancer.case != BalancerCase::NoExistingBalancers {
+            warning("Для дополнительного балансировщика routing rule потребуется настроить самостоятельно.");
+        }
     }
-    info("Изменения в XKeen и baseline не записывались.");
-
-    Ok(preparation)
+    if validation.is_err() && mode == ValidationMode::On {
+        error("Проверка блокирует будущее применение.");
+    } else {
+        success("План обновления подготовлен.");
+    }
+    Ok(())
 }
 
-fn record_failure(
-    preparation: &mut UpdatePreparation,
-    subscription: &Subscription,
-    message: String,
-) {
-    error(&format!("Ошибка подписки {}: {message}", subscription.id));
-    warning("Подготовка этой подписки пропущена. Прежняя конфигурация сохранена.");
-    preparation.failed.push((subscription.id.clone(), message));
+fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
+    println!();
+    title(&format!("Подписка {}", subscription.id));
+    info("Загрузка...");
+    let downloaded = match download_subscription(subscription) {
+        Ok(bytes) => {
+            state.downloaded += 1;
+            success(&format!("Получено {} байт.", bytes.len()));
+            bytes
+        }
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&format!("Ошибка загрузки: {err}"));
+            return;
+        }
+    };
+
+    let baseline = match baseline_path(subscription) {
+        Ok(path) => path,
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&err.to_string());
+            return;
+        }
+    };
+    let previous = match fs::read(&baseline) {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            warning("Baseline отсутствует: подключения будут считаться новыми.");
+            None
+        }
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&format!("Не удалось прочитать baseline: {err}"));
+            return;
+        }
+    };
+
+    info("Сравнение с baseline...");
+    let report = match compare_subscription(previous.as_deref(), &downloaded) {
+        Ok(report) => report,
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&format!("Ошибка обработки подписки: {err}"));
+            return;
+        }
+    };
+    print_comparison(&report);
+
+    let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
+    if !changed {
+        success("Изменений среди распознанных подключений нет. Рабочая группа сохранится.");
+        if report.unrecognized_current > 0 {
+            warning("Нераспознанные элементы новой загрузки не будут добавлены в Outbound.");
+        }
+        return;
+    }
+
+    let outbounds = match extract_outbounds(&downloaded) {
+        Ok(items) => items.into_iter().map(|mut item| {
+            let tag = format!("{}{}", subscription.prefix, item.tag);
+            if let Some(object) = item.outbound.as_object_mut() {
+                object.insert("tag".to_owned(), Value::String(tag));
+            }
+            item.outbound
+        }).collect(),
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&format!("Не удалось сформировать группу: {err}"));
+            return;
+        }
+    };
+
+    success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));
+    state.prepared.push(PreparedSubscription {
+        id: subscription.id.clone(),
+        original: downloaded,
+        baseline,
+        report,
+        outbounds,
+    });
 }
 
 fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
-    let has_name = subscription
-        .name
-        .as_deref()
-        .map(|name| !name.is_empty())
-        .unwrap_or(false);
-
-    let filename = if has_name {
-        subscription
-            .prefix
-            .strip_suffix("--")
-            .unwrap_or(&subscription.prefix)
-            .to_owned()
+    let named = subscription.name.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let name = if named {
+        subscription.prefix.strip_suffix("--").unwrap_or(&subscription.prefix).to_owned()
     } else {
         subscription.prefix.clone()
     };
-
-    if filename.is_empty()
-        || filename == "."
-        || filename == ".."
-        || filename.contains('/')
-        || filename.contains('\\')
-    {
-        return Err(format!(
-            "Недопустимый префикс подписки {} для имени baseline.",
-            subscription.id
-        )
-        .into());
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(format!("Недопустимый префикс baseline для {}.", subscription.id).into());
     }
-
-    Ok(Path::new(BASELINE_DIR).join(format!("{filename}.json")))
+    Ok(Path::new(BASELINE_DIR).join(format!("{name}.json")))
 }
 
-fn print_report(subscription: &Subscription, report: &ComparisonReport) {
-    let name = subscription
-        .name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&subscription.id);
-
-    println!();
-    title(&format!("Отчёт: {name}"));
-
-    if report.added.is_empty()
-        && report.removed.is_empty()
-        && report.changed.is_empty()
-        && report.unchanged == 0
-    {
-        info("Распознанных подключений нет.");
+fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
+    let dir = Path::new(CONFIG_DIR);
+    if !dir.is_dir() {
+        return Err(format!("Каталог Xray не найден: {}", dir.display()).into());
     }
-
-    if !report.added.is_empty() {
-        success("Добавлены:");
-        for outbound in &report.added {
-            success(&format!("  + {}", outbound.tag));
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let hidden = path.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with('.')).unwrap_or(false);
+        if path.is_file() && !hidden && is_json_config(&path) {
+            paths.push(path);
         }
     }
+    paths.sort();
 
-    if !report.removed.is_empty() {
-        error("Удалены:");
-        for outbound in &report.removed {
-            error(&format!("  - {}", outbound.tag));
+    let mut docs = Vec::new();
+    for path in paths {
+        let original = fs::read_to_string(&path)?;
+        let value: Value = json5::from_str(&original)
+            .map_err(|err| format!("Ошибка разбора {}: {err}", path.display()))?;
+        let file_name = path.file_name().and_then(|n| n.to_str())
+            .ok_or("Не удалось определить имя конфигурационного файла.")?.to_owned();
+        docs.push(ConfigDocument { file_name, path, original, value });
+    }
+    Ok(docs)
+}
+
+fn is_json_config(path: &Path) -> bool {
+    matches!(path.extension().and_then(|e| e.to_str()), Some("json" | "jsonc"))
+}
+
+fn find_doc(docs: &[ConfigDocument], name: &str) -> Option<usize> {
+    docs.iter().position(|doc| doc.file_name == name)
+}
+
+fn collect_api_tags(docs: &[ConfigDocument]) -> HashSet<String> {
+    docs.iter().filter_map(|doc| doc.value.get("api"))
+        .filter_map(|api| api.get("tag")).filter_map(Value::as_str)
+        .map(str::to_owned).collect()
+}
+
+fn updated_groups(prepared: &[PreparedSubscription]) -> BTreeMap<u64, Vec<Value>> {
+    prepared.iter().filter_map(|item| {
+        subscription_number(&item.id).map(|n| (n, item.outbounds.clone()))
+    }).collect()
+}
+
+fn merge_outbounds(
+    working: &[Value],
+    subscriptions: &[Subscription],
+    updated: &BTreeMap<u64, Vec<Value>>,
+    archive: &mut ArchivePlan,
+) -> AppResult<(Vec<Value>, Vec<String>, Vec<String>)> {
+    let mut groups: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
+    let mut users = Vec::new();
+    for outbound in working {
+        let tag = outbound.get("tag").and_then(Value::as_str)
+            .ok_or("В Рабочем Outbound найден элемент без Tag.")?;
+        if let Some(number) = subscription_number(tag) {
+            groups.entry(number).or_default().push(outbound.clone());
+        } else {
+            users.push(outbound.clone());
         }
     }
+    for (number, group) in updated {
+        groups.insert(*number, group.clone());
+    }
 
-    if !report.changed.is_empty() {
-        warning("Изменены:");
-        for outbound in &report.changed {
-            println!("  {}", outbound.tag);
-            for change in &outbound.changes {
-                println!("    {CYAN}{}{RESET}:", change.path);
-                println!("      Было: {}", display_value(change.previous.as_ref()));
-                println!("      Стало: {}", display_value(change.current.as_ref()));
+    let mut replacements = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut retained = Vec::new();
+
+    for user in users {
+        let user_tag = user.get("tag").and_then(Value::as_str).unwrap_or_default();
+        let mut replaced = false;
+        for subscription in subscriptions {
+            let Some(number) = subscription_number(&subscription.id) else { continue };
+            if !updated.contains_key(&number) { continue; }
+            if let Some(group) = groups.get(&number) {
+                for subscribed in group {
+                    let subscribed_tag = subscribed.get("tag").and_then(Value::as_str).unwrap_or_default();
+                    let original_tag = subscribed_tag.strip_prefix(&subscription.prefix).unwrap_or(subscribed_tag);
+                    if original_tag != user_tag { continue; }
+                    if outbound_parameters_equal(&user, subscribed) {
+                        archive_outbound(archive, &user)?;
+                        replacements.push(format!("{user_tag} заменено версией из {}", subscription.id));
+                        replaced = true;
+                        break;
+                    } else {
+                        conflicts.push(format!("{user_tag}: имя совпадает с {}, параметры различаются; пользовательская версия сохранена", subscription.id));
+                    }
+                }
+            }
+            if replaced { break; }
+        }
+        if !replaced { retained.push(user); }
+    }
+
+    let mut final_outbounds = Vec::new();
+    for (_, group) in groups { final_outbounds.extend(group); }
+    final_outbounds.extend(retained);
+    Ok((final_outbounds, replacements, conflicts))
+}
+
+fn subscription_number(tag: &str) -> Option<u64> {
+    let rest = tag.strip_prefix("sub")?;
+    let (number, suffix) = rest.split_once("--")?;
+    if number.is_empty() || suffix.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    number.parse().ok()
+}
+
+fn load_archive() -> AppResult<ArchivePlan> {
+    let path = Path::new(USER_ARCHIVE);
+    if !path.exists() { return Ok(ArchivePlan { outbounds: Vec::new(), added: 0 }); }
+    let text = fs::read_to_string(path)?;
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|err| format!("Архив пользовательских Outbound повреждён: {err}"))?;
+    let outbounds = value.as_array().cloned().or_else(|| value.get("outbounds").and_then(Value::as_array).cloned())
+        .ok_or("В архиве отсутствует массив outbounds.")?;
+    Ok(ArchivePlan { outbounds, added: 0 })
+}
+
+fn archive_outbound(archive: &mut ArchivePlan, outbound: &Value) -> AppResult<()> {
+    let tag = outbound.get("tag").and_then(Value::as_str)
+        .ok_or("Архивируемое подключение не содержит Tag.")?.to_owned();
+    if let Some(existing) = archive.outbounds.iter().find(|v| v.get("tag").and_then(Value::as_str) == Some(tag.as_str())) {
+        if outbound_parameters_equal(existing, outbound) { return Ok(()); }
+    } else {
+        archive.outbounds.push(outbound.clone());
+        archive.added += 1;
+        return Ok(());
+    }
+    let mut suffix = 1u64;
+    loop {
+        let candidate = format!("{tag}--{suffix}");
+        match archive.outbounds.iter().find(|v| v.get("tag").and_then(Value::as_str) == Some(candidate.as_str())) {
+            Some(existing) if outbound_parameters_equal(existing, outbound) => return Ok(()),
+            Some(_) => suffix += 1,
+            None => {
+                let mut copy = outbound.clone();
+                copy.as_object_mut().ok_or("Outbound архива должен быть объектом.")?
+                    .insert("tag".to_owned(), Value::String(candidate));
+                archive.outbounds.push(copy);
+                archive.added += 1;
+                return Ok(());
             }
         }
     }
+}
 
-    info(&format!("Без изменений: {}", report.unchanged));
+fn collect_tags(outbounds: &[Value]) -> AppResult<Vec<String>> {
+    let mut tags = Vec::new();
+    let mut unique = HashSet::new();
+    for outbound in outbounds {
+        let tag = outbound.get("tag").and_then(Value::as_str)
+            .filter(|tag| !tag.is_empty()).ok_or("Итоговый Outbound содержит пустой или отсутствующий Tag.")?;
+        if !unique.insert(tag.to_owned()) {
+            return Err(format!("В Итоговом Outbound повторяется Tag {tag}.").into());
+        }
+        tags.push(tag.to_owned());
+    }
+    Ok(tags)
+}
 
-    if report.unrecognized_current > 0 {
-        warning(&format!(
-            "Нераспознанных подключений в новой загрузке: {}",
-            report.unrecognized_current
-        ));
+fn validate_all(
+    mode: ValidationMode,
+    docs: &[ConfigDocument],
+    outbounds: &[Value],
+    tags: &[String],
+    balancer: &BalancerPreparation,
+) -> Result<(), String> {
+    if mode == ValidationMode::Off { return Ok(()); }
+    let routing = docs.iter().find(|d| d.file_name == ROUTING_FILE)
+        .or_else(|| docs.iter().find(|d| d.value.get("routing").is_some()))
+        .ok_or_else(|| "Не найдена конфигурация routing.".to_owned())?;
+    let balancer_tags: HashSet<&str> = routing.value.get("routing")
+        .and_then(|v| v.get("balancers")).and_then(Value::as_array).into_iter()
+        .flatten().filter_map(|v| v.get("tag").and_then(Value::as_str)).collect();
+    if !balancer_tags.contains(balancer.tag.as_str()) {
+        return Err(format!("Балансировщик {} не найден после подготовки.", balancer.tag));
     }
-    if report.unrecognized_previous > 0 {
-        warning(&format!(
-            "Нераспознанных подключений в baseline: {}",
-            report.unrecognized_previous
-        ));
-    }
-    if report.identical_duplicates_removed > 0 {
-        warning(&format!(
-            "Одинаковых дубликатов Tag устранено: {}",
-            report.identical_duplicates_removed
-        ));
-    }
+    if outbounds.len() != tags.len() { return Err("Не совпало количество Outbound и Tag.".to_owned()); }
 
-    if report.added.is_empty()
-        && report.removed.is_empty()
-        && report.changed.is_empty()
-        && report.unrecognized_current == 0
-        && report.unrecognized_previous == 0
-    {
-        success("Изменений нет. Подписка актуальна.");
-    } else if report.added.is_empty() && report.removed.is_empty() && report.changed.is_empty() {
-        warning("Изменений среди распознанных подключений нет; часть данных не распознана.");
+    let inputs: Vec<XrayConfigInput> = docs.iter().map(|doc| {
+        let content = serde_json::to_string_pretty(&doc.value).unwrap_or_else(|_| doc.original.clone());
+        XrayConfigInput::new(doc.file_name.clone(), content)
+    }).collect();
+    test_config_set_detailed(&inputs).map(|_| ()).map_err(|err| match err {
+        crate::xray_test::XrayTestError::Process(failure) => {
+            format!("Xray config test: {}{}", failure, if failure.combined_diagnostics().is_empty() { String::new() } else { format!("\n{}", failure.combined_diagnostics()) })
+        }
+        other => format!("Xray config test: {other}"),
+    })
+}
+
+fn print_comparison(report: &ComparisonReport) {
+    for item in &report.added { success(&format!("  + Добавлено: {}", item.tag)); }
+    for item in &report.removed { error(&format!("  - Удалено: {}", item.tag)); }
+    for item in &report.changed {
+        warning(&format!("  Изменено: {}", item.tag));
+        for change in &item.changes {
+            info(&format!("    {}: {} -> {}", change.path, show_value(change.previous.as_ref()), show_value(change.current.as_ref())));
+        }
+    }
+    info(&format!("  Без изменений: {}", report.unchanged));
+    if report.unrecognized_current > 0 { warning(&format!("  Нераспознанных в загрузке: {}", report.unrecognized_current)); }
+    if report.unrecognized_previous > 0 { warning(&format!("  Нераспознанных в baseline: {}", report.unrecognized_previous)); }
+    if report.identical_duplicates_removed > 0 { warning(&format!("  Устранено одинаковых дубликатов: {}", report.identical_duplicates_removed)); }
+}
+
+fn print_subscription_summary(state: &RunState) {
+    println!();
+    title("ОТЧЁТ ПО ПОДПИСКАМ");
+    info(&format!("Успешно загружено: {}", state.downloaded));
+    info(&format!("Подписок с изменениями: {}", state.prepared.len()));
+    info(&format!("Ошибок: {}", state.failed.len()));
+    for (id, message) in &state.failed { error(&format!("  {id}: {message}")); }
+}
+
+fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &ArchivePlan) {
+    println!();
+    title("ОБЪЕДИНЕНИЕ OUTBOUND");
+    info("Изменившиеся группы заменяются целиком; остальные группы берутся из Рабочего Outbound.");
+    info("Пользовательские подключения располагаются в конце.");
+    for item in replacements { success(item); }
+    for item in conflicts { warning(item); }
+    info(&format!("Будет добавлено в архив: {}. Путь: {}.", archive.added, USER_ARCHIVE));
+}
+
+fn print_configuration_summary(
+    docs: &[ConfigDocument], outbound_index: usize, routing_index: usize,
+    obs: &[ObservatoryUpdate], balancer: &BalancerPreparation, tags: &[String],
+) {
+    println!();
+    title("ПОДГОТОВКА КОНФИГУРАЦИИ");
+    info(&format!("Итоговый Outbound: {} подключений.", tags.len()));
+    info(&format!("Outbound: {}", docs[outbound_index].path.display()));
+    info(&format!("Routing: {}", docs[routing_index].path.display()));
+    for item in obs { success(&format!("subjectSelector обновлён: {} ({})", item.file_name, item.object_name)); }
+    match balancer.case {
+        BalancerCase::NoExistingBalancers => warning("Существующие балансировщики не найдены."),
+        BalancerCase::OneExistingBalancer => info("Найден один существующий балансировщик."),
+        BalancerCase::MultipleExistingBalancers => info("Найдено несколько существующих балансировщиков."),
+    }
+    if balancer.created { success(&format!("Подготовлено создание {}.", balancer.tag)); }
+    if balancer.updated_existing { success(&format!("Обновлён selector балансировщика {}.", balancer.tag)); }
+    if balancer.transformed_rules > 0 { info(&format!("Routing rules перенаправлено: {}.", balancer.transformed_rules)); }
+}
+
+fn print_validation(mode: ValidationMode, result: &Result<(), String>) {
+    println!();
+    title("ВАЛИДАЦИЯ");
+    info(&format!("validation: {}.", mode.as_str()));
+    match mode {
+        ValidationMode::Off => warning("Проверка Xray отключена."),
+        ValidationMode::On | ValidationMode::Alert => match result {
+            Ok(()) => success("Xray config test завершился успешно."),
+            Err(message) if mode == ValidationMode::On => error(&format!("Ошибка; применение будет запрещено: {message}")),
+            Err(message) => warning(&format!("Предупреждение; режим alert допускает продолжение: {message}")),
+        }
     }
 }
 
-const CYAN: &str = "\x1b[36m";
-const RESET: &str = "\x1b[0m";
-
-fn display_value(value: Option<&serde_json::Value>) -> String {
-    match value {
-        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
-        None => "<отсутствует>".to_owned(),
+fn print_baseline_plan(prepared: &[PreparedSubscription]) {
+    println!();
+    title("ПЛАН ОБНОВЛЕНИЯ BASELINE");
+    if prepared.is_empty() { info("Baseline не требуется обновлять."); }
+    for item in prepared {
+        info(&format!("{} -> {} ({} байт).", item.id, item.baseline.display(), item.original.len()));
     }
+    warning("В контрольном запуске baseline не записывается.");
+}
+
+fn print_prepared_documents(docs: &[ConfigDocument]) {
+    println!();
+    title("ПОДГОТОВЛЕННЫЕ ДОКУМЕНТЫ (В ПАМЯТИ)");
+    for doc in docs {
+        let text = serde_json::to_string_pretty(&doc.value).unwrap_or_else(|_| doc.original.clone());
+        title(&format!("{} — {} байт", doc.file_name, text.len()));
+        println!("{text}");
+    }
+}
+
+fn show_value(value: Option<&Value>) -> String {
+    value.map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
+        .unwrap_or_else(|| "<отсутствует>".to_owned())
 }
 
 fn has_internet_connection() -> bool {
-    const URLS: [&str; 3] = [
-        "https://connectivitycheck.gstatic.com/generate_204",
-        "https://www.cloudflare.com/",
-        "https://www.google.com/",
-    ];
-
+    const URLS: [&str; 2] = ["https://www.cloudflare.com/", "https://www.google.com/"];
     if command_exists("curl") {
-        return URLS.iter().any(|url| {
-            Command::new("curl")
-                .args([
-                    "--location",
-                    "--silent",
-                    "--output",
-                    "/dev/null",
-                    "--connect-timeout",
-                    "5",
-                    "--max-time",
-                    "10",
-                    url,
-                ])
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        });
+        return URLS.iter().any(|url| Command::new("curl")
+            .args(["--location", "--silent", "--output", "/dev/null", "--connect-timeout", "5", "--max-time", "10", url])
+            .status().map(|s| s.success()).unwrap_or(false));
     }
-
     if command_exists("wget") {
-        return URLS.iter().any(|url| {
-            Command::new("wget")
-                .args(["--quiet", "--spider", "--timeout=5", "--tries=1", url])
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        });
+        return URLS.iter().any(|url| Command::new("wget")
+            .args(["--quiet", "--spider", "--timeout=5", "--tries=1", url])
+            .status().map(|s| s.success()).unwrap_or(false));
     }
-
     false
 }
 
 fn command_exists(command: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {command} >/dev/null 2>&1")])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    Command::new("sh").args(["-c", &format!("command -v {command} >/dev/null 2>&1")])
+        .status().map(|s| s.success()).unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::baseline_path;
-    use crate::subscriptions::Subscription;
-    use std::path::Path;
+    use super::{archive_outbound, subscription_number, ArchivePlan};
+    use crate::outbound_compare::outbound_parameters_equal;
+    use serde_json::json;
 
-    fn subscription(name: Option<&str>, prefix: &str) -> Subscription {
-        Subscription {
-            id: "sub1".to_owned(),
-            name: name.map(str::to_owned),
-            url: "https://example.com/sub".to_owned(),
-            prefix: prefix.to_owned(),
-        }
+    #[test]
+    fn identifies_subscription_tags() {
+        assert_eq!(subscription_number("sub1--Germany--node"), Some(1));
+        assert_eq!(subscription_number("sub20--node"), Some(20));
+        assert_eq!(subscription_number("custom"), None);
     }
 
     #[test]
-    fn named_subscription_uses_prefix_without_final_separator() {
-        let path = baseline_path(&subscription(Some("Germany"), "sub1--Germany--")).unwrap();
-        assert_eq!(path, Path::new("/opt/etc/xkeen-sub/sub1--Germany.json"));
-    }
+    fn archive_deduplicates_and_adds_suffix_on_conflict() {
+        let first = json!({"tag":"custom","protocol":"vless","settings":{"id":"one"}});
+        let mut archive = ArchivePlan { outbounds: vec![first.clone()], added: 0 };
+        archive_outbound(&mut archive, &first).unwrap();
+        assert_eq!(archive.added, 0);
 
-    #[test]
-    fn unnamed_subscription_keeps_trailing_separator_in_filename() {
-        let path = baseline_path(&subscription(None, "sub1--")).unwrap();
-        assert_eq!(path, Path::new("/opt/etc/xkeen-sub/sub1--.json"));
-    }
-
-    #[test]
-    fn path_separators_in_prefix_are_rejected() {
-        assert!(baseline_path(&subscription(None, "../outside--")).is_err());
-        assert!(baseline_path(&subscription(None, "nested/name--")).is_err());
+        let changed = json!({"tag":"custom","protocol":"vless","settings":{"id":"two"}});
+        archive_outbound(&mut archive, &changed).unwrap();
+        assert_eq!(archive.added, 1);
+        assert_eq!(archive.outbounds[1]["tag"], "custom--1");
+        assert!(!outbound_parameters_equal(&archive.outbounds[0], &archive.outbounds[1]));
     }
 }

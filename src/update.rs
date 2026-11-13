@@ -466,7 +466,7 @@ fn validate_all(
             if details.is_empty() {
                 format!("Xray config test завершился с ошибкой (код {code}).")
             } else {
-                format!("Xray config test завершился с ошибкой (код {code}):\\n{details}")
+                format!("Xray config test завершился с ошибкой (код {code}):\n{details}")
             }
         }
         other => format!("Xray config test: {other}"),

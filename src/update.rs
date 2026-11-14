@@ -58,7 +58,7 @@ struct RunState {
 /// automatic rollback and XKeen state verification.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let started_at = Instant::now();
-    let mut backup = BackupSession::start("Контрольный запуск обновления подписок")?;
+    let mut backup = BackupSession::start("Обновление подписок")?;
     backup.event("UPDATE", "Загрузка и анализ подписок.")?;
 
     let result = run_inner(target_id, &mut backup);

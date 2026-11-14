@@ -132,7 +132,23 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     order.sort_by_key(|index| (category_order(plan[*index].category), plan[*index].path.clone()));
     let mut applied = Vec::new();
 
+    let mut baseline_directory_created = false;
     for index in order {
+        if plan[index].category == "Baseline" && !baseline_directory_created
+            && !Path::new(BASELINE_ROOT).exists()
+        {
+            match create_baseline_directory(backup) {
+                Ok(created) => baseline_directory_created = created,
+                Err(error) => {
+                    backup.event("ERROR", &format!("Не удалось подготовить каталог baseline: {error}"))?;
+                    let rollback = rollback(plan, &staged, &applied, backup);
+                    cleanup_created_baseline_directory(baseline_directory_created, backup);
+                    let restart = start_after_rollback(backup);
+                    let _ = staging.cleanup(backup);
+                    return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+                }
+            }
+        }
         if matches!(plan[index].kind, PlannedOperationKind::Replace | PlannedOperationKind::Delete) {
             match backup.verify_original(&plan[index].path) {
                 Ok(true) => {}
@@ -140,6 +156,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
                     let message = format!("Исходный файл изменился после резервирования; применение остановлено: {}", plan[index].path.display());
                     backup.event("ERROR", &message)?;
                     let rollback = rollback(plan, &staged, &applied, backup);
+                    cleanup_created_baseline_directory(baseline_directory_created, backup);
                     let restart = start_after_rollback(backup);
                     let _ = staging.cleanup(backup);
                     return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
@@ -148,6 +165,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
                     let message = format!("Не удалось проверить исходный файл перед заменой {}: {error}", plan[index].path.display());
                     backup.event("ERROR", &message)?;
                     let rollback = rollback(plan, &staged, &applied, backup);
+                    cleanup_created_baseline_directory(baseline_directory_created, backup);
                     let restart = start_after_rollback(backup);
                     let _ = staging.cleanup(backup);
                     return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
@@ -173,6 +191,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     if let Err(error) = verify_applied(plan, &staged, backup) {
         backup.event("ERROR", &format!("Контроль итогового состояния файлов не пройден: {error}"))?;
         let rollback = rollback(plan, &staged, &applied, backup);
+        cleanup_created_baseline_directory(baseline_directory_created, backup);
         let restart = start_after_rollback(backup);
         let _ = staging.cleanup(backup);
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
@@ -181,6 +200,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     if let Err(error) = restart_xkeen(backup) {
         backup.event("ERROR", &format!("Перезапуск или проверка XKeen завершились ошибкой: {error}"))?;
         let rollback = rollback(plan, &staged, &applied, backup);
+        cleanup_created_baseline_directory(baseline_directory_created, backup);
         let restart = start_after_rollback(backup);
         let _ = staging.cleanup(backup);
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
@@ -191,6 +211,34 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         backup.event("WARNING", &format!("Обновление применено, но staging-каталог не удалось удалить: {error}"))?;
     }
     Ok(())
+}
+
+fn create_baseline_directory(backup: &mut BackupSession) -> AppResult<bool> {
+    let path = Path::new(BASELINE_ROOT);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(format!("Путь baseline не является обычным каталогом: {}", path.display()).into());
+        }
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::create_dir(path)?;
+    backup.event("APPLY", &format!("Создан каталог baseline: {}.", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(true)
+}
+
+fn cleanup_created_baseline_directory(created: bool, backup: &mut BackupSession) {
+    if !created { return; }
+    let path = Path::new(BASELINE_ROOT);
+    match fs::remove_dir(path) {
+        Ok(()) => { backup.event("ROLLBACK", &format!("Удалён пустой каталог baseline, созданный текущим update: {}.", path.display())).ok(); }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            backup.event("ROLLBACK", &format!("Не удалось удалить каталог baseline {} после отката (возможно, он не пуст): {error}", path.display())).ok();
+        }
+    }
 }
 
 fn category_order(category: &str) -> u8 {
@@ -227,8 +275,17 @@ fn validate_target(operation: &PlannedFileOperation) -> AppResult<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("Не удалось проверить целевой путь {}: {error}", path.display()).into()),
     }
-    if !path.parent().ok_or("У целевого файла отсутствует родительский каталог.")?.is_dir() {
-        return Err(format!("Каталог назначения не существует: {}", path.parent().unwrap().display()).into());
+    let parent = path.parent().ok_or("У целевого файла отсутствует родительский каталог.")?;
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(format!("Каталог назначения является небезопасным объектом: {}", parent.display()).into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            && operation.category == "Baseline"
+            && operation.kind == PlannedOperationKind::Create
+            && parent == Path::new(BASELINE_ROOT) => {}
+        Err(error) => return Err(format!("Каталог назначения не существует или недоступен {}: {error}", parent.display()).into()),
     }
     Ok(())
 }

@@ -364,8 +364,13 @@ fn rollback(
                 retry_restore(&operation.path, backup)
             }
             PlannedOperationKind::Create => {
-                let expected = operation.content.as_deref().unwrap_or_default();
-                retry_remove_created(&operation.path, expected, backup)
+                match staged.get(index).and_then(Option::as_ref) {
+                    Some(staged_path) => match fs::read(staged_path) {
+                        Ok(expected) => retry_remove_created(&operation.path, &expected, backup),
+                        Err(error) => Err(format!("Не удалось прочитать staging-файл для безопасного удаления {}: {error}", operation.path.display())),
+                    },
+                    None => Err(format!("Для созданного файла отсутствует staging-файл: {}", operation.path.display())),
+                }
             }
         };
         match result {
@@ -422,7 +427,6 @@ fn rollback(
     } else {
         "успешный"
     };
-    let _ = staged;
     backup.event("ROLLBACK", &format!("Итог отката: {status}; восстановлено/удалено: {restored}; ошибок: {}; ошибок итоговой проверки: {final_failures}.", failed)).ok();
     format!("{status} (успешно: {restored}, ошибок: {})", failed + final_failures)
 }

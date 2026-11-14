@@ -1,3 +1,4 @@
+use crate::backup::{BackupSession, BackupSource};
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::outbound_compare::{compare_subscription, ComparisonReport};
@@ -51,24 +52,63 @@ struct RunState {
     processed: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlannedOperationKind {
+    Create,
+    Replace,
+    Delete,
+}
+
+struct PlannedFileOperation {
+    path: PathBuf,
+    category: &'static str,
+    kind: PlannedOperationKind,
+    content: Option<Vec<u8>>,
+}
+
 /// Control run only: downloads and analyses subscriptions, constructs all
 /// proposed documents in memory, validates them and prints the complete plan.
 /// No active configuration, archive or baseline file is written.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let started_at = Instant::now();
-    let result = run_inner(target_id);
+    let mut backup = BackupSession::start("Контрольный запуск обновления подписок")?;
+    backup.event("UPDATE", "Загрузка и анализ подписок.")?;
+
+    let result = run_inner(target_id, &mut backup);
+    if let Err(ref error) = result {
+        if backup_status_is_running(&backup) {
+            backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
+        }
+    } else if backup_status_is_running(&backup) {
+        backup.set_outcome(
+            "ЗАВЕРШЕНО",
+            "Контрольный запуск завершён. Изменения рабочих файлов не применялись.",
+            true,
+        );
+    }
+
+    let log_result = backup.finish();
     println!();
+    info(&format!("Резервная запись: {}.", backup.id()));
     info(&format!("Время выполнения: {}.", format_elapsed(started_at.elapsed())));
+    if let Err(error) = log_result {
+        return Err(format!("Не удалось завершить журнал резервной записи: {error}").into());
+    }
     result
 }
 
-fn run_inner(target_id: Option<&str>) -> AppResult<()> {
+fn backup_status_is_running(backup: &BackupSession) -> bool {
+    backup.is_running()
+}
+
+fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<()> {
     println!();
     title("XKEEN-SUB — КОНТРОЛЬНЫЙ ЗАПУСК UPDATE");
-    warning("Рабочие файлы, архив и baseline не изменяются.");
-    info("Резервное копирование и применение конфигурации будут реализованы отдельно.");
+    warning("Рабочие файлы, архив и baseline не изменяются. Создаётся резервная запись.");
+    backup.event("UPDATE", "Начата загрузка списка подписок.")?;
 
     let store = load_subscriptions()?;
+    backup.event("UPDATE", &format!("Загружен список подписок: {}.", store.subscriptions.len()))?;
     if store.subscriptions.is_empty() {
         info("Список подписок пуст.");
         return Ok(());
@@ -81,8 +121,15 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
         None => store.subscriptions.iter().collect(),
     };
     selected.sort_by_key(|item| subscription_id_number(&item.id).unwrap_or(u64::MAX));
+    backup.set_subscriptions(selected.iter().map(|item| {
+        match item.name.as_deref() {
+            Some(name) if !name.trim().is_empty() => format!("{} ({name})", item.id),
+            _ => item.id.clone(),
+        }
+    }).collect());
 
     let mut docs = load_config_documents()?;
+    backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
     let outbound_index = find_doc(&docs, OUTBOUND_FILE)
         .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
     let routing_index = find_doc(&docs, ROUTING_FILE)
@@ -100,8 +147,15 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     let api_tags = collect_api_tags(&docs);
     let mut state = RunState::default();
     for subscription in selected {
-        prepare_subscription(subscription, &mut state);
+        backup.event("SUBSCRIPTION", &format!("Начата обработка {}.", subscription.id))?;
+        prepare_subscription(subscription, &mut state, backup)?;
+        backup.event(
+            "SUBSCRIPTION",
+            &format!("Обработка {} завершена. Загружено: {}, подготовлено изменений: {}, ошибок: {}.",
+                subscription.id, state.downloaded, state.prepared.len(), state.failed.len()),
+        )?;
     }
+    backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());
 
     if state.downloaded == 0 {
         println!();
@@ -112,12 +166,16 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
             error("Отсутствует интернет-соединение.");
         }
         print_subscription_summary(&state);
+        backup.event("ERROR", "Не удалось загрузить ни одну подписку; применение заблокировано.")?;
+        backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", false);
         warning("Подготовка конфигурации прекращена. Рабочие файлы не изменены.");
         return Ok(());
     }
     if state.processed == 0 {
         print_subscription_summary(&state);
         print_baseline_plan(&state);
+        backup.event("ERROR", "Ни одна подписка не прошла обработку; дальнейшая подготовка прекращена.")?;
+        backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", false);
         warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
         return Ok(());
     }
@@ -148,6 +206,23 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
         }
     }
 
+    backup.event("MERGE", &format!(
+        "Объединение Outbound завершено. Замен пользовательских подключений: {}; конфликтов: {}; новых записей архива: {}.",
+        replacements.len(), conflicts.len(), archive.added
+    ))?;
+    for item in &replacements {
+        backup.event("MERGE", item)?;
+    }
+    for item in &conflicts {
+        backup.event("MERGE", item)?;
+    }
+    backup.event("BALANCER", &format!(
+        "Сценарий: {:?}; создан: {}; обновлён существующий: {}; перенаправлено routing rules: {}.",
+        balancer.case, balancer.created, balancer.updated_existing, balancer.transformed_rules
+    ))?;
+    backup.event("OBSERVATORY", &format!("Подготовлено обновлений subjectSelector: {}.", obs_updates.len()))?;
+
+    backup.event("CONFIG", "Подготовка конфигураций завершена. Запускается обязательная проверка Xray.")?;
     let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
 
     print_subscription_summary(&state);
@@ -157,6 +232,47 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     print_xray_test(&validation);
     print_baseline_plan(&state);
     print_prepared_documents(&docs);
+
+    if let Err(message) = &validation {
+        backup.event("XRAY", &format!("Проверка Xray не пройдена: {message}"))?;
+        backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", false);
+    } else {
+        backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
+        let plan = build_file_plan(&docs, &state, &archive)?;
+        print_file_plan(&plan);
+        backup.set_plan_count(plan.len());
+        backup.event("PLAN", &format!("Сформирован итоговый план: {} операций.", plan.len()))?;
+        for operation in &plan {
+            let action = match operation.kind {
+                PlannedOperationKind::Create => "Создание",
+                PlannedOperationKind::Replace => "Замена",
+                PlannedOperationKind::Delete => "Удаление",
+            };
+            backup.event("PLAN", &format!("{action}: {} | category={}", serde_json::to_string(&operation.path.display().to_string())?, operation.category))?;
+        }
+        let backup_sources: Vec<BackupSource> = plan.iter()
+            .filter(|operation| operation.kind != PlannedOperationKind::Create)
+            .map(|operation| BackupSource {
+                path: operation.path.clone(),
+                category: operation.category.to_owned(),
+            })
+            .collect();
+        match backup.backup_files(&backup_sources) {
+            Ok(saved) => {
+                backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
+                backup.set_outcome(
+                    "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА",
+                    "План изменений сформирован. Все необходимые исходные файлы сохранены и побайтно проверены. Применение изменений пока не входит в реализованные пункты.",
+                    true,
+                );
+            }
+            Err(error) => {
+                backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
+                backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), false);
+                return Err(error);
+            }
+        }
+    }
 
     println!();
     title("КОНТРОЛЬНЫЙ ЗАПУСК ЗАВЕРШЁН");
@@ -304,7 +420,11 @@ mod elapsed_time_tests {
     }
 }
 
-fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
+fn prepare_subscription(
+    subscription: &Subscription,
+    state: &mut RunState,
+    backup: &mut BackupSession,
+) -> AppResult<()> {
     println!();
     title(&format!("Подписка {}", subscription.id));
     info("Загрузка...");
@@ -312,12 +432,15 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         Ok(bytes) => {
             state.downloaded += 1;
             success(&format!("Получено {} байт.", bytes.len()));
+            backup.event("DOWNLOAD", &format!("{}: получено {} байт.", subscription.id, bytes.len()))?;
             bytes
         }
         Err(err) => {
-            state.failed.push((subscription.id.clone(), err.to_string()));
-            error(&format!("Ошибка загрузки: {err}"));
-            return;
+            let message = err.to_string();
+            state.failed.push((subscription.id.clone(), message.clone()));
+            error(&format!("Ошибка загрузки: {message}"));
+            backup.event("ERROR", &format!("{}: ошибка загрузки: {message}", subscription.id))?;
+            return Ok(());
         }
     };
 
@@ -326,19 +449,25 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&err.to_string());
-            return;
+            backup.event("ERROR", &format!("{}: {err}", subscription.id))?;
+            return Ok(());
         }
     };
     let previous = match fs::read(&baseline) {
-        Ok(bytes) => Some(bytes),
+        Ok(bytes) => {
+            backup.event("BASELINE", &format!("{}: baseline прочитан из {} ({} байт).", subscription.id, baseline.display(), bytes.len()))?;
+            Some(bytes)
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             warning("Baseline отсутствует: подписка считается новой, сравнение пропускается.");
+            backup.event("BASELINE", &format!("{}: baseline отсутствует; подписка рассматривается как новая.", subscription.id))?;
             None
         }
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Не удалось прочитать baseline: {err}"));
-            return;
+            backup.event("ERROR", &format!("{}: не удалось прочитать baseline {}: {err}", subscription.id, baseline.display()))?;
+            return Ok(());
         }
     };
 
@@ -352,6 +481,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
                 warning(&format!(
                     "Baseline повреждён и будет рассматриваться как отсутствующий: {err}"
                 ));
+                backup.event("BASELINE", &format!("{}: baseline повреждён и будет считаться отсутствующим: {err}", subscription.id))?;
                 damaged_baseline = true;
                 None
             }
@@ -363,19 +493,26 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         if byte_contents_equal(Some(previous_bytes), &downloaded) {
             state.processed += 1;
             success("Уровень 1: исходный файл полностью совпадает с корректным baseline. Подписка не изменилась.");
-            return;
+            backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты совпадают с baseline; изменений нет.", subscription.id))?;
+            return Ok(());
         }
         info("Уровень 1: исходный файл отличается от baseline.");
+        backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты отличаются от baseline.", subscription.id))?;
     } else {
         info("Уровень 1: сравнение пропущено — baseline отсутствует или повреждён.");
+        backup.event("COMPARE", &format!("{}: уровень 1 пропущен — baseline отсутствует или повреждён.", subscription.id))?;
     }
 
     let current = match parse_subscription(&downloaded) {
-        Ok(parsed) => parsed,
+        Ok(parsed) => {
+            backup.event("PARSE", &format!("{}: подписка разобрана; распознано подключений: {}, пропущено: {}.", subscription.id, parsed.outbounds.len(), parsed.unrecognized))?;
+            parsed
+        }
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Ошибка обработки новой подписки: {err}. Baseline не обновляется."));
-            return;
+            backup.event("ERROR", &format!("{}: ошибка разбора новой подписки: {err}. Baseline не обновляется.", subscription.id))?;
+            return Ok(());
         }
     };
 
@@ -386,7 +523,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
                 let message = format!("Не удалось сформировать Outbound из baseline: {err}");
                 state.failed.push((subscription.id.clone(), message.clone()));
                 error(&message);
-                return;
+                backup.event("ERROR", &format!("{}: {message}", subscription.id))?;
+                return Ok(());
             }
         },
         None => None,
@@ -397,7 +535,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
             let message = format!("Не удалось сформировать Outbound из новой подписки: {err}");
             state.failed.push((subscription.id.clone(), message.clone()));
             error(&message);
-            return;
+            backup.event("ERROR", &format!("{}: {message}", subscription.id))?;
+            return Ok(());
         }
     };
 
@@ -405,11 +544,14 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         if byte_contents_equal(Some(previous_json), &current_json) {
             state.processed += 1;
             success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
-            return;
+            backup.event("COMPARE", &format!("{}: уровень 2 — сформированные Outbound совпадают побайтно.", subscription.id))?;
+            return Ok(());
         }
         info("Уровень 2: сформированные Outbound отличаются. Запускаем сравнение по Tag.");
+        backup.event("COMPARE", &format!("{}: уровень 2 — Outbound отличаются; запускается сравнение по Tag.", subscription.id))?;
     } else {
         info("Уровень 2: сравнение пропущено — baseline отсутствует или повреждён. Запускаем сравнение по Tag как для новой подписки.");
+        backup.event("COMPARE", &format!("{}: уровень 2 пропущен; выполняется сравнение новой подписки по Tag.", subscription.id))?;
     }
 
     info("Уровень 3: сравнение подключений по Tag...");
@@ -418,7 +560,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Ошибка сравнения подписки: {err}"));
-            return;
+            backup.event("ERROR", &format!("{}: ошибка сравнения подключений: {err}", subscription.id))?;
+            return Ok(());
         }
     };
     report.unrecognized_current += current.unrecognized;
@@ -426,6 +569,25 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         report.unrecognized_previous += previous.unrecognized;
     }
     print_comparison(&report);
+    backup.event(
+        "COMPARE",
+        &format!("{}: добавлено {}, удалено {}, изменено {}, без изменений {}; нераспознано в новой версии {}, в baseline {}.",
+            subscription.id, report.added.len(), report.removed.len(), report.changed.len(), report.unchanged,
+            report.unrecognized_current, report.unrecognized_previous),
+    )?;
+    for item in &report.added {
+        backup.event("COMPARE", &format!("{}: добавлено подключение {}.", subscription.id, item.tag))?;
+    }
+    for item in &report.removed {
+        backup.event("COMPARE", &format!("{}: удалено подключение {}.", subscription.id, item.tag))?;
+    }
+    for item in &report.changed {
+        backup.event("COMPARE", &format!("{}: изменено подключение {}.", subscription.id, item.tag))?;
+        for change in &item.changes {
+            backup.event("COMPARE", &format!("{}: {} — {} -> {}.", subscription.id, change.path,
+                show_value(change.previous.as_ref()), show_value(change.current.as_ref())))?;
+        }
+    }
 
     if current.unrecognized > 0 {
         warning(&format!(
@@ -434,6 +596,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         ));
         for detail in current.errors.iter().take(10) {
             warning(&format!("  {detail}"));
+            backup.event("PARSE", &format!("{}: {detail}", subscription.id))?;
         }
         warning("Распознанные подключения будут обработаны. Старые подключения без однозначного соответствия не добавляются.");
     }
@@ -442,24 +605,21 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     if !changed {
         state.processed += 1;
         success("Изменений среди распознанных подключений нет. Рабочая группа и baseline сохраняются без изменений.");
-        return;
+        backup.event("SUBSCRIPTION", &format!("{}: среди распознанных подключений изменений нет; baseline не обновляется.", subscription.id))?;
+        return Ok(());
     }
 
-    // A damaged baseline is only staged for removal when the new subscription
-    // parsed successfully and its detected changes are included in the
-    // prepared configuration. Failed or empty updates must not discard it.
     if damaged_baseline {
         state.baseline_removals.push((subscription.id.clone(), baseline.clone()));
+        backup.event("BASELINE", &format!("{}: повреждённый baseline добавлен в план удаления: {}.", subscription.id, baseline.display()))?;
     }
 
-    // Stage the new source baseline only for subscriptions whose detected
-    // changes are included in the prepared configuration. The eventual write
-    // belongs to the final apply phase, after active config files are replaced.
     state.baseline_updates.push(PreparedBaseline {
         id: subscription.id.clone(),
         original: downloaded,
-        path: baseline,
+        path: baseline.clone(),
     });
+    backup.event("BASELINE", &format!("{}: новый baseline подготовлен для {}.", subscription.id, baseline.display()))?;
 
     let outbounds: Vec<Value> = current.outbounds.into_iter().map(|mut outbound| {
         let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
@@ -472,10 +632,12 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
 
     state.processed += 1;
     success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));
+    backup.event("SUBSCRIPTION", &format!("{}: в Обновлённый Outbound передано {} подключений.", subscription.id, outbounds.len()))?;
     state.prepared.push(PreparedSubscription {
         id: subscription.id.clone(),
         outbounds,
     });
+    Ok(())
 }
 
 fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
@@ -717,6 +879,188 @@ fn print_prepared_documents(docs: &[ConfigDocument]) {
     for doc in docs {
         let text = serde_json::to_string(&doc.value).unwrap_or_else(|_| doc.original.clone());
         info(&format!("{} — {} байт подготовлено.", doc.file_name, text.len()));
+    }
+}
+
+fn build_file_plan(
+    docs: &[ConfigDocument],
+    state: &RunState,
+    archive: &ArchivePlan,
+) -> AppResult<Vec<PlannedFileOperation>> {
+    let mut plan: BTreeMap<PathBuf, PlannedFileOperation> = BTreeMap::new();
+
+    for doc in docs {
+        let mut content = serde_json::to_vec_pretty(&doc.value)?;
+        content.push(b'\n');
+        if content != doc.original.as_bytes() {
+            plan.insert(doc.path.clone(), PlannedFileOperation {
+                path: doc.path.clone(),
+                category: "Конфигурация Xray",
+                kind: PlannedOperationKind::Replace,
+                content: Some(content),
+            });
+        }
+    }
+
+    if archive.added > 0 {
+        let path = PathBuf::from(USER_ARCHIVE);
+        let mut content = serde_json::to_vec_pretty(&archive.outbounds)?;
+        content.push(b'\n');
+        match fs::read(&path) {
+            Ok(original) if original == content => {}
+            Ok(_) => {
+                plan.insert(path.clone(), PlannedFileOperation {
+                    path,
+                    category: "Архив пользовательских подключений",
+                    kind: PlannedOperationKind::Replace,
+                    content: Some(content),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                plan.insert(path.clone(), PlannedFileOperation {
+                    path,
+                    category: "Архив пользовательских подключений",
+                    kind: PlannedOperationKind::Create,
+                    content: Some(content),
+                });
+            }
+            Err(error) => return Err(format!("Не удалось проверить архив {}: {error}", path.display()).into()),
+        }
+    }
+
+    for baseline in &state.baseline_updates {
+        match fs::read(&baseline.path) {
+            Ok(original) if original == baseline.original => {}
+            Ok(_) => {
+                plan.insert(baseline.path.clone(), PlannedFileOperation {
+                    path: baseline.path.clone(),
+                    category: "Baseline",
+                    kind: PlannedOperationKind::Replace,
+                    content: Some(baseline.original.clone()),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                plan.insert(baseline.path.clone(), PlannedFileOperation {
+                    path: baseline.path.clone(),
+                    category: "Baseline",
+                    kind: PlannedOperationKind::Create,
+                    content: Some(baseline.original.clone()),
+                });
+            }
+            Err(error) => return Err(format!("Не удалось проверить baseline {}: {error}", baseline.path.display()).into()),
+        }
+    }
+
+    for (id, path) in &state.baseline_removals {
+        if plan.contains_key(path) {
+            // A replacement at the same path supersedes a separate removal.
+            continue;
+        }
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                plan.insert(path.clone(), PlannedFileOperation {
+                    path: path.clone(),
+                    category: "Повреждённый baseline",
+                    kind: PlannedOperationKind::Delete,
+                    content: None,
+                });
+            }
+            Ok(_) => return Err(format!("Путь baseline для {id} не является обычным файлом: {}", path.display()).into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Не удалось проверить baseline для удаления {}: {error}", path.display()).into()),
+        }
+    }
+
+    Ok(plan.into_values().collect())
+}
+
+fn print_file_plan(plan: &[PlannedFileOperation]) {
+    println!();
+    title("ИТОГОВЫЙ СПИСОК ФАЙЛОВ ДЛЯ ИЗМЕНЕНИЯ");
+    if plan.is_empty() {
+        info("Файлы для изменения отсутствуют.");
+        return;
+    }
+    for operation in plan {
+        let action = match operation.kind {
+            PlannedOperationKind::Create => "Создание",
+            PlannedOperationKind::Replace => "Замена",
+            PlannedOperationKind::Delete => "Удаление",
+        };
+        let size = operation.content.as_ref().map(|bytes| format!(" ({} байт)", bytes.len())).unwrap_or_default();
+        info(&format!("{action}: {} — {}{size}", operation.path.display(), operation.category));
+    }
+    info(&format!("Всего операций: {}.", plan.len()));
+}
+
+
+#[cfg(test)]
+mod file_plan_tests {
+    use super::{build_file_plan, ConfigDocument, PlannedOperationKind, PreparedBaseline, RunState};
+    use crate::update_merge::ArchivePlan;
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temporary_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xkeen-sub-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn byte_identical_prepared_config_and_baseline_are_excluded() {
+        let root = temporary_path("plan-identical");
+        fs::create_dir_all(&root).unwrap();
+        let baseline_path = root.join("baseline.json");
+        let baseline = b"{\"subscriptions\":[]}".to_vec();
+        fs::write(&baseline_path, &baseline).unwrap();
+
+        let value = json!({"log":{"loglevel":"warning"}});
+        let mut original = serde_json::to_vec_pretty(&value).unwrap();
+        original.push(b'\n');
+        let doc = ConfigDocument {
+            file_name: "config.json".to_owned(),
+            path: root.join("config.json"),
+            original: String::from_utf8(original).unwrap(),
+            value,
+        };
+        let state = RunState {
+            baseline_updates: vec![PreparedBaseline {
+                id: "sub1".to_owned(),
+                original: baseline,
+                path: baseline_path,
+            }],
+            ..RunState::default()
+        };
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[doc], &state, &archive).unwrap();
+        assert!(plan.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn baseline_replacement_supersedes_removal_at_the_same_path() {
+        let root = temporary_path("plan-baseline-priority");
+        fs::create_dir_all(&root).unwrap();
+        let baseline_path = root.join("baseline.json");
+        fs::write(&baseline_path, b"old baseline").unwrap();
+
+        let state = RunState {
+            baseline_updates: vec![PreparedBaseline {
+                id: "sub1".to_owned(),
+                original: b"new baseline".to_vec(),
+                path: baseline_path.clone(),
+            }],
+            baseline_removals: vec![("sub1".to_owned(), baseline_path.clone())],
+            ..RunState::default()
+        };
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[], &state, &archive).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].path, baseline_path);
+        assert_eq!(plan[0].kind, PlannedOperationKind::Replace);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

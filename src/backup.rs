@@ -546,6 +546,11 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
         warning("Нельзя восстанавливать резервную запись, пока она используется работающим update.");
         return Ok(());
     }
+    let status = read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
+    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "УСПЕШНО" {
+        warning("Эта запись не содержит подтверждённую полную резервную копию. Восстановление запрещено.");
+        return Ok(());
+    }
     let log_path = record.path.join("log.txt");
     let mappings = read_file_mappings(&log_path)?;
     let created_paths = read_created_paths(&log_path)?;

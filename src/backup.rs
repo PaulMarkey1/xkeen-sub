@@ -91,6 +91,11 @@ impl BackupSession {
             }
         };
 
+        let active_path = path.join(".active");
+        let mut active = OpenOptions::new().write(true).create_new(true).open(&active_path)?;
+        writeln!(active, "{}", std::process::id())?;
+        active.sync_all()?;
+
         let log_path = path.join("log.txt");
         let mut log = OpenOptions::new().write(true).create_new(true).open(&log_path)
             .map_err(|e| format!("Не удалось создать {}: {e}", log_path.display()))?;
@@ -278,6 +283,10 @@ impl BackupSession {
                 Ok(_) => {}
                 Err(error) => self.event("RETENTION", &format!("Не удалось выполнить очистку старых записей: {error}"))?,
             }
+        }
+        let active_path = self.path.join(".active");
+        if let Err(error) = fs::remove_file(&active_path) {
+            self.event("WARNING", &format!("Не удалось удалить временный маркер активности {}: {error}", active_path.display()))?;
         }
         Ok(())
     }
@@ -518,6 +527,10 @@ fn show_files(record: &BackupRecord) -> AppResult<()> {
 }
 
 fn restore_record(record: &BackupRecord) -> AppResult<()> {
+    if is_active_record(record) {
+        warning("Нельзя восстанавливать резервную запись, пока она используется работающим update.");
+        return Ok(());
+    }
     let log_path = record.path.join("log.txt");
     let mappings = read_file_mappings(&log_path)?;
     let created_paths = read_created_paths(&log_path)?;
@@ -876,9 +889,19 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
 }
 
 fn is_active_record(record: &BackupRecord) -> bool {
+    let marker = record.path.join(".active");
+    if marker.exists() {
+        let pid = fs::read_to_string(&marker).ok()
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        return match pid {
+            Some(pid) if Path::new("/proc").is_dir() => Path::new(&format!("/proc/{pid}")).exists(),
+            Some(_) => true,
+            None => true,
+        };
+    }
     match read_summary(&record.path.join("log.txt")).get("status") {
         Some(status) => status == "ВЫПОЛНЯЕТСЯ",
-        None => true,
+        None => false,
     }
 }
 

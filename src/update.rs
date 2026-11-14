@@ -215,7 +215,16 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
         let plan = build_file_plan(&docs, &state, &archive)?;
         print_file_plan(&plan);
+        backup.set_plan_count(plan.len());
         backup.event("PLAN", &format!("Сформирован итоговый план: {} операций.", plan.len()))?;
+        for operation in &plan {
+            let action = match operation.kind {
+                PlannedOperationKind::Create => "Создание",
+                PlannedOperationKind::Replace => "Замена",
+                PlannedOperationKind::Delete => "Удаление",
+            };
+            backup.event("PLAN", &format!("{action}: {} ({})", operation.path.display(), operation.category))?;
+        }
         let backup_sources: Vec<BackupSource> = plan.iter()
             .filter(|operation| operation.kind != PlannedOperationKind::Create && operation.path.is_file())
             .map(|operation| BackupSource {

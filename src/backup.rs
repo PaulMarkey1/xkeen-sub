@@ -233,25 +233,31 @@ impl BackupSession {
     }
 
     pub(crate) fn verify_original(&self, source: &Path) -> AppResult<bool> {
+        let target = canonical_target_path(source)?;
         let mappings = read_file_mappings(&self.log_path)?;
-        let Some(stored) = mappings.iter().find(|(original, _)| original == source).map(|(_, stored)| stored) else {
+        let Some(stored) = mappings.iter().find(|(original, _)| original == &target).map(|(_, stored)| stored) else {
             return Ok(false);
         };
         let backup_file = self.path.join(stored);
+        let backup_metadata = match fs::symlink_metadata(&backup_file) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+            _ => return Ok(false),
+        };
+        let _ = backup_metadata;
         let expected = match fs::read(backup_file) {
             Ok(bytes) => bytes,
             Err(_) => return Ok(false),
         };
-        let source_metadata = match fs::symlink_metadata(source) {
+        let source_metadata = match fs::symlink_metadata(&target) {
             Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
             _ => return Ok(false),
         };
-        let actual = match fs::read(source) {
+        let actual = match fs::read(&target) {
             Ok(bytes) => bytes,
             Err(_) => return Ok(false),
         };
         if actual != expected { return Ok(false); }
-        let Some(expected_metadata) = read_file_metadata(&self.log_path, source)? else {
+        let Some(expected_metadata) = read_file_metadata(&self.log_path, &target)? else {
             return Ok(false);
         };
         if file_checksum(&expected) != expected_metadata.checksum { return Ok(false); }
@@ -261,20 +267,26 @@ impl BackupSession {
     }
 
     pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {
+        let target = canonical_target_path(source)?;
         let mappings = read_file_mappings(&self.log_path)?;
-        let stored = mappings.iter().find(|(original, _)| original == source)
+        let stored = mappings.iter().find(|(original, _)| original == &target)
             .map(|(_, stored)| stored.clone())
-            .ok_or_else(|| format!("В резервной копии нет исходного файла: {}", source.display()))?;
+            .ok_or_else(|| format!("В резервной копии нет исходного файла: {}", target.display()))?;
         let backup_file = self.path.join(&stored);
+        let backup_metadata = fs::symlink_metadata(&backup_file)
+            .map_err(|error| format!("Не удалось проверить резервный файл {}: {error}", backup_file.display()))?;
+        if backup_metadata.file_type().is_symlink() || !backup_metadata.is_file() {
+            return Err(format!("Резервный объект не является обычным файлом: {}", backup_file.display()).into());
+        }
         let backup_bytes = fs::read(&backup_file)
             .map_err(|error| format!("Не удалось прочитать резервный файл {}: {error}", backup_file.display()))?;
-        let metadata = read_file_metadata(&self.log_path, source)?
-            .ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", source.display()))?;
+        let metadata = read_file_metadata(&self.log_path, &target)?
+            .ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", target.display()))?;
         if file_checksum(&backup_bytes) != metadata.checksum {
             return Err(format!("Контрольная сумма резервного файла не совпадает: {}", backup_file.display()).into());
         }
-        restore_file_atomically(source, &backup_bytes, metadata)?;
-        self.event("ROLLBACK", &format!("Исходный файл восстановлен и проверен: {}", source.display()))?;
+        restore_file_atomically(&target, &backup_bytes, metadata)?;
+        self.event("ROLLBACK", &format!("Исходный файл восстановлен и проверен: {}", target.display()))?;
         Ok(())
     }
 
@@ -918,6 +930,14 @@ fn read_created_paths(log_path: &Path) -> AppResult<Vec<PathBuf>> {
 }
 
 #[derive(Clone, Copy, Debug)]
+fn canonical_target_path(source: &Path) -> AppResult<PathBuf> {
+    let parent = source.parent().ok_or("Не удалось определить каталог исходного файла.")?;
+    let canonical_parent = parent.canonicalize()
+        .map_err(|error| format!("Не удалось определить каталог {}: {error}", parent.display()))?;
+    let name = source.file_name().ok_or("У исходного файла отсутствует имя.")?;
+    Ok(canonical_parent.join(name))
+}
+
 struct FileMetadata {
     mode: u32,
     uid: u32,

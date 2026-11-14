@@ -689,7 +689,6 @@ fn print_xray_test(result: &Result<(), String>) {
         Ok(()) => success("Итоговая проверка Xray завершилась успешно."),
         Err(message) => {
             error(&format!("Xray отклонил итоговую конфигурацию: {message}"));
-            error("Итоговая проверка блокирует будущее применение.");
         }
     }
 }

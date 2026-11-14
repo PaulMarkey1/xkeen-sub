@@ -126,6 +126,27 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     let mut applied = Vec::new();
 
     for index in order {
+        if matches!(plan[index].kind, PlannedOperationKind::Replace | PlannedOperationKind::Delete) {
+            match backup.verify_original(&plan[index].path) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let message = format!("Исходный файл изменился после резервирования; применение остановлено: {}", plan[index].path.display());
+                    backup.event("ERROR", &message)?;
+                    let rollback = rollback(plan, &staged, &applied, backup);
+                    let restart = start_after_rollback(backup);
+                    let _ = staging.cleanup(backup);
+                    return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+                }
+                Err(error) => {
+                    let message = format!("Не удалось проверить исходный файл перед заменой {}: {error}", plan[index].path.display());
+                    backup.event("ERROR", &message)?;
+                    let rollback = rollback(plan, &staged, &applied, backup);
+                    let restart = start_after_rollback(backup);
+                    let _ = staging.cleanup(backup);
+                    return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+                }
+            }
+        }
         match apply_one(&plan[index], staged[index].as_deref()) {
             Ok(()) => {
                 applied.push(index);
@@ -435,8 +456,7 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
         return Err(format!("xkeen -stop завершился ошибкой (код {:?}, timeout={}).", stop.code, stop.timed_out).into());
     }
     let status = run_xkeen(&["-status"], backup)?;
-    let stopped = status.code == Some(1)
-        && status.stdout.contains("Прокси-клиент не запущен");
+    let stopped = is_stopped_status(status.code, &status.stdout);
     if !stopped {
         return Err(format!("Остановка XKeen не подтверждена: exit_code={:?}; stdout={}", status.code, status.stdout).into());
     }
@@ -447,7 +467,7 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     }
     thread::sleep(Duration::from_secs(5));
     let status = run_xkeen(&["-status"], backup)?;
-    if status.code != Some(0) || !status.stdout.contains("Прокси-клиент") || !status.stdout.contains("запущен") || status.stdout.contains("не запущен") {
+    if !is_running_status(status.code, &status.stdout) {
         return Err(format!("Запуск XKeen не подтверждён: exit_code={:?}; stdout={}", status.code, status.stdout).into());
     }
     backup.event("XKEEN", "Остановка, запуск и проверка статуса XKeen завершились успешно.")?;
@@ -459,10 +479,7 @@ fn start_after_rollback(backup: &mut BackupSession) -> String {
         Ok(start) if start.success => {
             thread::sleep(Duration::from_secs(5));
             match run_xkeen(&["-status"], backup) {
-                Ok(status) if status.code == Some(0)
-                    && status.stdout.contains("Прокси-клиент")
-                    && status.stdout.contains("запущен")
-                    && !status.stdout.contains("не запущен") => {
+                Ok(status) if is_running_status(status.code, &status.stdout) => {
                         backup.event("ROLLBACK", "После отката запуск XKeen подтверждён.").ok();
                         "запущен, статус подтверждён".to_owned()
                     }
@@ -486,6 +503,37 @@ fn start_after_rollback(backup: &mut BackupSession) -> String {
             backup.event("ERROR", &format!("Ошибка запуска XKeen после отката: {error}")).ok();
             error.to_string()
         }
+    }
+}
+
+fn is_stopped_status(code: Option<i32>, stdout: &str) -> bool {
+    code == Some(1) && stdout.contains("Прокси-клиент не запущен")
+}
+
+fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
+    code == Some(0)
+        && stdout.contains("Прокси-клиент")
+        && stdout.contains("запущен")
+        && !stdout.contains("не запущен")
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::{is_running_status, is_stopped_status};
+
+    #[test]
+    fn accepts_only_explicit_stopped_status_with_expected_exit_code() {
+        assert!(is_stopped_status(Some(1), "Прокси-клиент не запущен"));
+        assert!(!is_stopped_status(Some(0), "Прокси-клиент не запущен"));
+        assert!(!is_stopped_status(Some(1), "не удалось определить статус"));
+    }
+
+    #[test]
+    fn accepts_only_explicit_running_status_with_zero_exit_code() {
+        assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
+        assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
+        assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));
+        assert!(!is_running_status(Some(0), "не удалось определить статус"));
     }
 }
 

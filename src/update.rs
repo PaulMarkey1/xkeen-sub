@@ -118,6 +118,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     }
     if state.processed == 0 {
         print_subscription_summary(&state);
+        print_baseline_plan(&state);
         warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
         return Ok(());
     }
@@ -401,13 +402,16 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
-    if byte_contents_equal(previous_json.as_deref(), &current_json) {
-        state.processed += 1;
-        success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
-        return;
+    if let Some(previous_json) = previous_json.as_deref() {
+        if byte_contents_equal(Some(previous_json), &current_json) {
+            state.processed += 1;
+            success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
+            return;
+        }
+        info("Уровень 2: сформированные Outbound отличаются. Запускаем сравнение по Tag.");
+    } else {
+        info("Уровень 2: сравнение пропущено — baseline отсутствует или повреждён. Запускаем сравнение по Tag как для новой подписки.");
     }
-
-    info("Уровень 2: сформированные Outbound отличаются либо baseline отсутствует. Запускаем сравнение по Tag.");
 
     info("Уровень 3: сравнение подключений по Tag...");
     let mut report = match compare_subscription(previous_json.as_deref(), &current_json) {

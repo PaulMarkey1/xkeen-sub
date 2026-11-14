@@ -621,7 +621,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
         return Ok(());
     }
     let status = read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
-    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "УСПЕШНО" && status != "ОШИБКА ПРИМЕНЕНИЯ" {
+    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "УСПЕШНО" {
         warning("Эта запись не содержит подтверждённую полную резервную копию. Восстановление запрещено.");
         return Ok(());
     }

@@ -4,7 +4,9 @@ use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
 
@@ -220,6 +222,7 @@ impl BackupSession {
                 &format!("Сохранён файл: {} -> {} ({} байт; категория: {}).", original.display(), stored, original_bytes.len(), source.category),
             )?;
             self.append_file_mapping(&original, &stored_relative)?;
+            self.append_file_metadata(&original, source_metadata.mode() & 0o7777, source_metadata.uid(), source_metadata.gid(), &original_bytes)?;
             saved += 1;
             self.saved_files = saved;
         }
@@ -227,6 +230,75 @@ impl BackupSession {
         self.saved_files = saved;
         self.event("BACKUP", &format!("Побайтовая проверка успешно пройдена для {saved} файлов."))?;
         Ok(saved)
+    }
+
+    pub(crate) fn verify_original(&self, source: &Path) -> AppResult<bool> {
+        let target = canonical_target_path(source)?;
+        let mappings = read_file_mappings(&self.log_path)?;
+        let Some(stored) = mappings.iter().find(|(original, _)| original == &target).map(|(_, stored)| stored) else {
+            return Ok(false);
+        };
+        let backup_file = self.path.join(stored);
+        let backup_metadata = match fs::symlink_metadata(&backup_file) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+            _ => return Ok(false),
+        };
+        let _ = backup_metadata;
+        let expected = match fs::read(backup_file) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(false),
+        };
+        let source_metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+            _ => return Ok(false),
+        };
+        let actual = match fs::read(&target) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(false),
+        };
+        if actual != expected { return Ok(false); }
+        let Some(expected_metadata) = read_file_metadata(&self.log_path, &target)? else {
+            return Ok(false);
+        };
+        if file_checksum(&expected) != expected_metadata.checksum { return Ok(false); }
+        Ok(source_metadata.mode() & 0o7777 == expected_metadata.mode
+            && source_metadata.uid() == expected_metadata.uid
+            && source_metadata.gid() == expected_metadata.gid)
+    }
+
+    pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {
+        let target = canonical_target_path(source)?;
+        let mappings = read_file_mappings(&self.log_path)?;
+        let stored = mappings.iter().find(|(original, _)| original == &target)
+            .map(|(_, stored)| stored.clone())
+            .ok_or_else(|| format!("В резервной копии нет исходного файла: {}", target.display()))?;
+        let backup_file = self.path.join(&stored);
+        let backup_metadata = fs::symlink_metadata(&backup_file)
+            .map_err(|error| format!("Не удалось проверить резервный файл {}: {error}", backup_file.display()))?;
+        if backup_metadata.file_type().is_symlink() || !backup_metadata.is_file() {
+            return Err(format!("Резервный объект не является обычным файлом: {}", backup_file.display()).into());
+        }
+        let backup_bytes = fs::read(&backup_file)
+            .map_err(|error| format!("Не удалось прочитать резервный файл {}: {error}", backup_file.display()))?;
+        let metadata = read_file_metadata(&self.log_path, &target)?
+            .ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", target.display()))?;
+        if file_checksum(&backup_bytes) != metadata.checksum {
+            return Err(format!("Контрольная сумма резервного файла не совпадает: {}", backup_file.display()).into());
+        }
+        restore_file_atomically(&target, &backup_bytes, metadata)?;
+        self.event("ROLLBACK", &format!("Исходный файл восстановлен и проверен: {}", target.display())).ok();
+        Ok(())
+    }
+
+    fn append_file_metadata(&mut self, original: &Path, mode: u32, uid: u32, gid: u32, bytes: &[u8]) -> AppResult<()> {
+        let path = serde_json::to_string(&original.display().to_string())?;
+        let checksum = file_checksum(bytes);
+        let line = format!("Метаданные: {path} -> {mode:o} {uid} {gid} {checksum:016x}\n");
+        let mut file = OpenOptions::new().append(true).open(&self.log_path)?;
+        file.write_all(line.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
     }
 
     fn append_file_mapping(&mut self, original: &Path, stored: &Path) -> AppResult<()> {
@@ -857,6 +929,101 @@ fn read_created_paths(log_path: &Path) -> AppResult<Vec<PathBuf>> {
     Ok(paths.into_iter().collect())
 }
 
+fn canonical_target_path(source: &Path) -> AppResult<PathBuf> {
+    let parent = source.parent().ok_or("Не удалось определить каталог исходного файла.")?;
+    let canonical_parent = parent.canonicalize()
+        .map_err(|error| format!("Не удалось определить каталог {}: {error}", parent.display()))?;
+    let name = source.file_name().ok_or("У исходного файла отсутствует имя.")?;
+    Ok(canonical_parent.join(name))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FileMetadata {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    checksum: u64,
+}
+
+fn file_checksum(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn read_file_metadata(log_path: &Path, source: &Path) -> AppResult<Option<FileMetadata>> {
+    let content = fs::read_to_string(log_path)?;
+    for line in content.lines() {
+        let Some(value) = line.strip_prefix("Метаданные: ") else { continue; };
+        let Some((path, metadata)) = value.split_once(" -> ") else { continue; };
+        let path: String = serde_json::from_str(path)
+            .map_err(|error| format!("Некорректный путь метаданных в журнале: {error}"))?;
+        if Path::new(&path) != source { continue; }
+        let mut fields = metadata.split_whitespace();
+        let mode = u32::from_str_radix(fields.next().ok_or("В журнале отсутствует режим файла.")?, 8)?;
+        let uid = fields.next().ok_or("В журнале отсутствует UID файла.")?.parse::<u32>()?;
+        let gid = fields.next().ok_or("В журнале отсутствует GID файла.")?.parse::<u32>()?;
+        let checksum = u64::from_str_radix(fields.next().ok_or("В журнале отсутствует контрольная сумма файла.")?, 16)?;
+        if fields.next().is_some() { return Err("Некорректная запись метаданных файла.".into()); }
+        return Ok(Some(FileMetadata { mode, uid, gid, checksum }));
+    }
+    Ok(None)
+}
+
+static RESTORE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) -> AppResult<()> {
+    let parent = path.parent().ok_or("Не удалось определить каталог восстанавливаемого файла.")?;
+    fs::create_dir_all(parent)?;
+    if let Ok(current) = fs::symlink_metadata(path) {
+        if current.file_type().is_symlink() || !current.is_file() {
+            return Err(format!("Нельзя восстановить файл поверх небезопасного объекта: {}", path.display()).into());
+        }
+    }
+    let counter = RESTORE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = path.file_name().and_then(|value| value.to_str()).ok_or("Недопустимое имя файла восстановления.")?;
+    let temporary = parent.join(format!(".{name}.xkeen-sub-restore-{}-{counter}.tmp", std::process::id()));
+    let mut temporary_created = false;
+    let result = (|| -> AppResult<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+        temporary_created = true;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        let owner = Command::new("chown").arg(format!("{}:{}", metadata.uid, metadata.gid)).arg("--").arg(&temporary).output()
+            .map_err(|error| format!("Не удалось запустить chown для {}: {error}", temporary.display()))?;
+        if !owner.status.success() {
+            return Err(format!("Не удалось восстановить владельца {}: {}", temporary.display(), String::from_utf8_lossy(&owner.stderr)).into());
+        }
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(metadata.mode))?;
+        if fs::read(&temporary)? != content {
+            return Err(format!("Побайтовая проверка временного файла не пройдена: {}", temporary.display()).into());
+        }
+        fs::rename(&temporary, path)?;
+        if fs::read(path)? != content {
+            return Err(format!("Побайтовая проверка восстановленного файла не пройдена: {}", path.display()).into());
+        }
+        let restored = fs::metadata(path)?;
+        if restored.mode() & 0o7777 != metadata.mode || restored.uid() != metadata.uid || restored.gid() != metadata.gid {
+            return Err(format!("Проверка владельца или прав восстановленного файла не пройдена: {}", path.display()).into());
+        }
+        Ok(())
+    })();
+    if let Err(original_error) = &result {
+        if temporary_created {
+            if let Err(cleanup) = fs::remove_file(&temporary) {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("{original_error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()).into());
+                }
+            }
+        }
+    }
+    result
+}
+
 fn is_allowed_restore_path(path: &Path) -> bool {
     let archive = Path::new("/opt/etc/xkeen-sub/old-user-outbound.json");
     let xray_root = Path::new("/opt/etc/xray/configs");
@@ -978,7 +1145,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
+    use super::{days_from_civil, file_checksum, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
     use std::path::Path;
 
     #[test]
@@ -1010,6 +1177,12 @@ mod tests {
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/old-user-outbound.json")));
         assert!(!is_allowed_restore_path(Path::new("/etc/passwd")));
         assert!(!is_allowed_restore_path(Path::new("/opt/etc/xray/configs/../passwd")));
+    }
+
+    #[test]
+    fn backup_checksum_detects_corrupted_contents() {
+        assert_eq!(file_checksum(b"original"), file_checksum(b"original"));
+        assert_ne!(file_checksum(b"original"), file_checksum(b"corrupted"));
     }
 
     #[test]

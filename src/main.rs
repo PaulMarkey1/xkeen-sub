@@ -13,6 +13,7 @@ mod terminal;
 mod xray_test;
 mod update;
 mod update_merge;
+mod update_apply;
 
 fn main() {
     if let Err(error) = cli::run() {

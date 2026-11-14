@@ -1121,7 +1121,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
+    use super::{days_from_civil, file_checksum, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
     use std::path::Path;
 
     #[test]

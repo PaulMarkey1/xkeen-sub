@@ -430,37 +430,47 @@ fn change_mode() -> AppResult<()> {
 }
 
 fn list_interactive() -> AppResult<()> {
-    let records = load_records()?;
-    title("XKEEN-SUB — РЕЗЕРВНЫЕ КОПИИ");
-    if records.is_empty() {
-        info("Резервные копии отсутствуют.");
-        return Ok(());
-    }
-
-    let settings = load_settings()?;
-    println!();
-    let mut previous_date = String::new();
-    for (index, record) in records.iter().enumerate() {
-        if record.date != previous_date {
-            println!();
-            crate::terminal::separator(&record.date);
-            previous_date = record.date.clone();
-        }
-        let summary = read_summary(&record.path.join("log.txt"));
-        let time = summary.get("time").cloned().unwrap_or_else(|| "неизвестно".to_owned());
-        let status = summary.get("status").cloned().unwrap_or_else(|| "неизвестно".to_owned());
-        let saved = summary.get("saved").cloned().unwrap_or_else(|| "?".to_owned());
-        menu_item(&(index + 1).to_string(), &format!("backup{} — {} — {} — сохранено файлов: {}", record.number, time, status, saved));
-    }
-    println!();
-    info(&format!("Всего резервных копий: {}", records.len()));
-    info(&format!("Период хранения: {} дней", if settings.mode == RetentionMode::Unlimited { "без ограничений".to_owned() } else { settings.retention_days.to_string() }));
-    info(&format!("Дневной лимит: {}", settings.daily_limit));
     loop {
+        let records = load_records()?;
+        title("XKEEN-SUB — РЕЗЕРВНЫЕ КОПИИ");
+        if records.is_empty() {
+            info("Резервные копии отсутствуют.");
+            return Ok(());
+        }
+
+        let settings = load_settings()?;
+        println!();
+        let mut previous_date = String::new();
+        for (index, record) in records.iter().enumerate() {
+            if record.date != previous_date {
+                println!();
+                crate::terminal::separator(&record.date);
+                previous_date = record.date.clone();
+            }
+            let summary = read_summary(&record.path.join("log.txt"));
+            let time = summary.get("time").cloned().unwrap_or_else(|| "неизвестно".to_owned());
+            let status = summary.get("status").cloned().unwrap_or_else(|| "неизвестно".to_owned());
+            let saved = summary.get("saved").cloned().unwrap_or_else(|| "?".to_owned());
+            menu_item(&(index + 1).to_string(), &format!("backup{} — {} — {} — сохранено файлов: {}", record.number, time, status, saved));
+        }
+        println!();
+        info(&format!("Всего резервных копий: {}", records.len()));
+        info(&format!("Период хранения: {}", if settings.mode == RetentionMode::Unlimited {
+            "без ограничений".to_owned()
+        } else {
+            format!("{} календарных дней", settings.retention_days)
+        }));
+        info(&format!("Дневной лимит: {}", settings.daily_limit));
+
         let input = read_input("Введите номер записи для просмотра или 0 для выхода: ")?;
-        if input == "0" { return Ok(()); }
+        if input == "0" {
+            return Ok(());
+        }
         match input.parse::<usize>() {
-            Ok(number) if (1..=records.len()).contains(&number) => return show_record_menu(&records[number - 1].id),
+            Ok(number) if (1..=records.len()).contains(&number) => {
+                let id = records[number - 1].id.clone();
+                show_record_menu(&id)?;
+            }
             _ => error(&format!("Введите номер от 1 до {} или 0.", records.len())),
         }
     }

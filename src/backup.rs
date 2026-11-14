@@ -839,7 +839,7 @@ fn read_created_paths(log_path: &Path) -> AppResult<Vec<PathBuf>> {
     let mut paths = BTreeSet::new();
     for line in content.lines() {
         let Some((_, operation)) = line.split_once("] PLAN: Создание: ") else { continue; };
-        let path_text = operation.split(" (").next().unwrap_or(operation);
+        let path_text = operation.split(" | category=").next().unwrap_or(operation);
         let path = PathBuf::from(path_text);
         if !path.is_absolute() || !is_allowed_restore_path(&path) {
             return Err("В журнале обнаружен недопустимый путь созданного файла.".into());

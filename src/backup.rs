@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -65,6 +65,11 @@ pub(crate) struct BackupSession {
     path: PathBuf,
     log_path: PathBuf,
     finished: bool,
+    planned_files: usize,
+    saved_files: usize,
+    outcome_status: String,
+    outcome_summary: String,
+    allow_prune: bool,
 }
 
 impl BackupSession {
@@ -107,8 +112,14 @@ impl BackupSession {
         log.write_all(header.as_bytes())?;
         log.sync_all()?;
 
-        let mut session = Self { id, path, log_path, finished: false };
-        session.event("UPDATE", "Создана резервная запись. Начато выполнение update.");
+        let mut session = Self {
+            id, path, log_path, finished: false,
+            planned_files: 0, saved_files: 0,
+            outcome_status: "ВЫПОЛНЯЕТСЯ".to_owned(),
+            outcome_summary: "Обновление ещё выполняется.".to_owned(),
+            allow_prune: false,
+        };
+        session.event("UPDATE", "Создана резервная запись. Начато выполнение update.")?;
         Ok(session)
     }
 
@@ -120,21 +131,23 @@ impl BackupSession {
         &self.path
     }
 
-    pub(crate) fn event(&mut self, level: &str, message: &str) {
+    pub(crate) fn event(&mut self, level: &str, message: &str) -> AppResult<()> {
         let line = match current_time() {
             Ok(time) => format!("[{time}] {level}: {message}\n"),
             Err(_) => format!("[время неизвестно] {level}: {message}\n"),
         };
-        if let Ok(mut file) = OpenOptions::new().append(true).open(&self.log_path) {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
-            let _ = file.sync_all();
-        }
+        let mut file = OpenOptions::new().append(true).open(&self.log_path)
+            .map_err(|e| format!("Не удалось открыть журнал {}: {e}", self.log_path.display()))?;
+        file.write_all(line.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
     }
 
     pub(crate) fn backup_files(&mut self, sources: &[BackupSource]) -> AppResult<usize> {
+        self.planned_files = sources.len();
         if sources.is_empty() {
-            self.event("BACKUP", "Нет существующих файлов, требующих резервного копирования.");
+            self.event("BACKUP", "Нет существующих файлов, требующих резервного копирования.")?;
             return Ok(0);
         }
 
@@ -181,12 +194,13 @@ impl BackupSession {
             self.event(
                 "BACKUP",
                 &format!("Сохранён файл: {} -> {} ({} байт; категория: {}).", original.display(), stored, original_bytes.len(), source.category),
-            );
+            )?;
             self.append_file_mapping(&original, &stored_relative)?;
             saved += 1;
         }
 
-        self.event("BACKUP", &format!("Побайтовая проверка успешно пройдена для {saved} файлов."));
+        self.saved_files = saved;
+        self.event("BACKUP", &format!("Побайтовая проверка успешно пройдена для {saved} файлов."))?;
         Ok(saved)
     }
 
@@ -200,18 +214,17 @@ impl BackupSession {
         Ok(())
     }
 
-    pub(crate) fn finish(
-        &mut self,
-        status: &str,
-        summary: &str,
-        planned_files: usize,
-        saved_files: usize,
-        allow_prune: bool,
-    ) -> AppResult<()> {
+    pub(crate) fn set_outcome(&mut self, status: &str, summary: &str, allow_prune: bool) {
+        self.outcome_status = status.to_owned();
+        self.outcome_summary = summary.to_owned();
+        self.allow_prune = allow_prune;
+    }
+
+    pub(crate) fn finish(&mut self) -> AppResult<()> {
         if self.finished {
             return Ok(());
         }
-        self.event("UPDATE", summary);
+        self.event("UPDATE", &self.outcome_summary.clone())?;
         let existing = fs::read_to_string(&self.log_path)?;
         let marker = "ПОДРОБНЫЙ ЖУРНАЛ\n";
         let detail_start = existing.find(marker)
@@ -224,12 +237,12 @@ impl BackupSession {
              ============================================================\n\
              ID резервной записи: {}\n\
              Дата и время завершения: {} {}\n\
-             Итоговый статус: {status}\n\
-             Планируется изменить файлов: {planned_files}\n\
-             Сохранено файлов: {saved_files}\n\
-             Результат: {summary}\n\
+             Итоговый статус: {}\n\
+             Планируется изменить файлов: {}\n\
+             Сохранено файлов: {}\n\
+             Результат: {}\n\
              ------------------------------------------------------------\n",
-            self.id, current_date()?, now
+            self.id, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary, current_date()?, now
         );
         let temporary = self.path.join(".log.txt.tmp");
         {
@@ -241,11 +254,11 @@ impl BackupSession {
         fs::rename(&temporary, &self.log_path)?;
         self.finished = true;
 
-        if allow_prune {
+        if self.allow_prune {
             match prune_records(&load_settings()?, &self.id) {
-                Ok(removed) if removed > 0 => self.event("RETENTION", &format!("Автоматически удалено старых резервных записей: {removed}.")),
+                Ok(removed) if removed > 0 => self.event("RETENTION", &format!("Автоматически удалено старых резервных записей: {removed}."))?,
                 Ok(_) => {}
-                Err(error) => self.event("RETENTION", &format!("Не удалось выполнить очистку старых записей: {error}")),
+                Err(error) => self.event("RETENTION", &format!("Не удалось выполнить очистку старых записей: {error}"))?,
             }
         }
         Ok(())
@@ -490,12 +503,9 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
     }
 
     let mut existing = Vec::new();
-    let mut missing = Vec::new();
     for (source, _) in &mappings {
         if source.exists() {
             existing.push(BackupSource { path: source.clone(), category: "Перед восстановлением".to_owned() });
-        } else {
-            missing.push(source.clone());
         }
     }
 
@@ -503,11 +513,13 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
     let safety_saved = match safety.backup_files(&existing) {
         Ok(count) => count,
         Err(error) => {
-            let _ = safety.finish("ОШИБКА", &format!("Не удалось создать защитную копию перед восстановлением: {error}"), existing.len(), 0, false);
+            safety.set_outcome("ОШИБКА", &format!("Не удалось создать защитную копию перед восстановлением: {error}"), false);
+            let _ = safety.finish();
             return Err(error);
         }
     };
-    safety.finish("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", existing.len(), safety_saved, true)?;
+    safety.set_outcome("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", true);
+    safety.finish()?;
 
     let mut created_now = Vec::new();
     let restore_result: AppResult<()> = (|| {
@@ -548,7 +560,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
                 }
             }
         }
-        safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}"));
+        let _ = safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}"));
         return Err(error);
     }
 

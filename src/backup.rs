@@ -929,7 +929,6 @@ fn read_created_paths(log_path: &Path) -> AppResult<Vec<PathBuf>> {
     Ok(paths.into_iter().collect())
 }
 
-#[derive(Clone, Copy, Debug)]
 fn canonical_target_path(source: &Path) -> AppResult<PathBuf> {
     let parent = source.parent().ok_or("Не удалось определить каталог исходного файла.")?;
     let canonical_parent = parent.canonicalize()
@@ -938,6 +937,7 @@ fn canonical_target_path(source: &Path) -> AppResult<PathBuf> {
     Ok(canonical_parent.join(name))
 }
 
+#[derive(Clone, Copy, Debug)]
 struct FileMetadata {
     mode: u32,
     uid: u32,

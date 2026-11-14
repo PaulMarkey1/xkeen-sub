@@ -92,11 +92,6 @@ impl BackupSession {
             }
         };
 
-        let active_path = path.join(".active");
-        let mut active = OpenOptions::new().write(true).create_new(true).open(&active_path)?;
-        writeln!(active, "{}", std::process::id())?;
-        active.sync_all()?;
-
         let log_path = path.join("log.txt");
         let mut log = OpenOptions::new().write(true).create_new(true).open(&log_path)
             .map_err(|e| format!("Не удалось создать {}: {e}", log_path.display()))?;
@@ -107,6 +102,7 @@ impl BackupSession {
              ============================================================\n\
              ID резервной записи: {id}\n\
              Дата и время: {date} {now}\n\
+             PID процесса: {}\n\
              Причина создания: {reason}\n\
              Подписки: определяются\n\
              Итоговый статус: ВЫПОЛНЯЕТСЯ\n\
@@ -117,7 +113,8 @@ impl BackupSession {
              ПОДРОБНЫЙ ЖУРНАЛ\n\
              ------------------------------------------------------------\n"
         );
-        log.write_all(header.as_bytes())?;
+        let header = header.replace("PID процесса: {}\\n", &format!("PID процесса: {}\\n", std::process::id()));
+        log.write_all(header.as_bytes())?
         log.sync_all()?;
 
         let mut session = Self {
@@ -265,6 +262,7 @@ impl BackupSession {
              ============================================================\n\
              ID резервной записи: {}\n\
              Дата и время завершения: {} {}\n\
+             PID процесса: {}\n\
              Обрабатываемые подписки: {}\n\
              Подписки с изменениями: {}\n\
              Итоговый статус: {}\n\
@@ -272,7 +270,7 @@ impl BackupSession {
              Сохранено файлов: {}\n\
              Результат: {}\n\
              ------------------------------------------------------------\n",
-            self.id, current_date()?, now, if self.subscriptions.is_empty() { "—".to_owned() } else { self.subscriptions.join(", ") }, if self.updated_subscriptions.is_empty() { "—".to_owned() } else { self.updated_subscriptions.join(", ") }, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
+            self.id, current_date()?, now, std::process::id(), if self.subscriptions.is_empty() { "—".to_owned() } else { self.subscriptions.join(", ") }, if self.updated_subscriptions.is_empty() { "—".to_owned() } else { self.updated_subscriptions.join(", ") }, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
         );
         let temporary = self.path.join(".log.txt.tmp");
         {
@@ -290,10 +288,6 @@ impl BackupSession {
                 Ok(_) => {}
                 Err(error) => self.event("RETENTION", &format!("Автоматическая очистка не выполнена; резервные записи сохранены: {error}"))?,
             }
-        }
-        let active_path = self.path.join(".active");
-        if let Err(error) = fs::remove_file(&active_path) {
-            self.event("WARNING", &format!("Не удалось удалить временный маркер активности {}: {error}", active_path.display()))?;
         }
         Ok(())
     }
@@ -795,6 +789,8 @@ fn read_summary(path: &Path) -> HashMap<String, String> {
             result.insert("time".to_owned(), value.split_whitespace().nth(1).unwrap_or(value).to_owned());
         } else if let Some(value) = line.strip_prefix("Дата и время: ") {
             result.entry("time".to_owned()).or_insert_with(|| value.split_whitespace().nth(1).unwrap_or(value).to_owned());
+        } else if let Some(value) = line.strip_prefix("PID процесса: ") {
+            result.insert("pid".to_owned(), value.to_owned());
         } else if let Some(value) = line.strip_prefix("Итоговый статус: ") {
             result.insert("status".to_owned(), value.to_owned());
         } else if let Some(value) = line.strip_prefix("Сохранено файлов: ") {
@@ -900,19 +896,17 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
 }
 
 fn is_active_record(record: &BackupRecord) -> bool {
-    let marker = record.path.join(".active");
-    if marker.exists() {
-        let pid = fs::read_to_string(&marker).ok()
-            .and_then(|value| value.trim().parse::<u32>().ok());
-        return match pid {
-            Some(pid) if Path::new("/proc").is_dir() => Path::new(&format!("/proc/{pid}")).exists(),
-            Some(_) => true,
-            None => true,
-        };
+    let summary = read_summary(&record.path.join("log.txt"));
+    if summary.get("status").map(String::as_str) != Some("ВЫПОЛНЯЕТСЯ") {
+        return false;
     }
-    match read_summary(&record.path.join("log.txt")).get("status") {
-        Some(status) => status == "ВЫПОЛНЯЕТСЯ",
-        None => false,
+    let Some(pid) = summary.get("pid").and_then(|value| value.parse::<u32>().ok()) else {
+        return true;
+    };
+    if Path::new("/proc").is_dir() {
+        Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
     }
 }
 

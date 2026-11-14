@@ -305,7 +305,8 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                     // already have changed even if the final read/verification failed.
                     let mutated = !temporary.exists()
                         || (operation.kind == PlannedOperationKind::Create
-                            && fs::read(&operation.path).map(|bytes| bytes == expected).unwrap_or(false));
+                            && fs::read(&operation.path).map(|bytes| bytes == expected).unwrap_or(false))
+                        || (operation.kind == PlannedOperationKind::Replace && !operation.path.exists());
                     if let Err(cleanup) = fs::remove_file(&temporary) {
                         if cleanup.kind() != std::io::ErrorKind::NotFound {
                             return Err((format!("{error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()), mutated));
@@ -528,7 +529,7 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
 fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     let stop = run_xkeen(&["-stop"], backup)?;
     let status = run_xkeen(&["-status"], backup)?;
-    let stopped = stop.success && is_stopped_status(status.code, &status.stdout);
+    let stopped = stop.success && !status.timed_out && is_stopped_status(status.code, &status.stdout);
     backup.event("XKEEN", &format!(
         "Проверка остановки: stop_success={}, status_code={:?}, состояние остановлено={}.",
         stop.success, status.code, stopped
@@ -546,7 +547,7 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     }
     thread::sleep(Duration::from_secs(5));
     let status = run_xkeen(&["-status"], backup)?;
-    let running = is_running_status(status.code, &status.stdout);
+    let running = !status.timed_out && is_running_status(status.code, &status.stdout);
     backup.event("XKEEN", &format!(
         "Проверка запуска: start_success={}, status_code={:?}, состояние запущено={}.",
         start.success, status.code, running
@@ -564,7 +565,7 @@ fn start_after_rollback(backup: &mut BackupSession) -> String {
     let status = run_xkeen(&["-status"], backup);
 
     let start_ok = matches!(&start, Ok(result) if result.success);
-    let running = matches!(&status, Ok(result) if is_running_status(result.code, &result.stdout));
+    let running = matches!(&status, Ok(result) if !result.timed_out && is_running_status(result.code, &result.stdout));
     let start_description = match &start {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),

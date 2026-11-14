@@ -210,7 +210,7 @@ pub fn uninstall() -> AppResult<()> {
     println!();
     title("БУДУТ УДАЛЕНЫ");
     info(&format!("• Исполняемый файл: {}", executable.display()));
-    info(&format!("• Файл настроек: {}", config_path.display()));
+    info(&format!("• Остаточный файл настроек старой версии: {}", config_path.display()));
     if delete_subscriptions {
         info(&format!("• Файл подписок: {}", subscriptions_path.display()));
     } else {

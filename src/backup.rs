@@ -131,10 +131,6 @@ impl BackupSession {
         self.outcome_status == "ВЫПОЛНЯЕТСЯ"
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub(crate) fn event(&mut self, level: &str, message: &str) -> AppResult<()> {
         let line = match current_time() {
             Ok(time) => format!("[{time}] {level}: {message}\n"),
@@ -280,7 +276,8 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
         [action] if action == "list" => list_interactive(),
         [action, id] if action == "list" => show_record_menu(id),
         [action, value] if action == "days" => {
-            let days = parse_number(value, MIN_RETENTION_DAYS, "срок хранения")? as u32;
+            let days = u32::try_from(parse_number(value, MIN_RETENTION_DAYS as u64, "срок хранения")?)
+                .map_err(|_| "Срок хранения слишком велик.")?;
             let mut settings = load_settings()?;
             settings.retention_days = days;
             save_settings(&settings)?;
@@ -288,7 +285,8 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
             Ok(())
         }
         [action, value] if action == "limit" => {
-            let limit = parse_number(value, MIN_DAILY_LIMIT as u64, "дневной лимит")? as usize;
+            let limit = usize::try_from(parse_number(value, MIN_DAILY_LIMIT as u64, "дневной лимит")?)
+                .map_err(|_| "Дневной лимит слишком велик.")?;
             let mut settings = load_settings()?;
             settings.daily_limit = limit;
             save_settings(&settings)?;
@@ -706,7 +704,7 @@ fn read_summary(path: &Path) -> HashMap<String, String> {
     let Ok(content) = fs::read_to_string(path) else { return result; };
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("Дата и время завершения: ") {
-            result.insert("time".to_owned(), value.to_owned());
+            result.insert("time".to_owned(), value.split_whitespace().nth(1).unwrap_or(value).to_owned());
         } else if let Some(value) = line.strip_prefix("Дата и время: ") {
             result.entry("time".to_owned()).or_insert_with(|| value.to_owned());
         } else if let Some(value) = line.strip_prefix("Итоговый статус: ") {
@@ -727,13 +725,24 @@ fn read_file_mappings(log_path: &Path) -> AppResult<Vec<(PathBuf, PathBuf)>> {
         let Some((source, stored)) = value.split_once(" -> ") else { continue; };
         let source = PathBuf::from(source);
         let stored = PathBuf::from(stored);
-        if !source.is_absolute() {
-            return Err("В журнале обнаружен некорректный исходный путь.".into());
+        if !source.is_absolute() || !is_allowed_restore_path(&source) {
+            return Err("В журнале обнаружен недопустимый исходный путь для восстановления.".into());
         }
         validate_relative_path(&stored)?;
         mappings.push((source, stored));
     }
     Ok(mappings)
+}
+
+fn is_allowed_restore_path(path: &Path) -> bool {
+    let archive = Path::new("/opt/etc/xkeen-sub/old-user-outbound.json");
+    let xray_root = Path::new("/opt/etc/xray/configs");
+    let baseline_root = Path::new("/opt/etc/xkeen-sub/baseline");
+    if path == archive {
+        return true;
+    }
+    let has_parent = path.components().any(|component| matches!(component, Component::ParentDir));
+    !has_parent && (path.starts_with(xray_root) || path.starts_with(baseline_root))
 }
 
 fn validate_relative_path(path: &Path) -> AppResult<()> {

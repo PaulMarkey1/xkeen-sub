@@ -232,6 +232,30 @@ impl BackupSession {
         Ok(saved)
     }
 
+    pub(crate) fn verify_original(&self, source: &Path) -> AppResult<bool> {
+        let mappings = read_file_mappings(&self.log_path)?;
+        let Some(stored) = mappings.iter().find(|(original, _)| original == source).map(|(_, stored)| stored) else {
+            return Ok(false);
+        };
+        let backup_file = self.path.join(stored);
+        let expected = match fs::read(backup_file) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(false),
+        };
+        let actual = match fs::read(source) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(false),
+        };
+        if actual != expected { return Ok(false); }
+        let Some(expected_metadata) = read_file_metadata(&self.log_path, source)? else {
+            return Ok(false);
+        };
+        let actual_metadata = fs::metadata(source)?;
+        Ok(actual_metadata.mode() & 0o7777 == expected_metadata.mode
+            && actual_metadata.uid() == expected_metadata.uid
+            && actual_metadata.gid() == expected_metadata.gid)
+    }
+
     pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {
         let mappings = read_file_mappings(&self.log_path)?;
         let stored = mappings.iter().find(|(original, _)| original == source)
@@ -249,7 +273,7 @@ impl BackupSession {
 
     fn append_file_metadata(&mut self, original: &Path, mode: u32, uid: u32, gid: u32) -> AppResult<()> {
         let path = serde_json::to_string(&original.display().to_string())?;
-        let line = format!("Метаданные: {path} -> {mode:o} {uid} {gid}\\n");
+        let line = format!("Метаданные: {path} -> {mode:o} {uid} {gid}\n");
         let mut file = OpenOptions::new().append(true).open(&self.log_path)?;
         file.write_all(line.as_bytes())?;
         file.flush()?;

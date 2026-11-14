@@ -175,7 +175,7 @@ impl BackupSession {
             }
             let name = original.file_name().and_then(|v| v.to_str())
                 .ok_or_else(|| format!("Недопустимое имя файла: {}", original.display()))?;
-            let duplicate = basename_counts.get(name).copied().unwrap_or(0) > 1 || name == "log.txt";
+            let duplicate = basename_counts.get(name).copied().unwrap_or(0) > 1 || name == "log.txt" || name == ".log.txt.tmp";
             let stored_relative = if duplicate {
                 original.strip_prefix("/").map_err(|_| "Исходный путь должен быть абсолютным.")?.to_path_buf()
             } else {
@@ -521,6 +521,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
     }
 
     let mut safety = BackupSession::start("Резервная копия перед ручным восстановлением")?;
+    safety.set_plan_count(existing.len());
     let safety_saved = match safety.backup_files(&existing) {
         Ok(count) => count,
         Err(error) => {
@@ -565,7 +566,15 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
                     for (source, stored) in safety_mappings {
                         let saved = safety_record.path.join(stored);
                         if saved.is_file() {
-                            let _ = fs::copy(saved, source);
+                            if fs::copy(&saved, &source).is_ok() {
+                                if fs::read(&saved).ok() != fs::read(&source).ok() {
+                                    let _ = safety.event("ROLLBACK", &format!("Побайтовая проверка отката не пройдена: {}", source.display()));
+                                } else {
+                                    let _ = safety.event("ROLLBACK", &format!("Исходное состояние восстановлено: {}", source.display()));
+                                }
+                            } else {
+                                let _ = safety.event("ROLLBACK", &format!("Не удалось восстановить исходное состояние: {}", source.display()));
+                            }
                         }
                     }
                 }
@@ -575,6 +584,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
         return Err(error);
     }
 
+    safety.event("RESTORE", &format!("Резервная запись {} восстановлена; все файлы прошли побайтовую проверку.", record.id))?;
     success("Резервная копия восстановлена. Побайтовая проверка пройдена.");
     Ok(())
 }

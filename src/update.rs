@@ -33,14 +33,19 @@ struct ConfigDocument {
 
 struct PreparedSubscription {
     id: String,
-    original: Vec<u8>,
-    baseline: PathBuf,
     outbounds: Vec<Value>,
+}
+
+struct PreparedBaseline {
+    id: String,
+    original: Vec<u8>,
+    path: PathBuf,
 }
 
 #[derive(Default)]
 struct RunState {
     prepared: Vec<PreparedSubscription>,
+    baseline_updates: Vec<PreparedBaseline>,
     failed: Vec<(String, String)>,
     downloaded: usize,
     processed: usize,
@@ -150,7 +155,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     print_merge_summary(&replacements, &conflicts, &archive);
     print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
     print_validation(mode, &validation);
-    print_baseline_plan(&state.prepared);
+    print_baseline_plan(&state.baseline_updates);
     print_prepared_documents(&docs);
 
     println!();
@@ -389,8 +394,13 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         .as_deref()
         .is_some_and(|baseline_outbounds| baseline_outbounds == current_json.as_slice())
     {
+        state.baseline_updates.push(PreparedBaseline {
+            id: subscription.id.clone(),
+            original: downloaded,
+            path: baseline,
+        });
         state.processed += 1;
-        success("Уровень 2: сформированные Outbound полностью совпадают. Изменений конфигурации нет.");
+        success("Уровень 2: сформированные Outbound полностью совпадают. Конфигурация не меняется, baseline будет обновлён.");
         return;
     }
 
@@ -410,6 +420,12 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         report.unrecognized_previous += previous.unrecognized;
     }
     print_comparison(&report);
+
+    state.baseline_updates.push(PreparedBaseline {
+        id: subscription.id.clone(),
+        original: downloaded.clone(),
+        path: baseline.clone(),
+    });
 
     if current.unrecognized > 0 {
         warning(&format!(
@@ -442,8 +458,6 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));
     state.prepared.push(PreparedSubscription {
         id: subscription.id.clone(),
-        original: downloaded,
-        baseline,
         outbounds,
     });
 }
@@ -668,12 +682,12 @@ fn print_validation(mode: ValidationMode, result: &Result<(), String>) {
     }
 }
 
-fn print_baseline_plan(prepared: &[PreparedSubscription]) {
+fn print_baseline_plan(baselines: &[PreparedBaseline]) {
     println!();
     title("ПЛАН ОБНОВЛЕНИЯ BASELINE");
-    if prepared.is_empty() { info("Baseline не требуется обновлять."); }
-    for item in prepared {
-        info(&format!("{} -> {} ({} байт).", item.id, item.baseline.display(), item.original.len()));
+    if baselines.is_empty() { info("Baseline не требуется обновлять."); }
+    for item in baselines {
+        info(&format!("{} -> {} ({} байт).", item.id, item.path.display(), item.original.len()));
     }
     warning("В контрольном запуске baseline не записывается.");
 }

@@ -310,9 +310,11 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
         PlannedOperationKind::Delete => {
             match fs::remove_file(&operation.path) {
                 Ok(()) => {
-                    if operation.path.exists() {
-                        Err((format!("Файл не исчез после удаления: {}", operation.path.display()), true))
-                    } else { Ok(()) }
+                    match is_path_absent(&operation.path) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err((format!("Файл не исчез после удаления: {}", operation.path.display()), true)),
+                        Err(error) => Err((format!("Не удалось проверить удаление {}: {error}", operation.path.display()), true)),
+                    }
                 }
                 Err(error) => Err((
                     format!("Не удалось удалить {}: {error}", operation.path.display()),
@@ -391,6 +393,14 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
     }
 }
 
+fn is_path_absent(path: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 fn set_owner(path: &Path, uid: u32, gid: u32) -> AppResult<()> {
     let output = Command::new("chown").arg(format!("{uid}:{gid}")).arg(path).output()
         .map_err(|error| format!("Не удалось запустить chown для {}: {error}", path.display()))?;
@@ -404,7 +414,7 @@ fn verify_applied(plan: &[PlannedFileOperation], staged: &[Option<PathBuf>], bac
     for (index, operation) in plan.iter().enumerate() {
         match operation.kind {
             PlannedOperationKind::Delete => {
-                if operation.path.exists() {
+                if !is_path_absent(&operation.path)? {
                     return Err(format!("Файл, запланированный к удалению, существует: {}", operation.path.display()).into());
                 }
             }
@@ -465,7 +475,7 @@ fn rollback(
         let operation = &plan[*index];
         let verified = match operation.kind {
             PlannedOperationKind::Replace | PlannedOperationKind::Delete => backup.verify_original(&operation.path).unwrap_or(false),
-            PlannedOperationKind::Create => !operation.path.exists(),
+            PlannedOperationKind::Create => is_path_absent(&operation.path).unwrap_or(false),
         };
         if !verified {
             final_failures += 1;
@@ -534,7 +544,7 @@ fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession
                 return Err(format!("Конфликт: содержимое изменено вне текущего update; файл не удалён: {}", path.display()));
             }
             Ok(_) => match fs::remove_file(path) {
-                Ok(()) if !path.exists() => return Ok(true),
+                Ok(()) if is_path_absent(path).unwrap_or(false) => return Ok(true),
                 Ok(()) => {
                     if attempt == MAX_FILE_ATTEMPTS { return Err("Файл остался после удаления.".to_owned()); }
                 }

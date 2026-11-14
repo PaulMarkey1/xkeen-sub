@@ -214,7 +214,7 @@ fn russian_plural(value: u64, one: &'static str, few: &'static str, many: &'stat
 
 #[cfg(test)]
 mod subscription_comparison_tests {
-    use super::{baseline_path, serialize_outbounds};
+    use super::{baseline_path, byte_contents_equal, serialize_outbounds};
     use crate::subscriptions::Subscription;
     use serde_json::json;
     use std::path::Path;
@@ -244,6 +244,13 @@ mod subscription_comparison_tests {
         };
 
         assert!(baseline_path(&subscription).is_err());
+    }
+
+    #[test]
+    fn byte_comparison_detects_identical_and_different_source_files() {
+        assert!(byte_contents_equal(Some(b"subscription"), b"subscription"));
+        assert!(!byte_contents_equal(Some(b"subscription"), b"subscription\\n"));
+        assert!(!byte_contents_equal(None, b"subscription"));
     }
 
     #[test]
@@ -335,10 +342,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
-    if previous
-        .as_deref()
-        .is_some_and(|baseline_bytes| baseline_bytes == downloaded.as_slice())
-    {
+    if byte_contents_equal(previous.as_deref(), &downloaded) {
         state.processed += 1;
         success("Уровень 1: исходный файл полностью совпадает с baseline. Подписка не изменилась.");
         return;
@@ -390,10 +394,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
-    if previous_json
-        .as_deref()
-        .is_some_and(|baseline_outbounds| baseline_outbounds == current_json.as_slice())
-    {
+    if byte_contents_equal(previous_json.as_deref(), &current_json) {
         state.baseline_updates.push(PreparedBaseline {
             id: subscription.id.clone(),
             original: downloaded,
@@ -479,6 +480,10 @@ fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
     }
 
     Ok(Path::new(BASELINE_DIR).join(format!("{}--{}.json", subscription.id, name)))
+}
+
+fn byte_contents_equal(previous: Option<&[u8]>, current: &[u8]) -> bool {
+    matches!(previous, Some(previous) if previous == current)
 }
 
 fn serialize_outbounds(outbounds: &[Value]) -> Result<Vec<u8>, serde_json::Error> {

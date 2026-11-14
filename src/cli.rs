@@ -1,7 +1,6 @@
 use std::error::Error;
 
-use crate::{config, install, maintenance, setup, update};
-use crate::config::ValidationMode;
+use crate::{install, maintenance, setup, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -29,16 +28,6 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
         [action] if action == "update" => update::run(None),
         [action, target] if action == "update" => update::run(Some(target)),
-        [action] if action == "validation" => config::show_validation(),
-        [action, mode] if action == "validation" => {
-            let mode = match mode.as_str() {
-                "on" => ValidationMode::On,
-                "off" => ValidationMode::Off,
-                "alert" => ValidationMode::Alert,
-                _ => return Err("Допустимые режимы: on, off, alert. Использование: xkeen-sub validation on|off|alert".into()),
-            };
-            config::set_validation(mode)
-        }
         // Internal command used by install.sh before replacing the installed binary.
         [action] if action == "install-check" => install::ensure_observatory(),
         [action] if action == "uxs" => maintenance::update(),
@@ -68,9 +57,6 @@ fn print_help() -> AppResult<()> {
     println!();
     command_item("update", "Контрольный запуск обновления всех подписок");
     command_item("  subN", "Контрольный запуск одной подписки");
-    println!();
-    command_item("validation", "Показать режим проверки подключений");
-    command_item("  on|off|alert", "Установить режим проверки");
     println!();
     command_item("uxs", "Обновить программу");
     command_item("reinstall", "Выбрать версию и переустановить программу");

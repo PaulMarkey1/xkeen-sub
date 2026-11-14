@@ -1,6 +1,5 @@
 mod balancer;
 mod cli;
-mod config;
 mod install;
 mod maintenance;
 mod observatory;

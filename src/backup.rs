@@ -144,8 +144,11 @@ impl BackupSession {
         Ok(())
     }
 
+    pub(crate) fn set_plan_count(&mut self, count: usize) {
+        self.planned_files = count;
+    }
+
     pub(crate) fn backup_files(&mut self, sources: &[BackupSource]) -> AppResult<usize> {
-        self.planned_files = sources.len();
         if sources.is_empty() {
             self.event("BACKUP", "Нет существующих файлов, требующих резервного копирования.")?;
             return Ok(0);

@@ -4,6 +4,7 @@ use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::outbound_compare::{compare_subscription, ComparisonReport};
 use crate::subscription_parser::parse_subscription;
 use crate::update_merge::{collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan, USER_ARCHIVE};
+use crate::update_apply::{self, PlannedFileOperation, PlannedOperationKind};
 use crate::subscription_download::download_subscription;
 use crate::subscriptions::{load_subscriptions, Subscription};
 use crate::terminal::{error, info, success, title, warning};
@@ -52,20 +53,6 @@ struct RunState {
     processed: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PlannedOperationKind {
-    Create,
-    Replace,
-    Delete,
-}
-
-struct PlannedFileOperation {
-    path: PathBuf,
-    category: &'static str,
-    kind: PlannedOperationKind,
-    content: Option<Vec<u8>>,
-}
-
 /// Control run only: downloads and analyses subscriptions, constructs all
 /// proposed documents in memory, validates them and prints the complete plan.
 /// No active configuration, archive or baseline file is written.
@@ -103,8 +90,8 @@ fn backup_status_is_running(backup: &BackupSession) -> bool {
 
 fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<()> {
     println!();
-    title("XKEEN-SUB — КОНТРОЛЬНЫЙ ЗАПУСК UPDATE");
-    warning("Рабочие файлы, архив и baseline не изменяются. Создаётся резервная запись.");
+    title("XKEEN-SUB — ОБНОВЛЕНИЕ ПОДПИСОК");
+    warning("Перед применением будет создана проверенная резервная копия; при сбое предусмотрен откат.");
     backup.event("UPDATE", "Начата загрузка списка подписок.")?;
 
     let store = load_subscriptions()?;
@@ -260,11 +247,23 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         match backup.backup_files(&backup_sources) {
             Ok(saved) => {
                 backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
-                backup.set_outcome(
-                    "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА",
-                    "План изменений сформирован. Все необходимые исходные файлы сохранены и побайтно проверены. Применение изменений пока не входит в реализованные пункты.",
-                    true,
-                );
+                match update_apply::execute(&plan, backup) {
+                    Ok(()) => {
+                        backup.set_outcome(
+                            "УСПЕШНО",
+                            "Изменения применены, итоговое состояние файлов проверено, XKeen запущен и его статус подтверждён.",
+                            true,
+                        );
+                    }
+                    Err(error) => {
+                        backup.set_outcome(
+                            "ОШИБКА ПРИМЕНЕНИЯ",
+                            &format!("Применение не завершено. Результат отката и проверки XKeen записан в журнал: {error}"),
+                            false,
+                        );
+                        return Err(error);
+                    }
+                }
             }
             Err(error) => {
                 backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
@@ -275,8 +274,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     }
 
     println!();
-    title("КОНТРОЛЬНЫЙ ЗАПУСК ЗАВЕРШЁН");
-    warning("Ничего не применялось. Рабочие конфигурации, архив и baseline не изменены.");
+    title("ОБНОВЛЕНИЕ ЗАВЕРШЕНО");
     if balancer.created {
         success(&format!(
             "Подготовлено создание отдельного балансировщика программы с Tag {}.",
@@ -289,7 +287,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     if validation.is_err() {
         error("Итоговая проверка блокирует будущее применение.");
     } else {
-        success("План обновления подготовлен.");
+        success("Обновление выполнено; файлы и состояние XKeen проверены.");
     }
     Ok(())
 }

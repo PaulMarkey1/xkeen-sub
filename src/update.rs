@@ -53,9 +53,9 @@ struct RunState {
     processed: usize,
 }
 
-/// Control run only: downloads and analyses subscriptions, constructs all
-/// proposed documents in memory, validates them and prints the complete plan.
-/// No active configuration, archive or baseline file is written.
+/// Downloads and analyses subscriptions, prepares documents, validates the
+/// complete Xray configuration, backs up originals, then applies the plan with
+/// automatic rollback and XKeen state verification.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let started_at = Instant::now();
     let mut backup = BackupSession::start("Контрольный запуск обновления подписок")?;
@@ -868,7 +868,7 @@ fn print_baseline_plan(state: &RunState) {
             item.id, item.path.display(), item.original.len()
         ));
     }
-    warning("В контрольном запуске файлы baseline не изменяются.");
+    info("Baseline будет применён после конфигураций Xray и пользовательского архива.");
 }
 
 fn print_prepared_documents(docs: &[ConfigDocument]) {

@@ -1,5 +1,4 @@
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
-use crate::config::{self, ValidationMode};
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::outbound_compare::{compare_subscription, ComparisonReport};
 use crate::subscription_parser::parse_subscription;
@@ -149,14 +148,13 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
         }
     }
 
-    let mode = config::load()?.validation;
     let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
 
     print_subscription_summary(&state);
     print_updated_outbound(&state.prepared);
     print_merge_summary(&replacements, &conflicts, &archive);
     print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
-    print_validation(mode, &validation);
+    print_xray_test(&validation);
     print_baseline_plan(&state);
     print_prepared_documents(&docs);
 
@@ -172,8 +170,8 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
             warning("Для нового балансировщика routing rule потребуется настроить самостоятельно; существующие пользовательские балансировщики и их правила не изменялись.");
         }
     }
-    if validation.is_err() && mode == ValidationMode::On {
-        error("Проверка блокирует будущее применение.");
+    if validation.is_err() {
+        error("Итоговая проверка блокирует будущее применение.");
     } else {
         success("План обновления подготовлен.");
     }
@@ -684,23 +682,15 @@ fn print_configuration_summary(
     if balancer.transformed_rules > 0 { info(&format!("Routing rules перенаправлено: {}.", balancer.transformed_rules)); }
 }
 
-fn print_validation(mode: ValidationMode, result: &Result<(), String>) {
+fn print_xray_test(result: &Result<(), String>) {
     println!();
-    title("ВАЛИДАЦИЯ");
-    info(&format!("validation: {}.", mode.as_str()));
+    title("ПРОВЕРКА XRAY");
     match result {
-        Ok(()) => success("Обязательная итоговая проверка Xray завершилась успешно."),
-        Err(message) if mode == ValidationMode::Alert => {
-            warning(&format!("Xray отклонил итоговую конфигурацию: {message}"));
-            error("Применять такую конфигурацию нельзя. Сначала необходимо устранить ошибку Xray.");
-        }
+        Ok(()) => success("Итоговая проверка Xray завершилась успешно."),
         Err(message) => {
             error(&format!("Xray отклонил итоговую конфигурацию: {message}"));
-            error("Применять такую конфигурацию нельзя.");
+            error("Итоговая проверка блокирует будущее применение.");
         }
-    }
-    if mode == ValidationMode::Off {
-        info("Режим off отключает только предварительные проверки отдельных Outbound; итоговая проверка Xray обязательна.");
     }
 }
 

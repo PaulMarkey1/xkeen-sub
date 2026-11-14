@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -500,12 +500,17 @@ fn show_log(path: &Path) -> AppResult<()> {
 
 fn show_files(record: &BackupRecord) -> AppResult<()> {
     title("ФАЙЛЫ В РЕЗЕРВНОЙ КОПИИ");
-    let files = read_file_mappings(&record.path.join("log.txt"))?;
-    if files.is_empty() {
-        info("В этой резервной записи нет сохранённых исходных файлов.");
+    let log_path = record.path.join("log.txt");
+    let files = read_file_mappings(&log_path)?;
+    let created = read_created_paths(&log_path)?;
+    if files.is_empty() && created.is_empty() {
+        info("В этой резервной записи нет файловых операций.");
     } else {
         for (source, stored) in files {
-            info(&format!("{}  →  {}", source.display(), stored.display()));
+            info(&format!("Сохранённый оригинал: {}  →  {}", source.display(), stored.display()));
+        }
+        for path in created {
+            info(&format!("Будет удалён при восстановлении (файл создан обновлением): {}", path.display()));
         }
     }
     let _ = read_input("Нажмите Enter для возврата...")?;
@@ -513,20 +518,36 @@ fn show_files(record: &BackupRecord) -> AppResult<()> {
 }
 
 fn restore_record(record: &BackupRecord) -> AppResult<()> {
-    let mappings = read_file_mappings(&record.path.join("log.txt"))?;
-    if mappings.is_empty() {
-        warning("В резервной записи нет файлов для восстановления.");
+    let log_path = record.path.join("log.txt");
+    let mappings = read_file_mappings(&log_path)?;
+    let created_paths = read_created_paths(&log_path)?;
+    if mappings.is_empty() && created_paths.is_empty() {
+        warning("В резервной записи нет файловых операций для восстановления.");
         return Ok(());
     }
-    if !confirm(&format!("Восстановить {} файлов из {}? Текущие файлы будут заменены.", mappings.len(), record.id))? {
+
+    let mut targets = BTreeSet::new();
+    for (source, _) in &mappings {
+        targets.insert(source.clone());
+    }
+    for path in &created_paths {
+        targets.insert(path.clone());
+    }
+    if !confirm(&format!(
+        "Восстановить резервную запись {}? Будут возвращены {} сохранённых файлов и удалены {} файлов, созданных обновлением.",
+        record.id, mappings.len(), created_paths.len()
+    ))? {
         warning("Восстановление отменено.");
         return Ok(());
     }
 
     let mut existing = Vec::new();
-    for (source, _) in &mappings {
+    let mut missing_before = Vec::new();
+    for source in &targets {
         if source.exists() {
             existing.push(BackupSource { path: source.clone(), category: "Перед восстановлением".to_owned() });
+        } else {
+            missing_before.push(source.clone());
         }
     }
 
@@ -543,7 +564,6 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
     safety.set_outcome("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", false);
     safety.finish()?;
 
-    let mut created_now = Vec::new();
     let restore_result: AppResult<()> = (|| {
         for (source, stored) in &mappings {
             validate_relative_path(stored)?;
@@ -554,20 +574,28 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
             if let Some(parent) = source.parent() {
                 fs::create_dir_all(parent)?;
             }
-            if !source.exists() {
-                created_now.push(source.clone());
-            }
             fs::copy(&saved, source)
                 .map_err(|e| format!("Не удалось восстановить {}: {e}", source.display()))?;
             if fs::read(&saved)? != fs::read(source)? {
                 return Err(format!("Проверка восстановленного файла не пройдена: {}", source.display()).into());
             }
         }
+
+        for path in &created_paths {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Не удалось удалить созданный обновлением файл {}: {error}", path.display()).into()),
+            }
+            if path.exists() {
+                return Err(format!("Файл, созданный обновлением, остался на месте: {}", path.display()).into());
+            }
+        }
         Ok(())
     })();
 
     if let Err(error) = restore_result {
-        for source in &created_now {
+        for source in &missing_before {
             let _ = fs::remove_file(source);
         }
         if safety_saved > 0 {
@@ -590,7 +618,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
                 }
             }
         }
-        let _ = safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}"));
+        safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}"))?;
         return Err(error);
     }
 
@@ -768,6 +796,22 @@ fn read_file_mappings(log_path: &Path) -> AppResult<Vec<(PathBuf, PathBuf)>> {
         mappings.push((source, stored));
     }
     Ok(mappings)
+}
+
+fn read_created_paths(log_path: &Path) -> AppResult<Vec<PathBuf>> {
+    let content = fs::read_to_string(log_path)
+        .map_err(|e| format!("Не удалось прочитать журнал резервной записи: {e}"))?;
+    let mut paths = BTreeSet::new();
+    for line in content.lines() {
+        let Some((_, operation)) = line.split_once("] PLAN: Создание: ") else { continue; };
+        let path_text = operation.split(" (").next().unwrap_or(operation);
+        let path = PathBuf::from(path_text);
+        if !path.is_absolute() || !is_allowed_restore_path(&path) {
+            return Err("В журнале обнаружен недопустимый путь созданного файла.".into());
+        }
+        paths.insert(path);
+    }
+    Ok(paths.into_iter().collect())
 }
 
 fn is_allowed_restore_path(path: &Path) -> bool {

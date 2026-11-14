@@ -43,7 +43,10 @@ impl StagingDirectory {
             format!("Не удалось создать staging-каталог {} (он уже может существовать): {error}", root.display())
         })?;
         for name in ["configs", "archive", "baseline"] {
-            fs::create_dir(root.join(name))?;
+            if let Err(error) = fs::create_dir(root.join(name)) {
+                let _ = fs::remove_dir_all(&root);
+                return Err(format!("Не удалось создать staging-подкаталог {name}: {error}").into());
+            }
         }
         Ok(Self { root })
     }
@@ -227,7 +230,10 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                         Err((format!("Файл не исчез после удаления: {}", operation.path.display()), true))
                     } else { Ok(()) }
                 }
-                Err(error) => Err((format!("Не удалось удалить {}: {error}", operation.path.display()), false)),
+                Err(error) => Err((
+                    format!("Не удалось удалить {}: {error}", operation.path.display()),
+                    error.kind() == std::io::ErrorKind::NotFound,
+                )),
             }
         }
         PlannedOperationKind::Create | PlannedOperationKind::Replace => {
@@ -263,8 +269,9 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
             match result {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    let mutated = !temporary.exists() && operation.path.exists()
-                        && fs::read(&operation.path).map(|bytes| bytes == expected).unwrap_or(false);
+                    // Once rename consumed the unique temporary file, the destination may
+                    // already have changed even if the final read/verification failed.
+                    let mutated = !temporary.exists();
                     if let Err(cleanup) = fs::remove_file(&temporary) {
                         if cleanup.kind() != std::io::ErrorKind::NotFound {
                             return Err((format!("{error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()), mutated));
@@ -327,9 +334,13 @@ fn rollback(
             }
         };
         match result {
-            Ok(()) => {
-                restored += 1;
-                backup.event("ROLLBACK", &format!("Откат операции подтверждён: {}.", operation.path.display())).ok();
+            Ok(changed) => {
+                if changed { restored += 1; }
+                backup.event("ROLLBACK", &format!(
+                    "{}: {}.",
+                    if changed { "Откат операции подтверждён" } else { "Операция уже не требовала восстановления" },
+                    operation.path.display()
+                )).ok();
             }
             Err(error) => {
                 failed += 1;
@@ -349,6 +360,26 @@ fn rollback(
             backup.event("ROLLBACK", &format!("Итоговая проверка отката не пройдена: {}.", operation.path.display())).ok();
         }
     }
+    for index in applied {
+        let operation = &plan[*index];
+        if let Some(parent) = operation.path.parent() {
+            if let Ok(entries) = fs::read_dir(parent) {
+                let prefix = operation.path.file_name().and_then(|name| name.to_str())
+                    .map(|name| format!(".{name}.xkeen-sub-"));
+                if let Some(prefix) = prefix {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+                            backup.event("ROLLBACK", &format!(
+                                "Обнаружен оставшийся временный файл; не удалён автоматически: {}",
+                                entry.path().display()
+                            )).ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
     let status = if restored == 0 {
         "не выполнен"
     } else if failed > 0 || final_failures > 0 {
@@ -361,11 +392,11 @@ fn rollback(
     format!("{status} (успешно: {restored}, ошибок: {})", failed + final_failures)
 }
 
-fn retry_restore(path: &Path, backup: &mut BackupSession) -> Result<(), String> {
+fn retry_restore(path: &Path, backup: &mut BackupSession) -> Result<bool, String> {
     for attempt in 1..=MAX_FILE_ATTEMPTS {
         backup.event("ROLLBACK", &format!("Попытка {attempt}/{MAX_FILE_ATTEMPTS} восстановить {}.", path.display())).ok();
         match backup.restore_original(path) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(error) => {
                 backup.event("ROLLBACK", &format!("Попытка {attempt} не удалась для {}: {error}", path.display())).ok();
                 if attempt == MAX_FILE_ATTEMPTS { return Err(error.to_string()); }
@@ -375,11 +406,11 @@ fn retry_restore(path: &Path, backup: &mut BackupSession) -> Result<(), String> 
     Err("Исчерпаны попытки восстановления.".to_owned())
 }
 
-fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession) -> Result<(), String> {
+fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession) -> Result<bool, String> {
     for attempt in 1..=MAX_FILE_ATTEMPTS {
         backup.event("ROLLBACK", &format!("Попытка {attempt}/{MAX_FILE_ATTEMPTS} удалить созданный файл {}.", path.display())).ok();
         match fs::read(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
                 if attempt == MAX_FILE_ATTEMPTS { return Err(error.to_string()); }
             }
@@ -387,7 +418,7 @@ fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession
                 return Err(format!("Конфликт: содержимое изменено вне текущего update; файл не удалён: {}", path.display()));
             }
             Ok(_) => match fs::remove_file(path) {
-                Ok(()) if !path.exists() => return Ok(()),
+                Ok(()) if !path.exists() => return Ok(true),
                 Ok(()) => {
                     if attempt == MAX_FILE_ATTEMPTS { return Err("Файл остался после удаления.".to_owned()); }
                 }

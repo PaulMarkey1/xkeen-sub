@@ -242,6 +242,10 @@ impl BackupSession {
             Ok(bytes) => bytes,
             Err(_) => return Ok(false),
         };
+        let source_metadata = match fs::symlink_metadata(source) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+            _ => return Ok(false),
+        };
         let actual = match fs::read(source) {
             Ok(bytes) => bytes,
             Err(_) => return Ok(false),
@@ -251,10 +255,9 @@ impl BackupSession {
             return Ok(false);
         };
         if file_checksum(&expected) != expected_metadata.checksum { return Ok(false); }
-        let actual_metadata = fs::metadata(source)?;
-        Ok(actual_metadata.mode() & 0o7777 == expected_metadata.mode
-            && actual_metadata.uid() == expected_metadata.uid
-            && actual_metadata.gid() == expected_metadata.gid)
+        Ok(source_metadata.mode() & 0o7777 == expected_metadata.mode
+            && source_metadata.uid() == expected_metadata.uid
+            && source_metadata.gid() == expected_metadata.gid)
     }
 
     pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {

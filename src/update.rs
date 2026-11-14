@@ -248,7 +248,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 PlannedOperationKind::Replace => "Замена",
                 PlannedOperationKind::Delete => "Удаление",
             };
-            backup.event("PLAN", &format!("{action}: {} | category={}", operation.path.display(), operation.category))?;
+            backup.event("PLAN", &format!("{action}: {} | category={}", serde_json::to_string(&operation.path.display().to_string())?, operation.category))?;
         }
         let backup_sources: Vec<BackupSource> = plan.iter()
             .filter(|operation| operation.kind != PlannedOperationKind::Create)

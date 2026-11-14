@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-const BASELINE_DIR: &str = "/opt/etc/xkeen-sub";
+const BASELINE_DIR: &str = "/opt/etc/xkeen-sub/baseline";
 const CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const OUTBOUND_FILE: &str = "04_outbounds.json";
 const ROUTING_FILE: &str = "05_routing.json";
@@ -33,14 +33,20 @@ struct ConfigDocument {
 
 struct PreparedSubscription {
     id: String,
-    original: Vec<u8>,
-    baseline: PathBuf,
     outbounds: Vec<Value>,
+}
+
+struct PreparedBaseline {
+    id: String,
+    original: Vec<u8>,
+    path: PathBuf,
 }
 
 #[derive(Default)]
 struct RunState {
     prepared: Vec<PreparedSubscription>,
+    baseline_updates: Vec<PreparedBaseline>,
+    baseline_removals: Vec<(String, PathBuf)>,
     failed: Vec<(String, String)>,
     downloaded: usize,
     processed: usize,
@@ -112,6 +118,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     }
     if state.processed == 0 {
         print_subscription_summary(&state);
+        print_baseline_plan(&state);
         warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
         return Ok(());
     }
@@ -150,7 +157,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     print_merge_summary(&replacements, &conflicts, &archive);
     print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
     print_validation(mode, &validation);
-    print_baseline_plan(&state.prepared);
+    print_baseline_plan(&state);
     print_prepared_documents(&docs);
 
     println!();
@@ -208,6 +215,72 @@ fn russian_plural(value: u64, one: &'static str, few: &'static str, many: &'stat
 }
 
 #[cfg(test)]
+mod subscription_comparison_tests {
+    use super::{baseline_path, byte_contents_equal, serialize_outbounds};
+    use crate::subscriptions::Subscription;
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn baseline_path_uses_dedicated_directory_and_subscription_id() {
+        let subscription = Subscription {
+            id: "sub3".to_owned(),
+            name: Some("Netherlands".to_owned()),
+            url: "https://example.test/sub".to_owned(),
+            prefix: "sub3--Netherlands--".to_owned(),
+        };
+
+        assert_eq!(
+            baseline_path(&subscription).unwrap(),
+            Path::new("/opt/etc/xkeen-sub/baseline/sub3--Netherlands.json")
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_path_separators_in_subscription_name() {
+        let subscription = Subscription {
+            id: "sub1".to_owned(),
+            name: Some("../outside".to_owned()),
+            url: "https://example.test/sub".to_owned(),
+            prefix: "sub1--outside--".to_owned(),
+        };
+
+        assert!(baseline_path(&subscription).is_err());
+    }
+
+    #[test]
+    fn byte_comparison_detects_identical_and_different_source_files() {
+        assert!(byte_contents_equal(Some(b"subscription"), b"subscription"));
+        assert!(!byte_contents_equal(Some(b"subscription"), b"subscription\n"));
+        assert!(!byte_contents_equal(None, b"subscription"));
+    }
+
+    #[test]
+    fn serialized_outbounds_are_byte_identical_for_identical_parsed_data() {
+        let outbounds = vec![
+            json!({"tag":"one","protocol":"vless"}),
+            json!({"tag":"two","protocol":"trojan"}),
+        ];
+
+        let first = serialize_outbounds(&outbounds).unwrap();
+        let second = serialize_outbounds(&outbounds).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn serialized_outbounds_differ_when_connection_parameters_change() {
+        let previous = vec![json!({"tag":"one","protocol":"vless","port":443})];
+        let current = vec![json!({"tag":"one","protocol":"vless","port":8443})];
+
+        assert_ne!(
+            serialize_outbounds(&previous).unwrap(),
+            serialize_outbounds(&current).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
 mod elapsed_time_tests {
     use super::format_elapsed;
     use std::time::Duration;
@@ -261,7 +334,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     let previous = match fs::read(&baseline) {
         Ok(bytes) => Some(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            warning("Baseline отсутствует: подключения будут считаться новыми.");
+            warning("Baseline отсутствует: подписка считается новой, сравнение пропускается.");
             None
         }
         Err(err) => {
@@ -271,20 +344,48 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
-    let current = match parse_subscription(&downloaded) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            state.failed.push((subscription.id.clone(), err.to_string()));
-            error(&format!("Ошибка обработки подписки: {err}"));
-            return;
-        }
-    };
-
+    // Validate an existing baseline before the raw-byte comparison. A damaged
+    // baseline must not be accepted merely because its bytes match the download.
+    let mut damaged_baseline = false;
     let previous_parsed = match previous.as_deref() {
         Some(bytes) => match parse_subscription(bytes) {
             Ok(parsed) => Some(parsed),
             Err(err) => {
-                let message = format!("Не удалось разобрать предыдущий baseline: {err}");
+                warning(&format!(
+                    "Baseline повреждён и будет рассматриваться как отсутствующий: {err}"
+                ));
+                damaged_baseline = true;
+                None
+            }
+        },
+        None => None,
+    };
+
+    if let Some(previous_bytes) = previous.as_deref().filter(|_| previous_parsed.is_some()) {
+        if byte_contents_equal(Some(previous_bytes), &downloaded) {
+            state.processed += 1;
+            success("Уровень 1: исходный файл полностью совпадает с корректным baseline. Подписка не изменилась.");
+            return;
+        }
+        info("Уровень 1: исходный файл отличается от baseline.");
+    } else {
+        info("Уровень 1: сравнение пропущено — baseline отсутствует или повреждён.");
+    }
+
+    let current = match parse_subscription(&downloaded) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            state.failed.push((subscription.id.clone(), err.to_string()));
+            error(&format!("Ошибка обработки новой подписки: {err}. Baseline не обновляется."));
+            return;
+        }
+    };
+
+    let previous_json = match previous_parsed.as_ref() {
+        Some(parsed) => match serialize_outbounds(&parsed.outbounds) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                let message = format!("Не удалось сформировать Outbound из baseline: {err}");
                 state.failed.push((subscription.id.clone(), message.clone()));
                 error(&message);
                 return;
@@ -292,15 +393,28 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         },
         None => None,
     };
+    let current_json = match serialize_outbounds(&current.outbounds) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let message = format!("Не удалось сформировать Outbound из новой подписки: {err}");
+            state.failed.push((subscription.id.clone(), message.clone()));
+            error(&message);
+            return;
+        }
+    };
 
-    let previous_json = previous_parsed.as_ref().map(|parsed| {
-        serde_json::to_vec(&serde_json::json!({"outbounds": parsed.outbounds}))
-            .unwrap_or_default()
-    });
-    let current_json = serde_json::to_vec(&serde_json::json!({"outbounds": current.outbounds})) 
-        .unwrap_or_default();
+    if let Some(previous_json) = previous_json.as_deref() {
+        if byte_contents_equal(Some(previous_json), &current_json) {
+            state.processed += 1;
+            success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
+            return;
+        }
+        info("Уровень 2: сформированные Outbound отличаются. Запускаем сравнение по Tag.");
+    } else {
+        info("Уровень 2: сравнение пропущено — baseline отсутствует или повреждён. Запускаем сравнение по Tag как для новой подписки.");
+    }
 
-    info("Разбор подключений и сравнение с baseline...");
+    info("Уровень 3: сравнение подключений по Tag...");
     let mut report = match compare_subscription(previous_json.as_deref(), &current_json) {
         Ok(report) => report,
         Err(err) => {
@@ -329,9 +443,25 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;
-        success("Изменений среди распознанных подключений нет. Рабочая группа сохранится.");
+        success("Изменений среди распознанных подключений нет. Рабочая группа и baseline сохраняются без изменений.");
         return;
     }
+
+    // A damaged baseline is only staged for removal when the new subscription
+    // parsed successfully and its detected changes are included in the
+    // prepared configuration. Failed or empty updates must not discard it.
+    if damaged_baseline {
+        state.baseline_removals.push((subscription.id.clone(), baseline.clone()));
+    }
+
+    // Stage the new source baseline only for subscriptions whose detected
+    // changes are included in the prepared configuration. The eventual write
+    // belongs to the final apply phase, after active config files are replaced.
+    state.baseline_updates.push(PreparedBaseline {
+        id: subscription.id.clone(),
+        original: downloaded,
+        path: baseline,
+    });
 
     let outbounds: Vec<Value> = current.outbounds.into_iter().map(|mut outbound| {
         let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
@@ -346,23 +476,35 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));
     state.prepared.push(PreparedSubscription {
         id: subscription.id.clone(),
-        original: downloaded,
-        baseline,
         outbounds,
     });
 }
 
 fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
-    let named = subscription.name.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-    let name = if named {
-        subscription.prefix.strip_suffix("--").unwrap_or(&subscription.prefix).to_owned()
-    } else {
-        subscription.prefix.clone()
-    };
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
-        return Err(format!("Недопустимый префикс baseline для {}.", subscription.id).into());
+    let name = subscription
+        .name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("У подписки {} не задано имя для baseline.", subscription.id))?;
+
+    for component in [&subscription.id, name] {
+        if component == "." || component == ".."
+            || component.contains('/')
+            || component.contains('\\')
+        {
+            return Err(format!("Недопустимое имя baseline для {}.", subscription.id).into());
+        }
     }
-    Ok(Path::new(BASELINE_DIR).join(format!("{name}.json")))
+
+    Ok(Path::new(BASELINE_DIR).join(format!("{}--{}.json", subscription.id, name)))
+}
+
+fn byte_contents_equal(previous: Option<&[u8]>, current: &[u8]) -> bool {
+    matches!(previous, Some(previous) if previous == current)
+}
+
+fn serialize_outbounds(outbounds: &[Value]) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&serde_json::json!({ "outbounds": outbounds }))
 }
 
 fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
@@ -562,14 +704,22 @@ fn print_validation(mode: ValidationMode, result: &Result<(), String>) {
     }
 }
 
-fn print_baseline_plan(prepared: &[PreparedSubscription]) {
+fn print_baseline_plan(state: &RunState) {
     println!();
     title("ПЛАН ОБНОВЛЕНИЯ BASELINE");
-    if prepared.is_empty() { info("Baseline не требуется обновлять."); }
-    for item in prepared {
-        info(&format!("{} -> {} ({} байт).", item.id, item.baseline.display(), item.original.len()));
+    if state.baseline_updates.is_empty() && state.baseline_removals.is_empty() {
+        info("Изменений baseline не требуется.");
     }
-    warning("В контрольном запуске baseline не записывается.");
+    for (id, path) in &state.baseline_removals {
+        warning(&format!("{id}: повреждённый baseline подготовлен к удалению после успешного применения изменений — {}.", path.display()));
+    }
+    for item in &state.baseline_updates {
+        info(&format!(
+            "{} -> {} ({} байт; сохранить после успешной замены рабочих файлов).",
+            item.id, item.path.display(), item.original.len()
+        ));
+    }
+    warning("В контрольном запуске файлы baseline не изменяются.");
 }
 
 fn print_prepared_documents(docs: &[ConfigDocument]) {

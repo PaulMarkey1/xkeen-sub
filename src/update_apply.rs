@@ -42,6 +42,10 @@ impl StagingDirectory {
         fs::create_dir(&root).map_err(|error| {
             format!("Не удалось создать staging-каталог {} (он уже может существовать): {error}", root.display())
         })?;
+        if let Err(error) = fs::set_permissions(&root, fs::Permissions::from_mode(0o700)) {
+            let _ = fs::remove_dir_all(&root);
+            return Err(format!("Не удалось ограничить права staging-каталога {}: {error}", root.display()).into());
+        }
         for name in ["configs", "archive", "baseline"] {
             if let Err(error) = fs::create_dir(root.join(name)) {
                 let _ = fs::remove_dir_all(&root);

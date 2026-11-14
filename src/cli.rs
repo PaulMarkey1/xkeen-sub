@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{install, maintenance, setup, update};
+use crate::{backup, install, maintenance, setup, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -21,6 +21,8 @@ pub fn run() -> AppResult<()> {
 
     match args.as_slice() {
         [root, subcommand] if root == "setup" && subcommand == "help" => print_setup_help(),
+        [root] if root == "backup" => backup::run(),
+        [root, rest @ ..] if root == "backup" => backup::run_command(rest),
         [root] if root == "setup" => setup::run_menu(),
         [root, action] if root == "setup" && action == "add" => setup::add::run(),
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
@@ -55,6 +57,7 @@ fn print_help() -> AppResult<()> {
     command_item("  edit", "Редактировать подписку");
     command_item("  help", "Справка по настройке");
     println!();
+    command_item("backup", "Настройки и управление резервными копиями");
     command_item("update", "Контрольный запуск обновления всех подписок");
     command_item("  subN", "Контрольный запуск одной подписки");
     println!();

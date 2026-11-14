@@ -71,6 +71,7 @@ pub(crate) struct BackupSession {
     outcome_summary: String,
     allow_prune: bool,
     subscriptions: Vec<String>,
+    updated_subscriptions: Vec<String>,
 }
 
 impl BackupSession {
@@ -126,6 +127,7 @@ impl BackupSession {
             outcome_summary: "Обновление ещё выполняется.".to_owned(),
             allow_prune: false,
             subscriptions: Vec::new(),
+            updated_subscriptions: Vec::new(),
         };
         session.event("UPDATE", "Создана резервная запись. Начато выполнение update.")?;
         session.event("UPDATE", &format!("Причина создания: {reason}"))?;
@@ -138,6 +140,10 @@ impl BackupSession {
 
     pub(crate) fn set_subscriptions(&mut self, subscriptions: Vec<String>) {
         self.subscriptions = subscriptions;
+    }
+
+    pub(crate) fn set_updated_subscriptions(&mut self, subscriptions: Vec<String>) {
+        self.updated_subscriptions = subscriptions;
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -259,13 +265,14 @@ impl BackupSession {
              ============================================================\n\
              ID резервной записи: {}\n\
              Дата и время завершения: {} {}\n\
-             Подписки: {}\n\
+             Обрабатываемые подписки: {}\n\
+             Подписки с изменениями: {}\n\
              Итоговый статус: {}\n\
              Планируется изменить файлов: {}\n\
              Сохранено файлов: {}\n\
              Результат: {}\n\
              ------------------------------------------------------------\n",
-            self.id, current_date()?, now, if self.subscriptions.is_empty() { "—".to_owned() } else { self.subscriptions.join(", ") }, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
+            self.id, current_date()?, now, if self.subscriptions.is_empty() { "—".to_owned() } else { self.subscriptions.join(", ") }, if self.updated_subscriptions.is_empty() { "—".to_owned() } else { self.updated_subscriptions.join(", ") }, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
         );
         let temporary = self.path.join(".log.txt.tmp");
         {

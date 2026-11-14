@@ -212,10 +212,16 @@ fn validate_target(operation: &PlannedFileOperation) -> AppResult<()> {
     if !allowed {
         return Err(format!("Путь не соответствует категории операции: {}", path.display()).into());
     }
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if operation.kind == PlannedOperationKind::Create => {
+            return Err(format!("Файл для операции Create уже существует: {}", path.display()).into());
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(format!("Целевой путь не является обычным файлом: {}", path.display()).into());
         }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Не удалось проверить целевой путь {}: {error}", path.display()).into()),
     }
     if !path.parent().ok_or("У целевого файла отсутствует родительский каталог.")?.is_dir() {
         return Err(format!("Каталог назначения не существует: {}", path.parent().unwrap().display()).into());
@@ -262,7 +268,13 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                     set_owner(&temporary, 0, 0)?;
                     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
                 }
-                fs::rename(&temporary, &operation.path)?;
+                if operation.kind == PlannedOperationKind::Create {
+                    // A hard link in the same directory provides atomic no-clobber creation.
+                    fs::hard_link(&temporary, &operation.path)?;
+                    fs::remove_file(&temporary)?;
+                } else {
+                    fs::rename(&temporary, &operation.path)?;
+                }
                 if fs::read(&operation.path)? != expected {
                     return Err(format!("Побайтовая проверка применённого файла не пройдена: {}", operation.path.display()).into());
                 }
@@ -273,7 +285,9 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                 Err(error) => {
                     // Once rename consumed the unique temporary file, the destination may
                     // already have changed even if the final read/verification failed.
-                    let mutated = !temporary.exists();
+                    let mutated = !temporary.exists()
+                        || (operation.kind == PlannedOperationKind::Create
+                            && fs::read(&operation.path).map(|bytes| bytes == expected).unwrap_or(false));
                     if let Err(cleanup) = fs::remove_file(&temporary) {
                         if cleanup.kind() != std::io::ErrorKind::NotFound {
                             return Err((format!("{error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()), mutated));
@@ -449,9 +463,14 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
     let command_text = format!("XKEEN_FOREGROUND=1 xkeen {}", args.join(" "));
     let started = timestamp();
     backup.event("COMMAND", &format!("Команда: {command_text}; начало: {started}."))?;
-    let mut child = Command::new("xkeen").args(args).env("XKEEN_FOREGROUND", "1")
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
-        .map_err(|error| format!("Не удалось запустить {command_text}: {error}"))?;
+    let mut child = match Command::new("xkeen").args(args).env("XKEEN_FOREGROUND", "1")
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            backup.event("COMMAND", &format!("Команда: {command_text}; ошибка запуска: {error}; завершение: {}.", timestamp()))?;
+            return Err(format!("Не удалось запустить {command_text}: {error}").into());
+        }
+    };
     let stdout = child.stdout.take().ok_or("Не удалось получить stdout команды XKeen.")?;
     let stderr = child.stderr.take().ok_or("Не удалось получить stderr команды XKeen.")?;
     let out_thread = thread::spawn(move || {

@@ -346,14 +346,15 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
 
     // Validate an existing baseline before the raw-byte comparison. A damaged
     // baseline must not be accepted merely because its bytes match the download.
+    let mut damaged_baseline = false;
     let previous_parsed = match previous.as_deref() {
         Some(bytes) => match parse_subscription(bytes) {
             Ok(parsed) => Some(parsed),
             Err(err) => {
                 warning(&format!(
-                    "Baseline повреждён и будет удалён при завершении update: {err}"
+                    "Baseline повреждён и будет рассматриваться как отсутствующий: {err}"
                 ));
-                state.baseline_removals.push((subscription.id.clone(), baseline.clone()));
+                damaged_baseline = true;
                 None
             }
         },
@@ -444,6 +445,13 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         state.processed += 1;
         success("Изменений среди распознанных подключений нет. Рабочая группа и baseline сохраняются без изменений.");
         return;
+    }
+
+    // A damaged baseline is only staged for removal when the new subscription
+    // parsed successfully and its detected changes are included in the
+    // prepared configuration. Failed or empty updates must not discard it.
+    if damaged_baseline {
+        state.baseline_removals.push((subscription.id.clone(), baseline.clone()));
     }
 
     // Stage the new source baseline only for subscriptions whose detected
@@ -703,7 +711,7 @@ fn print_baseline_plan(state: &RunState) {
         info("Изменений baseline не требуется.");
     }
     for (id, path) in &state.baseline_removals {
-        warning(&format!("{id}: повреждённый baseline будет удалён — {}.", path.display()));
+        warning(&format!("{id}: повреждённый baseline подготовлен к удалению после успешного применения изменений — {}.", path.display()));
     }
     for item in &state.baseline_updates {
         info(&format!(

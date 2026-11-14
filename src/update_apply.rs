@@ -527,17 +527,24 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
 }
 
 fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
-    let stop = run_xkeen(&["-stop"], backup)?;
-    let status = run_xkeen(&["-status"], backup)?;
-    let stopped = stop.success && !status.timed_out && is_stopped_status(status.code, &status.stdout);
+    let stop = run_xkeen(&["-stop"], backup);
+    let status = run_xkeen(&["-status"], backup);
+    let stop_success = matches!(&stop, Ok(result) if result.success);
+    let stopped = matches!(&status, Ok(result) if !result.timed_out && is_stopped_status(result.code, &result.stdout));
+    let stop_description = match &stop {
+        Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
+        Err(error) => format!("ошибка запуска команды: {error}"),
+    };
+    let status_description = match &status {
+        Ok(result) => format!("exit_code={:?}, timeout={}, stdout={}", result.code, result.timed_out, result.stdout),
+        Err(error) => format!("ошибка проверки статуса: {error}"),
+    };
     backup.event("XKEEN", &format!(
-        "Проверка остановки: stop_success={}, status_code={:?}, состояние остановлено={}.",
-        stop.success, status.code, stopped
+        "Проверка остановки: stop_success={stop_success}; состояние остановлено={stopped}; {stop_description}; {status_description}"
     ))?;
-    if !stopped {
+    if !stop_success || !stopped {
         return Err(format!(
-            "Остановка XKeen не подтверждена: stop_code={:?}, timeout={}; status_code={:?}; stdout={}",
-            stop.code, stop.timed_out, status.code, status.stdout
+            "Остановка XKeen не подтверждена: {stop_description}; {status_description}"
         ).into());
     }
 

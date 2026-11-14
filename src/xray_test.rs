@@ -160,8 +160,8 @@ pub fn test_config_set_detailed(
         ))
     })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = filter_info_lines(&String::from_utf8_lossy(&output.stdout));
+    let stderr = filter_info_lines(&String::from_utf8_lossy(&output.stderr));
 
     if !output.status.success() {
         return Err(XrayTestError::Process(XrayProcessFailure {
@@ -173,6 +173,16 @@ pub fn test_config_set_detailed(
     }
 
     Ok(XrayTestOutput { stdout, stderr })
+}
+
+/// Removes Xray info-level log lines from either output stream while keeping
+/// warnings, errors, and any other diagnostic messages.
+fn filter_info_lines(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| !line.to_ascii_lowercase().contains("[info]"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn safe_file_name(value: &str) -> Option<&str> {
@@ -219,7 +229,16 @@ impl Drop for TemporaryResources {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_file_name, XrayProcessFailure};
+    use super::{filter_info_lines, safe_file_name, XrayProcessFailure};
+
+    #[test]
+    fn removes_info_lines_case_insensitively_and_keeps_other_diagnostics() {
+        let output = "[Info] startup message\n[WARNING] config warning\n[ERROR] config error\n[INFO] version";
+        assert_eq!(
+            filter_info_lines(output),
+            "[WARNING] config warning\n[ERROR] config error"
+        );
+    }
 
     #[test]
     fn rejects_paths_and_unsupported_extensions() {

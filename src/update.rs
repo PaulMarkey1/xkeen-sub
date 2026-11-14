@@ -46,6 +46,7 @@ struct PreparedBaseline {
 struct RunState {
     prepared: Vec<PreparedSubscription>,
     baseline_updates: Vec<PreparedBaseline>,
+    baseline_removals: Vec<(String, PathBuf)>,
     failed: Vec<(String, String)>,
     downloaded: usize,
     processed: usize,
@@ -155,7 +156,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     print_merge_summary(&replacements, &conflicts, &archive);
     print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
     print_validation(mode, &validation);
-    print_baseline_plan(&state.baseline_updates);
+    print_baseline_plan(&state);
     print_prepared_documents(&docs);
 
     println!();
@@ -332,7 +333,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     let previous = match fs::read(&baseline) {
         Ok(bytes) => Some(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            warning("Baseline отсутствует: подключения будут считаться новыми.");
+            warning("Baseline отсутствует: подписка считается новой, сравнение пропускается.");
             None
         }
         Err(err) => {
@@ -342,34 +343,40 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         }
     };
 
-    if byte_contents_equal(previous.as_deref(), &downloaded) {
-        state.processed += 1;
-        success("Уровень 1: исходный файл полностью совпадает с baseline. Подписка не изменилась.");
-        return;
-    }
+    // Validate an existing baseline before the raw-byte comparison. A damaged
+    // baseline must not be accepted merely because its bytes match the download.
+    let previous_parsed = match previous.as_deref() {
+        Some(bytes) => match parse_subscription(bytes) {
+            Ok(parsed) => Some(parsed),
+            Err(err) => {
+                warning(&format!(
+                    "Baseline повреждён и будет удалён при завершении update: {err}"
+                ));
+                state.baseline_removals.push((subscription.id.clone(), baseline.clone()));
+                None
+            }
+        },
+        None => None,
+    };
 
-    info("Уровень 1: исходный файл отличается от baseline либо baseline отсутствует.");
+    if let Some(previous_bytes) = previous.as_deref().filter(|_| previous_parsed.is_some()) {
+        if byte_contents_equal(Some(previous_bytes), &downloaded) {
+            state.processed += 1;
+            success("Уровень 1: исходный файл полностью совпадает с корректным baseline. Подписка не изменилась.");
+            return;
+        }
+        info("Уровень 1: исходный файл отличается от baseline.");
+    } else {
+        info("Уровень 1: сравнение пропущено — baseline отсутствует или повреждён.");
+    }
 
     let current = match parse_subscription(&downloaded) {
         Ok(parsed) => parsed,
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
-            error(&format!("Ошибка обработки подписки: {err}"));
+            error(&format!("Ошибка обработки новой подписки: {err}. Baseline не обновляется."));
             return;
         }
-    };
-
-    let previous_parsed = match previous.as_deref() {
-        Some(bytes) => match parse_subscription(bytes) {
-            Ok(parsed) => Some(parsed),
-            Err(err) => {
-                let message = format!("Не удалось разобрать предыдущий baseline: {err}");
-                state.failed.push((subscription.id.clone(), message.clone()));
-                error(&message);
-                return;
-            }
-        },
-        None => None,
     };
 
     let previous_json = match previous_parsed.as_ref() {
@@ -395,13 +402,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     };
 
     if byte_contents_equal(previous_json.as_deref(), &current_json) {
-        state.baseline_updates.push(PreparedBaseline {
-            id: subscription.id.clone(),
-            original: downloaded,
-            path: baseline,
-        });
         state.processed += 1;
-        success("Уровень 2: сформированные Outbound полностью совпадают. Конфигурация не меняется, baseline будет обновлён.");
+        success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
         return;
     }
 
@@ -422,12 +424,6 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     }
     print_comparison(&report);
 
-    state.baseline_updates.push(PreparedBaseline {
-        id: subscription.id.clone(),
-        original: downloaded.clone(),
-        path: baseline.clone(),
-    });
-
     if current.unrecognized > 0 {
         warning(&format!(
             "Частично распознано: {} подключений пропущено. Ошибки разбора:",
@@ -442,9 +438,18 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;
-        success("Изменений среди распознанных подключений нет. Рабочая группа сохранится.");
+        success("Изменений среди распознанных подключений нет. Рабочая группа и baseline сохраняются без изменений.");
         return;
     }
+
+    // Stage the new source baseline only for subscriptions whose detected
+    // changes are included in the prepared configuration. The eventual write
+    // belongs to the final apply phase, after active config files are replaced.
+    state.baseline_updates.push(PreparedBaseline {
+        id: subscription.id.clone(),
+        original: downloaded,
+        path: baseline,
+    });
 
     let outbounds: Vec<Value> = current.outbounds.into_iter().map(|mut outbound| {
         let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
@@ -687,14 +692,22 @@ fn print_validation(mode: ValidationMode, result: &Result<(), String>) {
     }
 }
 
-fn print_baseline_plan(baselines: &[PreparedBaseline]) {
+fn print_baseline_plan(state: &RunState) {
     println!();
     title("ПЛАН ОБНОВЛЕНИЯ BASELINE");
-    if baselines.is_empty() { info("Baseline не требуется обновлять."); }
-    for item in baselines {
-        info(&format!("{} -> {} ({} байт).", item.id, item.path.display(), item.original.len()));
+    if state.baseline_updates.is_empty() && state.baseline_removals.is_empty() {
+        info("Изменений baseline не требуется.");
     }
-    warning("В контрольном запуске baseline не записывается.");
+    for (id, path) in &state.baseline_removals {
+        warning(&format!("{id}: повреждённый baseline будет удалён — {}.", path.display()));
+    }
+    for item in &state.baseline_updates {
+        info(&format!(
+            "{} -> {} ({} байт; сохранить после успешной замены рабочих файлов).",
+            item.id, item.path.display(), item.original.len()
+        ));
+    }
+    warning("В контрольном запуске файлы baseline не изменяются.");
 }
 
 fn print_prepared_documents(docs: &[ConfigDocument]) {

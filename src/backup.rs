@@ -163,6 +163,11 @@ impl BackupSession {
 
         let mut saved = 0usize;
         for source in sources {
+            let source_metadata = fs::symlink_metadata(&source.path)
+                .map_err(|e| format!("Не удалось проверить исходный путь {}: {e}", source.path.display()))?;
+            if source_metadata.file_type().is_symlink() {
+                return Err(format!("Резервирование символических ссылок не поддерживается: {}", source.path.display()).into());
+            }
             let original = source.path.canonicalize()
                 .map_err(|e| format!("Не удалось определить исходный путь {}: {e}", source.path.display()))?;
             if !original.is_file() {

@@ -606,7 +606,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
         return Ok(());
     }
     let status = read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
-    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "УСПЕШНО" {
+    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "УСПЕШНО" && status != "ОШИБКА ПРИМЕНЕНИЯ" {
         warning("Эта запись не содержит подтверждённую полную резервную копию. Восстановление запрещено.");
         return Ok(());
     }
@@ -1150,6 +1150,12 @@ mod tests {
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/old-user-outbound.json")));
         assert!(!is_allowed_restore_path(Path::new("/etc/passwd")));
         assert!(!is_allowed_restore_path(Path::new("/opt/etc/xray/configs/../passwd")));
+    }
+
+    #[test]
+    fn backup_checksum_detects_corrupted_contents() {
+        assert_eq!(file_checksum(b"original"), file_checksum(b"original"));
+        assert_ne!(file_checksum(b"original"), file_checksum(b"corrupted"));
     }
 
     #[test]

@@ -986,8 +986,10 @@ fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) 
     let counter = RESTORE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let name = path.file_name().and_then(|value| value.to_str()).ok_or("Недопустимое имя файла восстановления.")?;
     let temporary = parent.join(format!(".{name}.xkeen-sub-restore-{}-{counter}.tmp", std::process::id()));
+    let mut temporary_created = false;
     let result = (|| -> AppResult<()> {
         let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+        temporary_created = true;
         file.write_all(content)?;
         file.sync_all()?;
         drop(file);
@@ -1011,9 +1013,11 @@ fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) 
         Ok(())
     })();
     if let Err(original_error) = &result {
-        if let Err(cleanup) = fs::remove_file(&temporary) {
-            if cleanup.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("{original_error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()).into());
+        if temporary_created {
+            if let Err(cleanup) = fs::remove_file(&temporary) {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("{original_error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()).into());
+                }
             }
         }
     }

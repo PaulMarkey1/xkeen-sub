@@ -58,6 +58,10 @@ fn print_help() -> AppResult<()> {
     command_item("  help", "Справка по настройке");
     println!();
     command_item("backup", "Настройки и управление резервными копиями");
+    command_item("  days N", "Установить срок хранения (минимум 3 дня)");
+    command_item("  limit N", "Установить дневной лимит (минимум 10 записей)");
+    command_item("  mode auto|unlimited", "Выбрать режим хранения");
+    command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
     command_item("update", "Контрольный запуск обновления всех подписок");
     command_item("  subN", "Контрольный запуск одной подписки");
     println!();

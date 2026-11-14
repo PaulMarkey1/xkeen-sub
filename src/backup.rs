@@ -947,10 +947,10 @@ fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) 
         }
         Ok(())
     })();
-    if result.is_err() {
+    if let Err(original_error) = &result {
         if let Err(cleanup) = fs::remove_file(&temporary) {
             if cleanup.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("{}; не удалось удалить временный файл {}: {}", result.unwrap_err(), temporary.display(), cleanup).into());
+                return Err(format!("{original_error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()).into());
             }
         }
     }

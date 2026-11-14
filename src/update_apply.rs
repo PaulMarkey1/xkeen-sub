@@ -402,7 +402,7 @@ fn is_path_absent(path: &Path) -> std::io::Result<bool> {
 }
 
 fn set_owner(path: &Path, uid: u32, gid: u32) -> AppResult<()> {
-    let output = Command::new("chown").arg(format!("{uid}:{gid}")).arg(path).output()
+    let output = Command::new("chown").arg(format!("{uid}:{gid}")).arg("--").arg(path).output()
         .map_err(|error| format!("Не удалось запустить chown для {}: {error}", path.display()))?;
     if !output.status.success() {
         return Err(format!("chown завершился с кодом {:?}: {}", output.status.code(), String::from_utf8_lossy(&output.stderr)).into());

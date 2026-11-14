@@ -186,7 +186,7 @@ pub fn reinstall() -> AppResult<()> {
         return Err(error.into());
     }
     success(&format!("Установлена версия {tag}."));
-    info("Файлы sub.json и config.json не изменялись.");
+    info("Файл sub.json не изменялся.");
     Ok(())
 }
 

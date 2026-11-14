@@ -69,7 +69,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     } else if backup_status_is_running(&backup) {
         backup.set_outcome(
             "ЗАВЕРШЕНО",
-            "Контрольный запуск завершён. Изменения рабочих файлов не применялись.",
+            "Обновление завершено без изменения рабочих файлов.",
             true,
         );
     }

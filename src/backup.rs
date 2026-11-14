@@ -286,7 +286,7 @@ impl BackupSession {
             return Err(format!("Контрольная сумма резервного файла не совпадает: {}", backup_file.display()).into());
         }
         restore_file_atomically(&target, &backup_bytes, metadata)?;
-        self.event("ROLLBACK", &format!("Исходный файл восстановлен и проверен: {}", target.display()))?;
+        self.event("ROLLBACK", &format!("Исходный файл восстановлен и проверен: {}", target.display())).ok();
         Ok(())
     }
 

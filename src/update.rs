@@ -76,7 +76,9 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
 
     let result = run_inner(target_id, &mut backup);
     if let Err(ref error) = result {
-        backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
+        if backup_status_is_running(&backup) {
+            backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
+        }
     } else if backup_status_is_running(&backup) {
         backup.set_outcome(
             "ЗАВЕРШЕНО",

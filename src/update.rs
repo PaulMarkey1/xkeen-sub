@@ -95,8 +95,8 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     result
 }
 
-fn backup_status_is_running(_backup: &BackupSession) -> bool {
-    true
+fn backup_status_is_running(backup: &BackupSession) -> bool {
+    backup.is_running()
 }
 
 fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<()> {

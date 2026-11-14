@@ -249,7 +249,7 @@ mod subscription_comparison_tests {
     #[test]
     fn byte_comparison_detects_identical_and_different_source_files() {
         assert!(byte_contents_equal(Some(b"subscription"), b"subscription"));
-        assert!(!byte_contents_equal(Some(b"subscription"), b"subscription\\n"));
+        assert!(!byte_contents_equal(Some(b"subscription"), b"subscription\n"));
         assert!(!byte_contents_equal(None, b"subscription"));
     }
 

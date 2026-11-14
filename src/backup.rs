@@ -866,7 +866,7 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
     for record in records {
         let ordinal = date_from_id(&record.id).unwrap_or(i64::MIN);
         if today_ordinal - ordinal >= settings.retention_days as i64 {
-            if record.id != active_id && !is_active_record(&record) {
+            if record.id != active_id && !is_active_or_incomplete_record(&record) {
                 fs::remove_dir_all(&record.path)?;
                 removed += 1;
             }
@@ -886,13 +886,21 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
             keep.insert(record.id.clone());
         }
         for record in day_records {
-            if record.id != active_id && !is_active_record(&record) && !keep.contains(&record.id) {
+            if record.id != active_id && !is_active_or_incomplete_record(&record) && !keep.contains(&record.id) {
                 fs::remove_dir_all(&record.path)?;
                 removed += 1;
             }
         }
     }
     Ok(removed)
+}
+
+fn is_active_or_incomplete_record(record: &BackupRecord) -> bool {
+    let summary = read_summary(&record.path.join("log.txt"));
+    if !summary.contains_key("status") {
+        return true;
+    }
+    is_active_record(record)
 }
 
 fn is_active_record(record: &BackupRecord) -> bool {

@@ -802,6 +802,117 @@ fn print_prepared_documents(docs: &[ConfigDocument]) {
     }
 }
 
+fn build_file_plan(
+    docs: &[ConfigDocument],
+    state: &RunState,
+    archive: &ArchivePlan,
+) -> AppResult<Vec<PlannedFileOperation>> {
+    let mut plan: BTreeMap<PathBuf, PlannedFileOperation> = BTreeMap::new();
+
+    for doc in docs {
+        let mut content = serde_json::to_vec_pretty(&doc.value)?;
+        content.push(b'\n');
+        if content != doc.original.as_bytes() {
+            plan.insert(doc.path.clone(), PlannedFileOperation {
+                path: doc.path.clone(),
+                category: "Конфигурация Xray",
+                kind: PlannedOperationKind::Replace,
+                content: Some(content),
+            });
+        }
+    }
+
+    if archive.added > 0 {
+        let path = PathBuf::from(USER_ARCHIVE);
+        let mut content = serde_json::to_vec_pretty(&archive.outbounds)?;
+        content.push(b'\n');
+        match fs::read(&path) {
+            Ok(original) if original == content => {}
+            Ok(_) => {
+                plan.insert(path.clone(), PlannedFileOperation {
+                    path,
+                    category: "Архив пользовательских подключений",
+                    kind: PlannedOperationKind::Replace,
+                    content: Some(content),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                plan.insert(path.clone(), PlannedFileOperation {
+                    path,
+                    category: "Архив пользовательских подключений",
+                    kind: PlannedOperationKind::Create,
+                    content: Some(content),
+                });
+            }
+            Err(error) => return Err(format!("Не удалось проверить архив {}: {error}", path.display()).into()),
+        }
+    }
+
+    for baseline in &state.baseline_updates {
+        match fs::read(&baseline.path) {
+            Ok(original) if original == baseline.original => {}
+            Ok(_) => {
+                plan.insert(baseline.path.clone(), PlannedFileOperation {
+                    path: baseline.path.clone(),
+                    category: "Baseline",
+                    kind: PlannedOperationKind::Replace,
+                    content: Some(baseline.original.clone()),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                plan.insert(baseline.path.clone(), PlannedFileOperation {
+                    path: baseline.path.clone(),
+                    category: "Baseline",
+                    kind: PlannedOperationKind::Create,
+                    content: Some(baseline.original.clone()),
+                });
+            }
+            Err(error) => return Err(format!("Не удалось проверить baseline {}: {error}", baseline.path.display()).into()),
+        }
+    }
+
+    for (id, path) in &state.baseline_removals {
+        if plan.contains_key(path) {
+            // A replacement at the same path supersedes a separate removal.
+            continue;
+        }
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                plan.insert(path.clone(), PlannedFileOperation {
+                    path: path.clone(),
+                    category: "Повреждённый baseline",
+                    kind: PlannedOperationKind::Delete,
+                    content: None,
+                });
+            }
+            Ok(_) => return Err(format!("Путь baseline для {id} не является обычным файлом: {}", path.display()).into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Не удалось проверить baseline для удаления {}: {error}", path.display()).into()),
+        }
+    }
+
+    Ok(plan.into_values().collect())
+}
+
+fn print_file_plan(plan: &[PlannedFileOperation]) {
+    println!();
+    title("ИТОГОВЫЙ СПИСОК ФАЙЛОВ ДЛЯ ИЗМЕНЕНИЯ");
+    if plan.is_empty() {
+        info("Файлы для изменения отсутствуют.");
+        return;
+    }
+    for operation in plan {
+        let action = match operation.kind {
+            PlannedOperationKind::Create => "Создание",
+            PlannedOperationKind::Replace => "Замена",
+            PlannedOperationKind::Delete => "Удаление",
+        };
+        let size = operation.content.as_ref().map(|bytes| format!(" ({} байт)", bytes.len())).unwrap_or_default();
+        info(&format!("{action}: {} — {}{size}", operation.path.display(), operation.category));
+    }
+    info(&format!("Всего операций: {}.", plan.len()));
+}
+
 fn show_value(value: Option<&Value>) -> String {
     value.map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
         .unwrap_or_else(|| "<отсутствует>".to_owned())

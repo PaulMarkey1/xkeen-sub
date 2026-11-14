@@ -137,10 +137,10 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         if plan[index].category == "Baseline" && !baseline_directory_created
             && !Path::new(BASELINE_ROOT).exists()
         {
-            match create_baseline_directory(backup) {
-                Ok(created) => baseline_directory_created = created,
+            match create_baseline_directory(backup, &mut baseline_directory_created) {
+                Ok(()) => {}
                 Err(error) => {
-                    backup.event("ERROR", &format!("Не удалось подготовить каталог baseline: {error}"))?;
+                    backup.event("ERROR", &format!("Не удалось подготовить каталог baseline: {error}")).ok();
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
                     let restart = start_after_rollback(backup);
@@ -154,7 +154,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
                 Ok(true) => {}
                 Ok(false) => {
                     let message = format!("Исходный файл изменился после резервирования; применение остановлено: {}", plan[index].path.display());
-                    backup.event("ERROR", &message)?;
+                    backup.event("ERROR", &message).ok();
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
                     let restart = start_after_rollback(backup);
@@ -175,12 +175,20 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         match apply_one(&plan[index], staged[index].as_deref()) {
             Ok(()) => {
                 applied.push(index);
-                backup.event("APPLY", &format!("Операция применена: {:?} {}.", plan[index].kind, plan[index].path.display()))?;
+                if let Err(log_error) = backup.event("APPLY", &format!("Операция применена: {:?} {}.", plan[index].kind, plan[index].path.display())) {
+                    let message = format!("Не удалось записать результат применения {} в журнал: {log_error}", plan[index].path.display());
+                    let rollback = rollback(plan, &staged, &applied, backup);
+                    cleanup_created_baseline_directory(baseline_directory_created, backup);
+                    let restart = start_after_rollback(backup);
+                    let _ = staging.cleanup(backup);
+                    return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+                }
             }
             Err((message, mutated)) => {
                 if mutated { applied.push(index); }
-                backup.event("ERROR", &format!("Ошибка применения {}: {message}", plan[index].path.display()))?;
+                backup.event("ERROR", &format!("Ошибка применения {}: {message}", plan[index].path.display())).ok();
                 let rollback = rollback(plan, &staged, &applied, backup);
+                cleanup_created_baseline_directory(baseline_directory_created, backup);
                 let restart = start_after_rollback(backup);
                 let _ = staging.cleanup(backup);
                 return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
@@ -189,7 +197,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     }
 
     if let Err(error) = verify_applied(plan, &staged, backup) {
-        backup.event("ERROR", &format!("Контроль итогового состояния файлов не пройден: {error}"))?;
+        backup.event("ERROR", &format!("Контроль итогового состояния файлов не пройден: {error}")).ok();
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
         let restart = start_after_rollback(backup);
@@ -198,7 +206,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     }
 
     if let Err(error) = restart_xkeen(backup) {
-        backup.event("ERROR", &format!("Перезапуск или проверка XKeen завершились ошибкой: {error}"))?;
+        backup.event("ERROR", &format!("Перезапуск или проверка XKeen завершились ошибкой: {error}")).ok();
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
         let restart = start_after_rollback(backup);
@@ -206,27 +214,34 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
     }
 
-    backup.event("APPLY", "Все файлы применены и проверены; XKeen запущен, статус подтверждён.")?;
+    if let Err(log_error) = backup.event("APPLY", "Все файлы применены и проверены; XKeen запущен, статус подтверждён.") {
+        let rollback = rollback(plan, &staged, &applied, backup);
+        cleanup_created_baseline_directory(baseline_directory_created, backup);
+        let restart = start_after_rollback(backup);
+        let _ = staging.cleanup(backup);
+        return Err(format!("Не удалось записать итог успешного применения в журнал: {log_error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+    }
     if let Err(error) = staging.cleanup(backup) {
-        backup.event("WARNING", &format!("Обновление применено, но staging-каталог не удалось удалить: {error}"))?;
+        backup.event("WARNING", &format!("Обновление применено, но staging-каталог не удалось удалить: {error}")).ok();
     }
     Ok(())
 }
 
-fn create_baseline_directory(backup: &mut BackupSession) -> AppResult<bool> {
+fn create_baseline_directory(backup: &mut BackupSession, created: &mut bool) -> AppResult<()> {
     let path = Path::new(BASELINE_ROOT);
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err(format!("Путь baseline не является обычным каталогом: {}", path.display()).into());
         }
-        Ok(_) => return Ok(false),
+        Ok(_) => return Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
     fs::create_dir(path)?;
-    backup.event("APPLY", &format!("Создан каталог baseline: {}.", path.display()))?;
+    *created = true;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(true)
+    backup.event("APPLY", &format!("Создан каталог baseline: {}.", path.display()))?;
+    Ok(())
 }
 
 fn cleanup_created_baseline_directory(created: bool, backup: &mut BackupSession) {

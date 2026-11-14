@@ -197,6 +197,7 @@ impl BackupSession {
             )?;
             self.append_file_mapping(&original, &stored_relative)?;
             saved += 1;
+            self.saved_files = saved;
         }
 
         self.saved_files = saved;
@@ -242,7 +243,7 @@ impl BackupSession {
              Сохранено файлов: {}\n\
              Результат: {}\n\
              ------------------------------------------------------------\n",
-            self.id, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary, current_date()?, now
+            self.id, current_date()?, now, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
         );
         let temporary = self.path.join(".log.txt.tmp");
         {
@@ -518,7 +519,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
             return Err(error);
         }
     };
-    safety.set_outcome("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", true);
+    safety.set_outcome("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", false);
     safety.finish()?;
 
     let mut created_now = Vec::new();

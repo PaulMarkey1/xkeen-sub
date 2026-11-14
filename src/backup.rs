@@ -231,7 +231,9 @@ impl BackupSession {
 
     fn append_file_mapping(&mut self, original: &Path, stored: &Path) -> AppResult<()> {
         // This human-readable mapping is also the restore index; no separate metadata file is stored.
-        let line = format!("Файл: {} -> {}\n", original.display(), stored.display());
+        let original_value = serde_json::to_string(&original.display().to_string())?;
+        let stored_value = serde_json::to_string(&stored.to_string_lossy().to_string())?;
+        let line = format!("Файл: {original_value} -> {stored_value}\n");
         let mut file = OpenOptions::new().append(true).open(&self.log_path)?;
         file.write_all(line.as_bytes())?;
         file.flush()?;
@@ -822,6 +824,10 @@ fn read_file_mappings(log_path: &Path) -> AppResult<Vec<(PathBuf, PathBuf)>> {
     for line in content.lines() {
         let Some(value) = line.strip_prefix("Файл: ") else { continue; };
         let Some((source, stored)) = value.split_once(" -> ") else { continue; };
+        let source: String = serde_json::from_str(source)
+            .map_err(|e| format!("Некорректный исходный путь в журнале: {e}"))?;
+        let stored: String = serde_json::from_str(stored)
+            .map_err(|e| format!("Некорректный путь резервной копии в журнале: {e}"))?;
         let source = PathBuf::from(source);
         let stored = PathBuf::from(stored);
         if !source.is_absolute() || !is_allowed_restore_path(&source) {
@@ -839,7 +845,9 @@ fn read_created_paths(log_path: &Path) -> AppResult<Vec<PathBuf>> {
     let mut paths = BTreeSet::new();
     for line in content.lines() {
         let Some((_, operation)) = line.split_once("] PLAN: Создание: ") else { continue; };
-        let path_text = operation.split(" | category=").next().unwrap_or(operation);
+        let path_value = operation.split(" | category=").next().unwrap_or(operation);
+        let path_text: String = serde_json::from_str(path_value)
+            .map_err(|e| format!("Некорректный путь созданного файла в журнале: {e}"))?;
         let path = PathBuf::from(path_text);
         if !path.is_absolute() || !is_allowed_restore_path(&path) {
             return Err("В журнале обнаружен недопустимый путь созданного файла.".into());

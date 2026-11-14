@@ -329,8 +329,11 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
             let name = operation.path.file_name().and_then(|value| value.to_str()).ok_or_else(|| ("Недопустимое имя целевого файла.".to_owned(), false))?;
             let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let temporary = parent.join(format!(".{name}.xkeen-sub-{}-{counter}.tmp", std::process::id()));
+            let mut temporary_created = false;
+            let mut destination_mutated = false;
             let result = (|| -> AppResult<()> {
                 let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+                temporary_created = true;
                 let mut input = fs::File::open(staged)?;
                 std::io::copy(&mut input, &mut file)?;
                 file.sync_all()?;
@@ -355,9 +358,11 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                 if operation.kind == PlannedOperationKind::Create {
                     // A hard link in the same directory provides atomic no-clobber creation.
                     fs::hard_link(&temporary, &operation.path)?;
+                    destination_mutated = true;
                     fs::remove_file(&temporary)?;
                 } else {
                     fs::rename(&temporary, &operation.path)?;
+                    destination_mutated = true;
                 }
                 if fs::read(&operation.path)? != expected {
                     return Err(format!("Побайтовая проверка применённого файла не пройдена: {}", operation.path.display()).into());
@@ -375,15 +380,16 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
             match result {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    // Once rename consumed the unique temporary file, the destination may
-                    // already have changed even if the final read/verification failed.
-                    let mutated = !temporary.exists()
-                        || (operation.kind == PlannedOperationKind::Create
-                            && fs::read(&operation.path).map(|bytes| bytes == expected).unwrap_or(false))
-                        || (operation.kind == PlannedOperationKind::Replace && !operation.path.exists());
-                    if let Err(cleanup) = fs::remove_file(&temporary) {
-                        if cleanup.kind() != std::io::ErrorKind::NotFound {
-                            return Err((format!("{error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()), mutated));
+                    // Track the successful atomic operation, not merely the existence of
+                    // a destination that may have been created by another process.
+                    let mutated = destination_mutated
+                        || (operation.kind == PlannedOperationKind::Replace
+                            && is_path_absent(&operation.path).unwrap_or(false));
+                    if temporary_created {
+                        if let Err(cleanup) = fs::remove_file(&temporary) {
+                            if cleanup.kind() != std::io::ErrorKind::NotFound {
+                                return Err((format!("{error}; не удалось удалить временный файл {}: {cleanup}", temporary.display()), mutated));
+                            }
                         }
                     }
                     Err((error.to_string(), mutated))

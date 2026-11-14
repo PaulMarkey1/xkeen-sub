@@ -1,3 +1,4 @@
+use crate::backup::{BackupSession, BackupSource};
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::outbound_compare::{compare_subscription, ComparisonReport};
@@ -51,24 +52,61 @@ struct RunState {
     processed: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlannedOperationKind {
+    Create,
+    Replace,
+    Delete,
+}
+
+struct PlannedFileOperation {
+    path: PathBuf,
+    category: &'static str,
+    kind: PlannedOperationKind,
+    content: Option<Vec<u8>>,
+}
+
 /// Control run only: downloads and analyses subscriptions, constructs all
 /// proposed documents in memory, validates them and prints the complete plan.
 /// No active configuration, archive or baseline file is written.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let started_at = Instant::now();
-    let result = run_inner(target_id);
+    let mut backup = BackupSession::start("Контрольный запуск обновления подписок")?;
+    backup.event("UPDATE", "Загрузка и анализ подписок.")?;
+
+    let result = run_inner(target_id, &mut backup);
+    if let Err(ref error) = result {
+        backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
+    } else if backup_status_is_running(&backup) {
+        backup.set_outcome(
+            "ЗАВЕРШЕНО",
+            "Контрольный запуск завершён. Изменения рабочих файлов не применялись.",
+            true,
+        );
+    }
+
+    let log_result = backup.finish();
     println!();
+    info(&format!("Резервная запись: {}.", backup.id()));
     info(&format!("Время выполнения: {}.", format_elapsed(started_at.elapsed())));
+    if let Err(error) = log_result {
+        return Err(format!("Не удалось завершить журнал резервной записи: {error}").into());
+    }
     result
 }
 
-fn run_inner(target_id: Option<&str>) -> AppResult<()> {
+fn backup_status_is_running(_backup: &BackupSession) -> bool {
+    true
+}
+
+fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<()> {
     println!();
     title("XKEEN-SUB — КОНТРОЛЬНЫЙ ЗАПУСК UPDATE");
-    warning("Рабочие файлы, архив и baseline не изменяются.");
-    info("Резервное копирование и применение конфигурации будут реализованы отдельно.");
+    warning("Рабочие файлы, архив и baseline не изменяются. Создаётся резервная запись.");
+    backup.event("UPDATE", "Начата загрузка списка подписок.")?;
 
     let store = load_subscriptions()?;
+    backup.event("UPDATE", &format!("Загружен список подписок: {}.", store.subscriptions.len()))?;
     if store.subscriptions.is_empty() {
         info("Список подписок пуст.");
         return Ok(());
@@ -83,6 +121,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     selected.sort_by_key(|item| subscription_id_number(&item.id).unwrap_or(u64::MAX));
 
     let mut docs = load_config_documents()?;
+    backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
     let outbound_index = find_doc(&docs, OUTBOUND_FILE)
         .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
     let routing_index = find_doc(&docs, ROUTING_FILE)
@@ -100,7 +139,13 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     let api_tags = collect_api_tags(&docs);
     let mut state = RunState::default();
     for subscription in selected {
+        backup.event("SUBSCRIPTION", &format!("Начата обработка {}.", subscription.id))?;
         prepare_subscription(subscription, &mut state);
+        backup.event(
+            "SUBSCRIPTION",
+            &format!("Обработка {} завершена. Загружено: {}, подготовлено изменений: {}, ошибок: {}.",
+                subscription.id, state.downloaded, state.prepared.len(), state.failed.len()),
+        )?;
     }
 
     if state.downloaded == 0 {
@@ -112,12 +157,16 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
             error("Отсутствует интернет-соединение.");
         }
         print_subscription_summary(&state);
+        backup.event("ERROR", "Не удалось загрузить ни одну подписку; применение заблокировано.")?;
+        backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", false);
         warning("Подготовка конфигурации прекращена. Рабочие файлы не изменены.");
         return Ok(());
     }
     if state.processed == 0 {
         print_subscription_summary(&state);
         print_baseline_plan(&state);
+        backup.event("ERROR", "Ни одна подписка не прошла обработку; дальнейшая подготовка прекращена.")?;
+        backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", false);
         warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
         return Ok(());
     }
@@ -148,6 +197,7 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
         }
     }
 
+    backup.event("CONFIG", "Подготовка конфигураций завершена. Запускается обязательная проверка Xray.")?;
     let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
 
     print_subscription_summary(&state);
@@ -157,6 +207,38 @@ fn run_inner(target_id: Option<&str>) -> AppResult<()> {
     print_xray_test(&validation);
     print_baseline_plan(&state);
     print_prepared_documents(&docs);
+
+    if let Err(message) = &validation {
+        backup.event("XRAY", &format!("Проверка Xray не пройдена: {message}"))?;
+        backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", false);
+    } else {
+        backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
+        let plan = build_file_plan(&docs, &state, &archive)?;
+        print_file_plan(&plan);
+        backup.event("PLAN", &format!("Сформирован итоговый план: {} операций.", plan.len()))?;
+        let backup_sources: Vec<BackupSource> = plan.iter()
+            .filter(|operation| operation.kind != PlannedOperationKind::Create && operation.path.is_file())
+            .map(|operation| BackupSource {
+                path: operation.path.clone(),
+                category: operation.category.to_owned(),
+            })
+            .collect();
+        match backup.backup_files(&backup_sources) {
+            Ok(saved) => {
+                backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
+                backup.set_outcome(
+                    "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА",
+                    "План изменений сформирован. Все необходимые исходные файлы сохранены и побайтно проверены. Применение изменений пока не входит в реализованные пункты.",
+                    true,
+                );
+            }
+            Err(error) => {
+                backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
+                backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), false);
+                return Err(error);
+            }
+        }
+    }
 
     println!();
     title("КОНТРОЛЬНЫЙ ЗАПУСК ЗАВЕРШЁН");

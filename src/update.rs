@@ -993,6 +993,77 @@ fn print_file_plan(plan: &[PlannedFileOperation]) {
     info(&format!("Всего операций: {}.", plan.len()));
 }
 
+
+#[cfg(test)]
+mod file_plan_tests {
+    use super::{build_file_plan, ConfigDocument, PlannedOperationKind, PreparedBaseline, RunState};
+    use crate::update_merge::ArchivePlan;
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temporary_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xkeen-sub-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn byte_identical_prepared_config_and_baseline_are_excluded() {
+        let root = temporary_path("plan-identical");
+        fs::create_dir_all(&root).unwrap();
+        let baseline_path = root.join("baseline.json");
+        let baseline = b"{\"subscriptions\":[]}".to_vec();
+        fs::write(&baseline_path, &baseline).unwrap();
+
+        let value = json!({"log":{"loglevel":"warning"}});
+        let mut original = serde_json::to_vec_pretty(&value).unwrap();
+        original.push(b'\n');
+        let doc = ConfigDocument {
+            file_name: "config.json".to_owned(),
+            path: root.join("config.json"),
+            original: String::from_utf8(original).unwrap(),
+            value,
+        };
+        let state = RunState {
+            baseline_updates: vec![PreparedBaseline {
+                id: "sub1".to_owned(),
+                original: baseline,
+                path: baseline_path,
+            }],
+            ..RunState::default()
+        };
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[doc], &state, &archive).unwrap();
+        assert!(plan.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn baseline_replacement_supersedes_removal_at_the_same_path() {
+        let root = temporary_path("plan-baseline-priority");
+        fs::create_dir_all(&root).unwrap();
+        let baseline_path = root.join("baseline.json");
+        fs::write(&baseline_path, b"old baseline").unwrap();
+
+        let state = RunState {
+            baseline_updates: vec![PreparedBaseline {
+                id: "sub1".to_owned(),
+                original: b"new baseline".to_vec(),
+                path: baseline_path.clone(),
+            }],
+            baseline_removals: vec![("sub1".to_owned(), baseline_path.clone())],
+            ..RunState::default()
+        };
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[], &state, &archive).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].path, baseline_path);
+        assert_eq!(plan[0].kind, PlannedOperationKind::Replace);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn show_value(value: Option<&Value>) -> String {
     value.map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()))
         .unwrap_or_else(|| "<отсутствует>".to_owned())

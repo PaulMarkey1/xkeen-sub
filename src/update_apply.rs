@@ -264,14 +264,20 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                 if fs::read(&temporary)? != expected {
                     return Err(format!("Побайтовая проверка временного файла не пройдена: {}", temporary.display()).into());
                 }
-                if operation.kind == PlannedOperationKind::Replace {
-                    let original = fs::metadata(&operation.path)?;
+                let (expected_mode, expected_uid, expected_gid) = if operation.kind == PlannedOperationKind::Replace {
+                    let original = fs::symlink_metadata(&operation.path)?;
+                    if original.file_type().is_symlink() || !original.is_file() {
+                        return Err(format!("Исходный путь стал небезопасным объектом: {}", operation.path.display()).into());
+                    }
+                    let mode = original.mode() & 0o7777;
                     set_owner(&temporary, original.uid(), original.gid())?;
-                    fs::set_permissions(&temporary, fs::Permissions::from_mode(original.mode() & 0o7777))?;
+                    fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+                    (mode, original.uid(), original.gid())
                 } else {
                     set_owner(&temporary, 0, 0)?;
                     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-                }
+                    (0o600, 0, 0)
+                };
                 if operation.kind == PlannedOperationKind::Create {
                     // A hard link in the same directory provides atomic no-clobber creation.
                     fs::hard_link(&temporary, &operation.path)?;
@@ -281,6 +287,14 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
                 }
                 if fs::read(&operation.path)? != expected {
                     return Err(format!("Побайтовая проверка применённого файла не пройдена: {}", operation.path.display()).into());
+                }
+                let applied_metadata = fs::symlink_metadata(&operation.path)?;
+                if applied_metadata.file_type().is_symlink()
+                    || applied_metadata.mode() & 0o7777 != expected_mode
+                    || applied_metadata.uid() != expected_uid
+                    || applied_metadata.gid() != expected_gid
+                {
+                    return Err(format!("Проверка владельца или прав применённого файла не пройдена: {}", operation.path.display()).into());
                 }
                 Ok(())
             })();
@@ -513,13 +527,17 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
 
 fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     let stop = run_xkeen(&["-stop"], backup)?;
-    if !stop.success {
-        return Err(format!("xkeen -stop завершился ошибкой (код {:?}, timeout={}).", stop.code, stop.timed_out).into());
-    }
     let status = run_xkeen(&["-status"], backup)?;
-    let stopped = is_stopped_status(status.code, &status.stdout);
+    let stopped = stop.success && is_stopped_status(status.code, &status.stdout);
+    backup.event("XKEEN", &format!(
+        "Проверка остановки: stop_success={}, status_code={:?}, состояние остановлено={}.",
+        stop.success, status.code, stopped
+    ))?;
     if !stopped {
-        return Err(format!("Остановка XKeen не подтверждена: exit_code={:?}; stdout={}", status.code, status.stdout).into());
+        return Err(format!(
+            "Остановка XKeen не подтверждена: stop_code={:?}, timeout={}; status_code={:?}; stdout={}",
+            stop.code, stop.timed_out, status.code, status.stdout
+        ).into());
     }
 
     let start = run_xkeen(&["-start"], backup)?;
@@ -528,7 +546,12 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     }
     thread::sleep(Duration::from_secs(5));
     let status = run_xkeen(&["-status"], backup)?;
-    if !is_running_status(status.code, &status.stdout) {
+    let running = is_running_status(status.code, &status.stdout);
+    backup.event("XKEEN", &format!(
+        "Проверка запуска: start_success={}, status_code={:?}, состояние запущено={}.",
+        start.success, status.code, running
+    ))?;
+    if !running {
         return Err(format!("Запуск XKeen не подтверждён: exit_code={:?}; stdout={}", status.code, status.stdout).into());
     }
     backup.event("XKEEN", "Остановка, запуск и проверка статуса XKeen завершились успешно.")?;
@@ -536,34 +559,32 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
 }
 
 fn start_after_rollback(backup: &mut BackupSession) -> String {
-    match run_xkeen(&["-start"], backup) {
-        Ok(start) if start.success => {
-            thread::sleep(Duration::from_secs(5));
-            match run_xkeen(&["-status"], backup) {
-                Ok(status) if is_running_status(status.code, &status.stdout) => {
-                        backup.event("ROLLBACK", "После отката запуск XKeen подтверждён.").ok();
-                        "запущен, статус подтверждён".to_owned()
-                    }
-                Ok(status) => {
-                    let message = format!("После отката статус XKeen не подтверждён: code={:?}; stdout={}", status.code, status.stdout);
-                    backup.event("ERROR", &message).ok();
-                    message
-                }
-                Err(error) => {
-                    backup.event("ERROR", &format!("Не удалось проверить XKeen после отката: {error}")).ok();
-                    error.to_string()
-                }
-            }
-        }
-        Ok(start) => {
-            let message = format!("Не удалось запустить XKeen после отката: code={:?}; timeout={}", start.code, start.timed_out);
-            backup.event("ERROR", &message).ok();
-            message
-        }
-        Err(error) => {
-            backup.event("ERROR", &format!("Ошибка запуска XKeen после отката: {error}")).ok();
-            error.to_string()
-        }
+    let start = run_xkeen(&["-start"], backup);
+    thread::sleep(Duration::from_secs(5));
+    let status = run_xkeen(&["-status"], backup);
+
+    let start_ok = matches!(&start, Ok(result) if result.success);
+    let running = matches!(&status, Ok(result) if is_running_status(result.code, &result.stdout));
+    let start_description = match &start {
+        Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
+        Err(error) => format!("ошибка запуска команды: {error}"),
+    };
+    let status_description = match &status {
+        Ok(result) => format!("exit_code={:?}, stdout={}", result.code, result.stdout),
+        Err(error) => format!("ошибка проверки статуса: {error}"),
+    };
+    backup.event("ROLLBACK", &format!(
+        "Результат запуска XKeen после отката: start_success={start_ok}; состояние запущено={running}; {start_description}; {status_description}"
+    )).ok();
+
+    if start_ok && running {
+        "запущен, статус подтверждён".to_owned()
+    } else {
+        let message = format!(
+            "Не удалось подтвердить запуск XKeen после отката: start_success={start_ok}; состояние запущено={running}; {start_description}; {status_description}"
+        );
+        backup.event("ERROR", &message).ok();
+        message
     }
 }
 

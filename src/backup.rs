@@ -148,9 +148,9 @@ impl BackupSession {
     }
 
     pub(crate) fn event(&mut self, level: &str, message: &str) -> AppResult<()> {
-        let line = match current_time() {
-            Ok(time) => format!("[{time}] {level}: {message}\n"),
-            Err(_) => format!("[время неизвестно] {level}: {message}\n"),
+        let line = match (current_date(), current_time()) {
+            (Ok(date), Ok(time)) => format!("[{date} {time}] {level}: {message}\n"),
+            _ => format!("[дата и время неизвестны] {level}: {message}\n"),
         };
         let mut file = OpenOptions::new().append(true).open(&self.log_path)
             .map_err(|e| format!("Не удалось открыть журнал {}: {e}", self.log_path.display()))?;

@@ -163,7 +163,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
                 }
                 Err(error) => {
                     let message = format!("Не удалось проверить исходный файл перед заменой {}: {error}", plan[index].path.display());
-                    backup.event("ERROR", &message)?;
+                    backup.event("ERROR", &message).ok();
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
                     let restart = start_after_rollback(backup);

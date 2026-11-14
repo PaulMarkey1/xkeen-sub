@@ -222,7 +222,7 @@ impl BackupSession {
                 &format!("Сохранён файл: {} -> {} ({} байт; категория: {}).", original.display(), stored, original_bytes.len(), source.category),
             )?;
             self.append_file_mapping(&original, &stored_relative)?;
-            self.append_file_metadata(&original, source_metadata.mode() & 0o7777, source_metadata.uid(), source_metadata.gid())?;
+            self.append_file_metadata(&original, source_metadata.mode() & 0o7777, source_metadata.uid(), source_metadata.gid(), &original_bytes)?;
             saved += 1;
             self.saved_files = saved;
         }
@@ -250,6 +250,7 @@ impl BackupSession {
         let Some(expected_metadata) = read_file_metadata(&self.log_path, source)? else {
             return Ok(false);
         };
+        if file_checksum(&expected) != expected_metadata.checksum { return Ok(false); }
         let actual_metadata = fs::metadata(source)?;
         Ok(actual_metadata.mode() & 0o7777 == expected_metadata.mode
             && actual_metadata.uid() == expected_metadata.uid
@@ -266,14 +267,18 @@ impl BackupSession {
             .map_err(|error| format!("Не удалось прочитать резервный файл {}: {error}", backup_file.display()))?;
         let metadata = read_file_metadata(&self.log_path, source)?
             .ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", source.display()))?;
+        if file_checksum(&backup_bytes) != metadata.checksum {
+            return Err(format!("Контрольная сумма резервного файла не совпадает: {}", backup_file.display()).into());
+        }
         restore_file_atomically(source, &backup_bytes, metadata)?;
         self.event("ROLLBACK", &format!("Исходный файл восстановлен и проверен: {}", source.display()))?;
         Ok(())
     }
 
-    fn append_file_metadata(&mut self, original: &Path, mode: u32, uid: u32, gid: u32) -> AppResult<()> {
+    fn append_file_metadata(&mut self, original: &Path, mode: u32, uid: u32, gid: u32, bytes: &[u8]) -> AppResult<()> {
         let path = serde_json::to_string(&original.display().to_string())?;
-        let line = format!("Метаданные: {path} -> {mode:o} {uid} {gid}\n");
+        let checksum = file_checksum(bytes);
+        let line = format!("Метаданные: {path} -> {mode:o} {uid} {gid} {checksum:016x}\n");
         let mut file = OpenOptions::new().append(true).open(&self.log_path)?;
         file.write_all(line.as_bytes())?;
         file.flush()?;
@@ -914,6 +919,16 @@ struct FileMetadata {
     mode: u32,
     uid: u32,
     gid: u32,
+    checksum: u64,
+}
+
+fn file_checksum(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn read_file_metadata(log_path: &Path, source: &Path) -> AppResult<Option<FileMetadata>> {
@@ -928,8 +943,9 @@ fn read_file_metadata(log_path: &Path, source: &Path) -> AppResult<Option<FileMe
         let mode = u32::from_str_radix(fields.next().ok_or("В журнале отсутствует режим файла.")?, 8)?;
         let uid = fields.next().ok_or("В журнале отсутствует UID файла.")?.parse::<u32>()?;
         let gid = fields.next().ok_or("В журнале отсутствует GID файла.")?.parse::<u32>()?;
+        let checksum = u64::from_str_radix(fields.next().ok_or("В журнале отсутствует контрольная сумма файла.")?, 16)?;
         if fields.next().is_some() { return Err("Некорректная запись метаданных файла.".into()); }
-        return Ok(Some(FileMetadata { mode, uid, gid }));
+        return Ok(Some(FileMetadata { mode, uid, gid, checksum }));
     }
     Ok(None)
 }

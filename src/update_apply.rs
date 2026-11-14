@@ -597,14 +597,15 @@ fn start_after_rollback(backup: &mut BackupSession) -> String {
 }
 
 fn is_stopped_status(code: Option<i32>, stdout: &str) -> bool {
-    code == Some(1) && stdout.contains("Прокси-клиент не запущен")
+    code == Some(1) && stdout.to_lowercase().contains("прокси-клиент не запущен")
 }
 
 fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
+    let normalized = stdout.to_lowercase();
     code == Some(0)
-        && stdout.contains("Прокси-клиент")
-        && stdout.contains("запущен")
-        && !stdout.contains("не запущен")
+        && normalized.contains("прокси-клиент")
+        && normalized.contains("запущен")
+        && !normalized.contains("не запущен")
 }
 
 #[cfg(test)]
@@ -623,6 +624,7 @@ mod status_tests {
         assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));
+        assert!(!is_running_status(Some(0), "Прокси-клиент НЕ запущен"));
         assert!(!is_running_status(Some(0), "не удалось определить статус"));
     }
 }

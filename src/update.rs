@@ -220,12 +220,14 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     print_baseline_plan(&state);
     print_prepared_documents(&docs);
 
+    let mut no_file_changes = false;
     if let Err(message) = &validation {
         backup.event("XRAY", &format!("Проверка Xray не пройдена: {message}"))?;
         backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", false);
     } else {
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
         let plan = build_file_plan(&docs, &state, &archive)?;
+        no_file_changes = plan.is_empty();
         print_file_plan(&plan);
         backup.set_plan_count(plan.len());
         backup.event("PLAN", &format!("Сформирован итоговый план: {} операций.", plan.len()))?;
@@ -251,7 +253,11 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                     Ok(()) => {
                         backup.set_outcome(
                             "УСПЕШНО",
-                            "Изменения применены, итоговое состояние файлов проверено, XKeen запущен и его статус подтверждён.",
+                            if no_file_changes {
+                                "Изменений файлов не требовалось. Перезапуск XKeen не выполнялся."
+                            } else {
+                                "Изменения применены, итоговое состояние файлов проверено, XKeen запущен и его статус подтверждён."
+                            },
                             true,
                         );
                     }
@@ -286,6 +292,8 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     }
     if validation.is_err() {
         error("Итоговая проверка блокирует будущее применение.");
+    } else if no_file_changes {
+        success("Изменений файлов не требуется; перезапуск XKeen не выполнялся.");
     } else {
         success("Обновление выполнено; файлы и состояние XKeen проверены.");
     }

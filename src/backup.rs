@@ -285,10 +285,10 @@ impl BackupSession {
         self.finished = true;
 
         if self.allow_prune {
-            match prune_records(&load_settings()?, &self.id) {
+            match load_settings().and_then(|settings| prune_records(&settings, &self.id)) {
                 Ok(removed) if removed > 0 => self.event("RETENTION", &format!("Автоматически удалено старых резервных записей: {removed}."))?,
                 Ok(_) => {}
-                Err(error) => self.event("RETENTION", &format!("Не удалось выполнить очистку старых записей: {error}"))?,
+                Err(error) => self.event("RETENTION", &format!("Автоматическая очистка не выполнена; резервные записи сохранены: {error}"))?,
             }
         }
         let active_path = self.path.join(".active");

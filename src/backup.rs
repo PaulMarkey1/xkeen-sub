@@ -127,6 +127,10 @@ impl BackupSession {
         &self.id
     }
 
+    pub(crate) fn is_running(&self) -> bool {
+        self.outcome_status == "ВЫПОЛНЯЕТСЯ"
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

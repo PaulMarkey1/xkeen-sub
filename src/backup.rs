@@ -991,7 +991,7 @@ fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) 
         file.write_all(content)?;
         file.sync_all()?;
         drop(file);
-        let owner = Command::new("chown").arg(format!("{}:{}", metadata.uid, metadata.gid)).arg(&temporary).output()
+        let owner = Command::new("chown").arg(format!("{}:{}", metadata.uid, metadata.gid)).arg("--").arg(&temporary).output()
             .map_err(|error| format!("Не удалось запустить chown для {}: {error}", temporary.display()))?;
         if !owner.status.success() {
             return Err(format!("Не удалось восстановить владельца {}: {}", temporary.display(), String::from_utf8_lossy(&owner.stderr)).into());

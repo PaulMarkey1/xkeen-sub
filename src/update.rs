@@ -458,7 +458,7 @@ fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
     for component in [&subscription.id, name] {
         if component == "." || component == ".."
             || component.contains('/')
-            || component.contains('\\\\')
+            || component.contains('\\')
         {
             return Err(format!("Недопустимое имя baseline для {}.", subscription.id).into());
         }

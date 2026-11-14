@@ -487,6 +487,10 @@ fn show_record_menu(id: &str) -> AppResult<()> {
             "2" => show_files(&record)?,
             "3" => restore_record(&record)?,
             "4" => {
+                if is_active_record(&record) {
+                    warning("Нельзя удалить резервную запись, пока она используется работающим update.");
+                    continue;
+                }
                 if confirm(&format!("Удалить резервную запись {}? Это действие нельзя отменить.", record.id))? {
                     fs::remove_dir_all(&record.path)?;
                     success("Резервная копия удалена.");

@@ -1,3 +1,4 @@
+mod backup;
 mod balancer;
 mod cli;
 mod install;

@@ -155,6 +155,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 subscription.id, state.downloaded, state.prepared.len(), state.failed.len()),
         )?;
     }
+    backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());
 
     if state.downloaded == 0 {
         println!();

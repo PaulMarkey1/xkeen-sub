@@ -205,6 +205,22 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         }
     }
 
+    backup.event("MERGE", &format!(
+        "Объединение Outbound завершено. Замен пользовательских подключений: {}; конфликтов: {}; новых записей архива: {}.",
+        replacements.len(), conflicts.len(), archive.added
+    ))?;
+    for item in &replacements {
+        backup.event("MERGE", item)?;
+    }
+    for item in &conflicts {
+        backup.event("MERGE", item)?;
+    }
+    backup.event("BALANCER", &format!(
+        "Сценарий: {:?}; создан: {}; обновлён существующий: {}; перенаправлено routing rules: {}.",
+        balancer.case, balancer.created, balancer.updated_existing, balancer.transformed_rules
+    ))?;
+    backup.event("OBSERVATORY", &format!("Подготовлено обновлений subjectSelector: {}.", obs_updates.len()))?;
+
     backup.event("CONFIG", "Подготовка конфигураций завершена. Запускается обязательная проверка Xray.")?;
     let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
 

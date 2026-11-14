@@ -226,7 +226,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
             backup.event("PLAN", &format!("{action}: {} ({})", operation.path.display(), operation.category))?;
         }
         let backup_sources: Vec<BackupSource> = plan.iter()
-            .filter(|operation| operation.kind != PlannedOperationKind::Create && operation.path.is_file())
+            .filter(|operation| operation.kind != PlannedOperationKind::Create)
             .map(|operation| BackupSource {
                 path: operation.path.clone(),
                 category: operation.category.to_owned(),

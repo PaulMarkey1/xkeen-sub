@@ -121,6 +121,12 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         None => store.subscriptions.iter().collect(),
     };
     selected.sort_by_key(|item| subscription_id_number(&item.id).unwrap_or(u64::MAX));
+    backup.set_subscriptions(selected.iter().map(|item| {
+        match item.name.as_deref() {
+            Some(name) if !name.trim().is_empty() => format!("{} ({name})", item.id),
+            _ => item.id.clone(),
+        }
+    }).collect());
 
     let mut docs = load_config_documents()?;
     backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
@@ -142,7 +148,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     let mut state = RunState::default();
     for subscription in selected {
         backup.event("SUBSCRIPTION", &format!("Начата обработка {}.", subscription.id))?;
-        prepare_subscription(subscription, &mut state);
+        prepare_subscription(subscription, &mut state, backup)?;
         backup.event(
             "SUBSCRIPTION",
             &format!("Обработка {} завершена. Загружено: {}, подготовлено изменений: {}, ошибок: {}.",
@@ -397,7 +403,11 @@ mod elapsed_time_tests {
     }
 }
 
-fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
+fn prepare_subscription(
+    subscription: &Subscription,
+    state: &mut RunState,
+    backup: &mut BackupSession,
+) -> AppResult<()> {
     println!();
     title(&format!("Подписка {}", subscription.id));
     info("Загрузка...");
@@ -405,12 +415,15 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         Ok(bytes) => {
             state.downloaded += 1;
             success(&format!("Получено {} байт.", bytes.len()));
+            backup.event("DOWNLOAD", &format!("{}: получено {} байт.", subscription.id, bytes.len()))?;
             bytes
         }
         Err(err) => {
-            state.failed.push((subscription.id.clone(), err.to_string()));
-            error(&format!("Ошибка загрузки: {err}"));
-            return;
+            let message = err.to_string();
+            state.failed.push((subscription.id.clone(), message.clone()));
+            error(&format!("Ошибка загрузки: {message}"));
+            backup.event("ERROR", &format!("{}: ошибка загрузки: {message}", subscription.id))?;
+            return Ok(());
         }
     };
 
@@ -419,19 +432,25 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&err.to_string());
-            return;
+            backup.event("ERROR", &format!("{}: {err}", subscription.id))?;
+            return Ok(());
         }
     };
     let previous = match fs::read(&baseline) {
-        Ok(bytes) => Some(bytes),
+        Ok(bytes) => {
+            backup.event("BASELINE", &format!("{}: baseline прочитан из {} ({} байт).", subscription.id, baseline.display(), bytes.len()))?;
+            Some(bytes)
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             warning("Baseline отсутствует: подписка считается новой, сравнение пропускается.");
+            backup.event("BASELINE", &format!("{}: baseline отсутствует; подписка рассматривается как новая.", subscription.id))?;
             None
         }
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Не удалось прочитать baseline: {err}"));
-            return;
+            backup.event("ERROR", &format!("{}: не удалось прочитать baseline {}: {err}", subscription.id, baseline.display()))?;
+            return Ok(());
         }
     };
 
@@ -445,6 +464,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
                 warning(&format!(
                     "Baseline повреждён и будет рассматриваться как отсутствующий: {err}"
                 ));
+                backup.event("BASELINE", &format!("{}: baseline повреждён и будет считаться отсутствующим: {err}", subscription.id))?;
                 damaged_baseline = true;
                 None
             }
@@ -456,19 +476,26 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         if byte_contents_equal(Some(previous_bytes), &downloaded) {
             state.processed += 1;
             success("Уровень 1: исходный файл полностью совпадает с корректным baseline. Подписка не изменилась.");
-            return;
+            backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты совпадают с baseline; изменений нет.", subscription.id))?;
+            return Ok(());
         }
         info("Уровень 1: исходный файл отличается от baseline.");
+        backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты отличаются от baseline.", subscription.id))?;
     } else {
         info("Уровень 1: сравнение пропущено — baseline отсутствует или повреждён.");
+        backup.event("COMPARE", &format!("{}: уровень 1 пропущен — baseline отсутствует или повреждён.", subscription.id))?;
     }
 
     let current = match parse_subscription(&downloaded) {
-        Ok(parsed) => parsed,
+        Ok(parsed) => {
+            backup.event("PARSE", &format!("{}: подписка разобрана; распознано подключений: {}, пропущено: {}.", subscription.id, parsed.outbounds.len(), parsed.unrecognized))?;
+            parsed
+        }
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Ошибка обработки новой подписки: {err}. Baseline не обновляется."));
-            return;
+            backup.event("ERROR", &format!("{}: ошибка разбора новой подписки: {err}. Baseline не обновляется.", subscription.id))?;
+            return Ok(());
         }
     };
 
@@ -479,7 +506,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
                 let message = format!("Не удалось сформировать Outbound из baseline: {err}");
                 state.failed.push((subscription.id.clone(), message.clone()));
                 error(&message);
-                return;
+                backup.event("ERROR", &format!("{}: {message}", subscription.id))?;
+                return Ok(());
             }
         },
         None => None,
@@ -490,7 +518,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
             let message = format!("Не удалось сформировать Outbound из новой подписки: {err}");
             state.failed.push((subscription.id.clone(), message.clone()));
             error(&message);
-            return;
+            backup.event("ERROR", &format!("{}: {message}", subscription.id))?;
+            return Ok(());
         }
     };
 
@@ -498,11 +527,14 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         if byte_contents_equal(Some(previous_json), &current_json) {
             state.processed += 1;
             success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
-            return;
+            backup.event("COMPARE", &format!("{}: уровень 2 — сформированные Outbound совпадают побайтно.", subscription.id))?;
+            return Ok(());
         }
         info("Уровень 2: сформированные Outbound отличаются. Запускаем сравнение по Tag.");
+        backup.event("COMPARE", &format!("{}: уровень 2 — Outbound отличаются; запускается сравнение по Tag.", subscription.id))?;
     } else {
         info("Уровень 2: сравнение пропущено — baseline отсутствует или повреждён. Запускаем сравнение по Tag как для новой подписки.");
+        backup.event("COMPARE", &format!("{}: уровень 2 пропущен; выполняется сравнение новой подписки по Tag.", subscription.id))?;
     }
 
     info("Уровень 3: сравнение подключений по Tag...");
@@ -511,7 +543,8 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         Err(err) => {
             state.failed.push((subscription.id.clone(), err.to_string()));
             error(&format!("Ошибка сравнения подписки: {err}"));
-            return;
+            backup.event("ERROR", &format!("{}: ошибка сравнения подключений: {err}", subscription.id))?;
+            return Ok(());
         }
     };
     report.unrecognized_current += current.unrecognized;
@@ -519,6 +552,25 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         report.unrecognized_previous += previous.unrecognized;
     }
     print_comparison(&report);
+    backup.event(
+        "COMPARE",
+        &format!("{}: добавлено {}, удалено {}, изменено {}, без изменений {}; нераспознано в новой версии {}, в baseline {}.",
+            subscription.id, report.added.len(), report.removed.len(), report.changed.len(), report.unchanged,
+            report.unrecognized_current, report.unrecognized_previous),
+    )?;
+    for item in &report.added {
+        backup.event("COMPARE", &format!("{}: добавлено подключение {}.", subscription.id, item.tag))?;
+    }
+    for item in &report.removed {
+        backup.event("COMPARE", &format!("{}: удалено подключение {}.", subscription.id, item.tag))?;
+    }
+    for item in &report.changed {
+        backup.event("COMPARE", &format!("{}: изменено подключение {}.", subscription.id, item.tag))?;
+        for change in &item.changes {
+            backup.event("COMPARE", &format!("{}: {} — {} -> {}.", subscription.id, change.path,
+                show_value(change.previous.as_ref()), show_value(change.current.as_ref())))?;
+        }
+    }
 
     if current.unrecognized > 0 {
         warning(&format!(
@@ -527,6 +579,7 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
         ));
         for detail in current.errors.iter().take(10) {
             warning(&format!("  {detail}"));
+            backup.event("PARSE", &format!("{}: {detail}", subscription.id))?;
         }
         warning("Распознанные подключения будут обработаны. Старые подключения без однозначного соответствия не добавляются.");
     }
@@ -535,24 +588,21 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
     if !changed {
         state.processed += 1;
         success("Изменений среди распознанных подключений нет. Рабочая группа и baseline сохраняются без изменений.");
-        return;
+        backup.event("SUBSCRIPTION", &format!("{}: среди распознанных подключений изменений нет; baseline не обновляется.", subscription.id))?;
+        return Ok(());
     }
 
-    // A damaged baseline is only staged for removal when the new subscription
-    // parsed successfully and its detected changes are included in the
-    // prepared configuration. Failed or empty updates must not discard it.
     if damaged_baseline {
         state.baseline_removals.push((subscription.id.clone(), baseline.clone()));
+        backup.event("BASELINE", &format!("{}: повреждённый baseline добавлен в план удаления: {}.", subscription.id, baseline.display()))?;
     }
 
-    // Stage the new source baseline only for subscriptions whose detected
-    // changes are included in the prepared configuration. The eventual write
-    // belongs to the final apply phase, after active config files are replaced.
     state.baseline_updates.push(PreparedBaseline {
         id: subscription.id.clone(),
         original: downloaded,
-        path: baseline,
+        path: baseline.clone(),
     });
+    backup.event("BASELINE", &format!("{}: новый baseline подготовлен для {}.", subscription.id, baseline.display()))?;
 
     let outbounds: Vec<Value> = current.outbounds.into_iter().map(|mut outbound| {
         let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
@@ -565,10 +615,12 @@ fn prepare_subscription(subscription: &Subscription, state: &mut RunState) {
 
     state.processed += 1;
     success(&format!("В Обновлённый Outbound передана вся группа ({} подключений).", outbounds.len()));
+    backup.event("SUBSCRIPTION", &format!("{}: в Обновлённый Outbound передано {} подключений.", subscription.id, outbounds.len()))?;
     state.prepared.push(PreparedSubscription {
         id: subscription.id.clone(),
         outbounds,
     });
+    Ok(())
 }
 
 fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {

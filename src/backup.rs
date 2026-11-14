@@ -281,6 +281,7 @@ pub fn run() -> AppResult<()> {
 pub fn run_command(args: &[String]) -> AppResult<()> {
     match args {
         [] => run_menu(),
+        [action] if action == "help" => { print_help(); Ok(()) },
         [action] if action == "list" => list_interactive(),
         [action, id] if action == "list" => show_record_menu(id),
         [action, value] if action == "days" => {
@@ -585,6 +586,14 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
     }
 
     safety.event("RESTORE", &format!("Резервная запись {} восстановлена; все файлы прошли побайтовую проверку.", record.id))?;
+    match load_settings().and_then(|settings| prune_records(&settings, safety.id())) {
+        Ok(removed) if removed > 0 => safety.event("RETENTION", &format!("После восстановления удалено старых записей: {removed}."))?,
+        Ok(_) => {}
+        Err(error) => {
+            safety.event("RETENTION", &format!("Не удалось выполнить очистку после восстановления: {error}"))?;
+            warning("Восстановление завершено, но автоматическая очистка резервных копий не выполнена.");
+        }
+    }
     success("Резервная копия восстановлена. Побайтовая проверка пройдена.");
     Ok(())
 }

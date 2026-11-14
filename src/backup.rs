@@ -956,7 +956,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, parse_record_id, validate_relative_path};
+    use super::{days_from_civil, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
     use std::path::Path;
 
     #[test]
@@ -970,6 +970,31 @@ mod tests {
     fn computes_calendar_day_ordinals() {
         assert_eq!(days_from_civil(2026, 11, 14) - days_from_civil(2026, 11, 13), 1);
         assert_eq!(days_from_civil(2026, 1, 1) - days_from_civil(2025, 12, 31), 1);
+    }
+
+
+    #[test]
+    fn default_backup_settings_keep_backups_enabled_with_safe_minimums() {
+        let settings = BackupSettings::default();
+        assert_eq!(settings.retention_days, 3);
+        assert_eq!(settings.daily_limit, 10);
+        assert_eq!(settings.mode, RetentionMode::Automatic);
+    }
+
+    #[test]
+    fn restore_paths_are_limited_to_update_managed_locations() {
+        assert!(is_allowed_restore_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
+        assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1--Germany.json")));
+        assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/old-user-outbound.json")));
+        assert!(!is_allowed_restore_path(Path::new("/etc/passwd")));
+        assert!(!is_allowed_restore_path(Path::new("/opt/etc/xray/configs/../passwd")));
+    }
+
+    #[test]
+    fn parses_only_supported_retention_modes() {
+        assert_eq!(parse_mode("auto").unwrap(), RetentionMode::Automatic);
+        assert_eq!(parse_mode("unlimited").unwrap(), RetentionMode::Unlimited);
+        assert!(parse_mode("off").is_err());
     }
 
     #[test]

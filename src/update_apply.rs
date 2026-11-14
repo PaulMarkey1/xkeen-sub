@@ -425,6 +425,10 @@ fn verify_applied(plan: &[PlannedFileOperation], staged: &[Option<PathBuf>], bac
                 }
             }
             PlannedOperationKind::Create | PlannedOperationKind::Replace => {
+                let metadata = fs::symlink_metadata(&operation.path)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(format!("Итоговый путь стал небезопасным объектом: {}", operation.path.display()).into());
+                }
                 let expected = fs::read(staged[index].as_ref().ok_or("Не найден staging-файл при проверке.")?)?;
                 if fs::read(&operation.path)? != expected {
                     return Err(format!("Фактическое содержимое отличается от staging: {}", operation.path.display()).into());

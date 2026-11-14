@@ -96,13 +96,14 @@ impl BackupSession {
         let mut log = OpenOptions::new().write(true).create_new(true).open(&log_path)
             .map_err(|e| format!("Не удалось создать {}: {e}", log_path.display()))?;
         let now = current_time()?;
+        let pid = std::process::id();
         let header = format!(
             "============================================================\n\
              XKEEN-SUB — ЖУРНАЛ ОБНОВЛЕНИЯ\n\
              ============================================================\n\
              ID резервной записи: {id}\n\
              Дата и время: {date} {now}\n\
-             PID процесса: {}\n\
+             PID процесса: {pid}\n\
              Причина создания: {reason}\n\
              Подписки: определяются\n\
              Итоговый статус: ВЫПОЛНЯЕТСЯ\n\
@@ -113,8 +114,7 @@ impl BackupSession {
              ПОДРОБНЫЙ ЖУРНАЛ\n\
              ------------------------------------------------------------\n"
         );
-        let header = header.replace("PID процесса: {}\\n", &format!("PID процесса: {}\\n", std::process::id()));
-        log.write_all(header.as_bytes())?
+        log.write_all(header.as_bytes())?;
         log.sync_all()?;
 
         let mut session = Self {

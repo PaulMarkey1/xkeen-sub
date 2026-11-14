@@ -70,6 +70,7 @@ pub(crate) struct BackupSession {
     outcome_status: String,
     outcome_summary: String,
     allow_prune: bool,
+    subscriptions: Vec<String>,
 }
 
 impl BackupSession {
@@ -101,6 +102,7 @@ impl BackupSession {
              ID резервной записи: {id}\n\
              Дата и время: {date} {now}\n\
              Причина создания: {reason}\n\
+             Подписки: определяются\n\
              Итоговый статус: ВЫПОЛНЯЕТСЯ\n\
              Планируется изменить файлов: 0\n\
              Сохранено файлов: 0\n\
@@ -118,13 +120,19 @@ impl BackupSession {
             outcome_status: "ВЫПОЛНЯЕТСЯ".to_owned(),
             outcome_summary: "Обновление ещё выполняется.".to_owned(),
             allow_prune: false,
+            subscriptions: Vec::new(),
         };
         session.event("UPDATE", "Создана резервная запись. Начато выполнение update.")?;
+        session.event("UPDATE", &format!("Причина создания: {reason}"))?;
         Ok(session)
     }
 
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+
+    pub(crate) fn set_subscriptions(&mut self, subscriptions: Vec<String>) {
+        self.subscriptions = subscriptions;
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -246,12 +254,13 @@ impl BackupSession {
              ============================================================\n\
              ID резервной записи: {}\n\
              Дата и время завершения: {} {}\n\
+             Подписки: {}\n\
              Итоговый статус: {}\n\
              Планируется изменить файлов: {}\n\
              Сохранено файлов: {}\n\
              Результат: {}\n\
              ------------------------------------------------------------\n",
-            self.id, current_date()?, now, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
+            self.id, current_date()?, now, if self.subscriptions.is_empty() { "—".to_owned() } else { self.subscriptions.join(", ") }, self.outcome_status, self.planned_files, self.saved_files, self.outcome_summary
         );
         let temporary = self.path.join(".log.txt.tmp");
         {
@@ -733,7 +742,7 @@ fn read_summary(path: &Path) -> HashMap<String, String> {
         if let Some(value) = line.strip_prefix("Дата и время завершения: ") {
             result.insert("time".to_owned(), value.split_whitespace().nth(1).unwrap_or(value).to_owned());
         } else if let Some(value) = line.strip_prefix("Дата и время: ") {
-            result.entry("time".to_owned()).or_insert_with(|| value.to_owned());
+            result.entry("time".to_owned()).or_insert_with(|| value.split_whitespace().nth(1).unwrap_or(value).to_owned());
         } else if let Some(value) = line.strip_prefix("Итоговый статус: ") {
             result.insert("status".to_owned(), value.to_owned());
         } else if let Some(value) = line.strip_prefix("Сохранено файлов: ") {

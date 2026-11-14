@@ -183,7 +183,9 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
     }
 
     backup.event("APPLY", "Все файлы применены и проверены; XKeen запущен, статус подтверждён.")?;
-    staging.cleanup(backup)?;
+    if let Err(error) = staging.cleanup(backup) {
+        backup.event("WARNING", &format!("Обновление применено, но staging-каталог не удалось удалить: {error}"))?;
+    }
     Ok(())
 }
 
@@ -409,6 +411,11 @@ fn retry_restore(path: &Path, backup: &mut BackupSession) -> Result<bool, String
 fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession) -> Result<bool, String> {
     for attempt in 1..=MAX_FILE_ATTEMPTS {
         backup.event("ROLLBACK", &format!("Попытка {attempt}/{MAX_FILE_ATTEMPTS} удалить созданный файл {}.", path.display())).ok();
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!("Конфликт: созданный файл заменён небезопасным объектом; удаление запрещено: {}", path.display()));
+            }
+        }
         match fs::read(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {

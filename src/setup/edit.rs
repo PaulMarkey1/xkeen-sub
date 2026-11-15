@@ -11,7 +11,7 @@ pub fn run() -> AppResult<bool> {
 
         if store.subscriptions.is_empty() {
             title("XKEEN-SUB — РЕДАКТИРОВАНИЕ ПОДПИСОК");
-            info("Список подписок пуст.");
+            info("Подписок пока нет. Сначала добавьте подписку.");
             return Ok(false);
         }
 
@@ -66,20 +66,20 @@ pub fn run() -> AppResult<bool> {
                     subscription.name = name;
                     subscription.prefix = make_prefix(&subscription.id, subscription.name.as_deref());
                     save_subscriptions(&store)?;
-                    success("Название подписки изменено.");
+                    success("Имя подписки сохранено.");
                 }
                 "2" => {
                     let url = loop {
                         let value = read_input("Введите новый URL подписки: ")?;
                         match validate_url(value.trim()) {
                             Ok(url) => break url,
-                            Err(message) => error(&format!("Некорректный URL: {message}")),
+                            Err(message) => error(&format!("Ссылка не подошла: {message}. Проверьте адрес и попробуйте ещё раз.")),
                         }
                     };
 
                     store.subscriptions[index].url = url;
                     save_subscriptions(&store)?;
-                    success("Ссылка подписки изменена.");
+                    success("Новая ссылка сохранена.");
                 }
                 "3" => break,
                 "0" => return Ok(true),

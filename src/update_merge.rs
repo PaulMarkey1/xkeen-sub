@@ -129,6 +129,29 @@ fn archive_outbound(archive: &mut ArchivePlan, outbound: &Value) -> AppResult<()
     }
 }
 
+/// Returns only outbound tags that are eligible for Observatory and balancer selectors.
+/// Service outbounds and the Xray API outbound are excluded by outbound type/tag.
+pub(crate) fn collect_selector_tags(
+    outbounds: &[Value],
+    api_tags: &HashSet<String>,
+) -> AppResult<Vec<String>> {
+    const EXCLUDED_PROTOCOLS: [&str; 4] = ["dns", "loopback", "freedom", "blackhole"];
+
+    let mut tags = Vec::new();
+    for outbound in outbounds {
+        let tag = outbound.get("tag").and_then(Value::as_str)
+            .filter(|tag| !tag.is_empty())
+            .ok_or("Итоговый Outbound содержит пустой или отсутствующий Tag.")?;
+        let protocol = outbound.get("protocol").and_then(Value::as_str).unwrap_or_default();
+
+        if api_tags.contains(tag) || EXCLUDED_PROTOCOLS.contains(&protocol) {
+            continue;
+        }
+        tags.push(tag.to_owned());
+    }
+    Ok(tags)
+}
+
 pub(crate) fn collect_tags(outbounds: &[Value]) -> AppResult<Vec<String>> {
     let mut tags = Vec::new();
     let mut unique = HashSet::new();

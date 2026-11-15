@@ -215,7 +215,6 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
     }
 
-    progress.advance("Перезапуск XKeen подтверждён");
     if let Err(log_error) = backup.event("APPLY", "Все файлы применены и проверены; XKeen запущен, статус подтверждён.") {
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);

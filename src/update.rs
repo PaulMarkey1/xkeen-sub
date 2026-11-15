@@ -817,7 +817,7 @@ fn print_updated_outbound(prepared: &[PreparedSubscription]) {
 
 fn print_json_section(label: &str, value: &Value) {
     let count = value.as_array().map(Vec::len).unwrap_or(0);
-    info(&format!("Подготовлено элементов: {count}. Подробный список скрыт, чтобы не перегружать экран."));
+    info(&format!("{label}: подготовлено элементов — {count}. Подробный список скрыт, чтобы не перегружать экран."));
 }
 
 fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &ArchivePlan) {

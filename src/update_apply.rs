@@ -206,7 +206,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
     }
 
-    if let Err(error) = restart_xkeen(backup) {
+    if let Err(error) = restart_xkeen(backup, progress) {
         backup.event("ERROR", &format!("Перезапуск или проверка XKeen завершились ошибкой: {error}")).ok();
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
@@ -574,7 +574,7 @@ struct CommandResult {
     timed_out: bool,
 }
 
-fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResult> {
+fn run_xkeen(args: &[&str], backup: &mut BackupSession, mut progress: Option<&mut ProgressBar>) -> AppResult<CommandResult> {
     let command_text = format!("XKEEN_FOREGROUND=1 xkeen {}", args.join(" "));
     let started = timestamp();
     backup.event("COMMAND", &format!("Команда: {command_text}; начало: {started}."))?;
@@ -595,6 +595,9 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
             let _ = child.kill();
             let status = child.wait().ok();
             break (status, true);
+        }
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.pulse("Ожидаем ответа XKeen");
         }
         thread::sleep(Duration::from_millis(100));
     };
@@ -665,7 +668,7 @@ fn xray_process_running() -> std::io::Result<bool> {
 const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-fn wait_for_stopped_status(backup: &mut BackupSession) -> AppResult<bool> {
+fn wait_for_stopped_status(backup: &mut BackupSession, mut progress: Option<&mut ProgressBar>) -> AppResult<bool> {
     let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
     loop {
         let running = xray_process_running()
@@ -677,11 +680,14 @@ fn wait_for_stopped_status(backup: &mut BackupSession) -> AppResult<bool> {
         if Instant::now() >= deadline {
             return Ok(false);
         }
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.pulse("Ожидаем остановки Xray");
+        }
         thread::sleep(STATUS_POLL_INTERVAL);
     }
 }
 
-fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<bool> {
+fn wait_for_running_status(backup: &mut BackupSession, mut progress: Option<&mut ProgressBar>) -> AppResult<bool> {
     let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
     loop {
         let running = xray_process_running()
@@ -693,13 +699,16 @@ fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<bool> {
         if Instant::now() >= deadline {
             return Ok(false);
         }
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.pulse("Ожидаем запуска Xray");
+        }
         thread::sleep(STATUS_POLL_INTERVAL);
     }
 }
 
-fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
-    let stop = run_xkeen(&["-stop"], backup);
-    let stopped = wait_for_stopped_status(backup)?;
+fn restart_xkeen(backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
+    let stop = run_xkeen(&["-stop"], backup, Some(&mut *progress));
+    let stopped = wait_for_stopped_status(backup, Some(&mut *progress))?;
     let stop_description = match &stop {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),
@@ -713,8 +722,9 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
         ).into());
     }
 
-    let start = run_xkeen(&["-start"], backup);
-    let running = wait_for_running_status(backup)?;
+    progress.advance("XKeen остановлен");
+    let start = run_xkeen(&["-start"], backup, Some(&mut *progress));
+    let running = wait_for_running_status(backup, Some(&mut *progress))?;
     let start_description = match &start {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),
@@ -727,13 +737,14 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
             "Запуск XKeen не подтверждён: рабочий процесс Xray не обнаружен; {start_description}"
         ).into());
     }
+    progress.advance("Запуск XKeen подтверждён");
     backup.event("XKEEN", "Остановка, запуск и проверка рабочего процесса Xray завершились успешно.")?;
     Ok(())
 }
 
 fn start_after_rollback(backup: &mut BackupSession) -> String {
-    let start = run_xkeen(&["-start"], backup);
-    let status = wait_for_running_status(backup);
+    let start = run_xkeen(&["-start"], backup, None);
+    let status = wait_for_running_status(backup, None);
 
     let running = matches!(status, Ok(true));
     let start_description = match &start {

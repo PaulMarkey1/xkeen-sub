@@ -5,12 +5,12 @@ use crate::terminal::{error, info, menu_item, read_input, success, title, warnin
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 
-pub fn run() -> AppResult<()> {
+pub fn run() -> AppResult<bool> {
     let mut store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
         success("Список подписок пуст.");
-        return Ok(());
+        return Ok(false);
     }
 
     loop {
@@ -22,12 +22,16 @@ pub fn run() -> AppResult<()> {
             menu_item(&(index + 1).to_string(), &subscription.prefix);
         }
 
-        menu_item("0", "Вернуться");
+        menu_item("0", "Назад");
+        menu_item("9", "Выход");
 
         let choice = read_input("Введите номер подписки для удаления: ")?;
 
         if choice == "0" {
-            return Ok(());
+            return Ok(false);
+        }
+        if choice == "9" {
+            return Ok(true);
         }
 
         let index = match choice.parse::<usize>() {
@@ -61,15 +65,15 @@ pub fn run() -> AppResult<()> {
 
                 save_subscriptions(&store)?;
                 success("Подписка удалена. Нумерация обновлена.");
-                return Ok(());
+                return Ok(false);
             }
             "2" => {
                 warning("Удаление отменено.");
-                return Ok(());
+                return Ok(false);
             }
             _ => {
                 error("Неизвестный пункт. Удаление отменено.");
-                return Ok(());
+                return Ok(false);
             }
         }
     }

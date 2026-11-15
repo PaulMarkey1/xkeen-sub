@@ -7,7 +7,7 @@ use crate::update_merge::{collect_tags, load_archive, merge_outbounds, subscript
 use crate::update_apply::{self, PlannedFileOperation, PlannedOperationKind};
 use crate::subscription_download::download_subscription;
 use crate::subscriptions::{load_subscriptions, Subscription};
-use crate::terminal::{error, info, success, title, warning};
+use crate::terminal::{error, info, info_prefix, success, title, warning, ProgressBar};
 use crate::xray_test::{test_config_set_detailed, XrayConfigInput};
 
 use serde_json::Value;
@@ -247,11 +247,14 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 category: operation.category.to_owned(),
             })
             .collect();
-        match backup.backup_files(&backup_sources) {
+        let progress_total = if plan.is_empty() { 0 } else { backup_sources.len() + plan.len() * 3 + 1 };
+        let mut progress = ProgressBar::new(progress_total);
+        match backup.backup_files_with_progress(&backup_sources, &mut progress) {
             Ok(saved) => {
                 backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
-                match update_apply::execute(&plan, backup) {
+                match update_apply::execute(&plan, backup, &mut progress) {
                     Ok(()) => {
+                        progress.finish("Все операции завершены");
                         backup.set_outcome(
                             "УСПЕШНО",
                             if no_file_changes {
@@ -263,6 +266,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                         );
                     }
                     Err(error) => {
+                        progress.finish("Применение остановлено");
                         backup.set_outcome(
                             "ОШИБКА ПРИМЕНЕНИЯ",
                             &format!("Применение не завершено. Результат отката и проверки XKeen записан в журнал: {error}"),
@@ -273,6 +277,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 }
             }
             Err(error) => {
+                progress.finish("Не удалось создать резервную копию");
                 backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
                 backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), false);
                 return Err(error);
@@ -878,9 +883,9 @@ fn print_baseline_plan(state: &RunState) {
         warning(&format!("{id}: повреждённый baseline подготовлен к удалению после успешного применения изменений — {}.", path.display()));
     }
     for item in &state.baseline_updates {
-        info(&format!(
-            "{} -> {} ({} байт; сохранить после успешной замены рабочих файлов).",
-            item.id, item.path.display(), item.original.len()
+        info_prefix(&item.id, &format!(
+            "обновится после применения рабочих файлов: {} ({} байт).",
+            item.path.display(), item.original.len()
         ));
     }
     info("Baseline будет применён после конфигураций Xray и пользовательского архива.");
@@ -888,10 +893,10 @@ fn print_baseline_plan(state: &RunState) {
 
 fn print_prepared_documents(docs: &[ConfigDocument]) {
     println!();
-    title("ПОДГОТОВЛЕННЫЕ ДОКУМЕНТЫ (В ПАМЯТИ)");
+    title("ФАЙЛЫ, ПОДГОТОВЛЕННЫЕ К ОБНОВЛЕНИЮ");
     for doc in docs {
         let text = serde_json::to_string(&doc.value).unwrap_or_else(|_| doc.original.clone());
-        info(&format!("{} — {} байт подготовлено.", doc.file_name, text.len()));
+        info_prefix(&doc.file_name, &format!("подготовлен, {} байт.", text.len()));
     }
 }
 
@@ -1003,7 +1008,7 @@ fn print_file_plan(plan: &[PlannedFileOperation]) {
             PlannedOperationKind::Delete => "Удаление",
         };
         let size = operation.content.as_ref().map(|bytes| format!(" ({} байт)", bytes.len())).unwrap_or_default();
-        info(&format!("{action}: {} — {}{size}", operation.path.display(), operation.category));
+        info_prefix(&operation.path.display().to_string(), &format!("будет выполнено: {action}; {}{size}.", operation.category));
     }
     info(&format!("Всего операций: {}.", plan.len()));
 }

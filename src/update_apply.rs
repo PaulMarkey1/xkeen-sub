@@ -608,7 +608,7 @@ fn is_xray_proxy_cmdline(cmdline: &[u8]) -> bool {
     while args.last().map_or(false, |arg| arg.is_empty()) {
         args.pop();
     }
-    if args.is_empty() {
+    if args.is_empty() || args[0].is_empty() {
         return false;
     }
 

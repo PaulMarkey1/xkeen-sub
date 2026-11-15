@@ -116,7 +116,7 @@ pub fn prepare_balancers(
         }
         BalancerCase::MultipleExistingBalancers => {
             if let Some(index) = program_index {
-                set_selector(&mut balancers[index], final_tags)?;
+                set_program_balancer(&mut balancers[index], final_tags)?;
                 updated_existing = true;
             } else {
                 // User-defined balancers and routing rules remain untouched.
@@ -288,6 +288,7 @@ mod tests {
             config["routing"]["balancers"][0]["selector"],
             json!(["sub1--node", "custom"])
         );
+        assert_eq!(config["routing"]["balancers"][0]["fallbackTag"], "direct");
     }
 
     #[test]
@@ -391,6 +392,14 @@ mod tests {
             config["routing"]["balancers"][1]["selector"],
             json!(["sub1--node", "custom"])
         );
+        assert_eq!(config["routing"]["balancers"][1]["fallbackTag"], "direct");
+    }
+
+    #[test]
+    fn case_one_adds_direct_fallback_to_new_program_balancer() {
+        let mut config = json!({"routing":{"rules":[]}});
+        prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
+        assert_eq!(config["routing"]["balancers"][0]["fallbackTag"], "direct");
     }
 
     #[test]

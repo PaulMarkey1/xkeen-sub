@@ -584,8 +584,8 @@ fn show_record_menu(id: &str) -> AppResult<bool> {
         menu_item("5", "Назад");
         menu_item("0", "Выход");
         match read_input("Выберите действие: ")?.as_str() {
-            "1" => show_log(&record.path.join("log.txt"))?,
-            "2" => show_files(&record)?,
+            "1" => { if show_log(&record.path.join("log.txt"))? { return Ok(true); } },
+            "2" => { if show_files(&record)? { return Ok(true); } },
             "3" => restore_record(&record)?,
             "4" => {
                 if is_active_record(&record) {
@@ -605,15 +605,14 @@ fn show_record_menu(id: &str) -> AppResult<bool> {
     }
 }
 
-fn show_log(path: &Path) -> AppResult<()> {
+fn show_log(path: &Path) -> AppResult<bool> {
     title("ПОДРОБНЫЙ ЖУРНАЛ");
     let content = fs::read_to_string(path)?;
     println!("{content}");
-    let _ = read_input("Нажмите Enter для возврата...")?;
-    Ok(())
+    Ok(read_input("Enter — назад, 0 — выход: ")?.trim() == "0")
 }
 
-fn show_files(record: &BackupRecord) -> AppResult<()> {
+fn show_files(record: &BackupRecord) -> AppResult<bool> {
     title("ФАЙЛЫ В РЕЗЕРВНОЙ КОПИИ");
     let log_path = record.path.join("log.txt");
     let files = read_file_mappings(&log_path)?;
@@ -628,8 +627,7 @@ fn show_files(record: &BackupRecord) -> AppResult<()> {
             info_prefix(&path.display().to_string(), "будет удалён при восстановлении — файл создан обновлением.");
         }
     }
-    let _ = read_input("Нажмите Enter для возврата...")?;
-    Ok(())
+    Ok(read_input("Enter — назад, 0 — выход: ")?.trim() == "0")
 }
 
 fn restore_record(record: &BackupRecord) -> AppResult<()> {

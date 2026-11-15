@@ -17,3 +17,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --all-targets
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            toolchain: stable
+            rust_targets: aarch64-unknown-linux-musl
+          - target: mipsel-unknown-linux-musl
+            toolchain: nightly
+          - target: mips-unknown-linux-musl
+            toolchain: nightly
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        if: matrix.toolchain == 'stable'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - name: Install nightly Rust
+        if: matrix.toolchain == 'nightly'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build target
+        run: cross +${{ matrix.toolchain }} build --release --target ${{ matrix.target }}

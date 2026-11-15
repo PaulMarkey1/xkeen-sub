@@ -266,7 +266,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                         );
                     }
                     Err(error) => {
-                        progress.finish("Применение остановлено");
+                        progress.stop("Применение остановлено");
                         backup.set_outcome(
                             "ОШИБКА ПРИМЕНЕНИЯ",
                             &format!("Применение не завершено. Результат отката и проверки XKeen записан в журнал: {error}"),
@@ -277,7 +277,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 }
             }
             Err(error) => {
-                progress.finish("Не удалось создать резервную копию");
+                progress.stop("Резервную копию не удалось создать");
                 backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
                 backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), false);
                 return Err(error);

@@ -571,32 +571,50 @@ struct CommandResult {
     timed_out: bool,
 }
 
+fn should_capture_output(args: &[&str]) -> bool {
+    args == ["-status"]
+}
+
 fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResult> {
     let command_text = format!("XKEEN_FOREGROUND=1 xkeen {}", args.join(" "));
     let started = timestamp();
     backup.event("COMMAND", &format!("Команда: {command_text}; начало: {started}."))?;
+    // Only -status needs captured output for state detection. The -start and
+    // -stop commands may launch/stop background processes that inherit their
+    // parent's file descriptors. Piped descriptors would then remain open and
+    // make the reader threads block forever in read_to_end()/join(), even after
+    // the xkeen command itself has exited. Null stdio keeps those commands
+    // independent from any daemon process they spawn.
+    let capture_output = should_capture_output(args);
+    let stdout_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
+    let stderr_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
     let mut child = match Command::new("xkeen").args(args).env("XKEEN_FOREGROUND", "1")
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        .stdout(stdout_stdio).stderr(stderr_stdio).spawn() {
         Ok(child) => child,
         Err(error) => {
             backup.event("COMMAND", &format!("Команда: {command_text}; ошибка запуска: {error}; завершение: {}.", timestamp()))?;
             return Err(format!("Не удалось запустить {command_text}: {error}").into());
         }
     };
-    let stdout = child.stdout.take().ok_or("Не удалось получить stdout команды XKeen.")?;
-    let stderr = child.stderr.take().ok_or("Не удалось получить stderr команды XKeen.")?;
-    let out_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut reader = stdout;
-        let _ = reader.read_to_end(&mut bytes);
-        bytes
-    });
-    let err_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut reader = stderr;
-        let _ = reader.read_to_end(&mut bytes);
-        bytes
-    });
+    let (out_thread, err_thread) = if capture_output {
+        let stdout = child.stdout.take().ok_or("Не удалось получить stdout команды XKeen.")?;
+        let stderr = child.stderr.take().ok_or("Не удалось получить stderr команды XKeen.")?;
+        let out_thread = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut reader = stdout;
+            let _ = reader.read_to_end(&mut bytes);
+            bytes
+        });
+        let err_thread = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut reader = stderr;
+            let _ = reader.read_to_end(&mut bytes);
+            bytes
+        });
+        (Some(out_thread), Some(err_thread))
+    } else {
+        (None, None)
+    };
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait()? { break (Some(status), false); }
@@ -607,8 +625,14 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
         }
         thread::sleep(Duration::from_millis(100));
     };
-    let stdout = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).into_owned();
+    let stdout = out_thread
+        .and_then(|handle| handle.join().ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let stderr = err_thread
+        .and_then(|handle| handle.join().ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     let code = status.as_ref().and_then(|value| value.code());
     let successful = status.as_ref().map(|value| value.success()).unwrap_or(false) && !timed_out;
     let ended = timestamp();
@@ -747,6 +771,15 @@ fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
 #[cfg(test)]
 mod status_tests {
     use super::{is_running_status, is_stopped_status};
+
+    #[test]
+    fn captures_output_only_for_status_commands() {
+        use super::should_capture_output;
+
+        assert!(should_capture_output(&["-status"]));
+        assert!(!should_capture_output(&["-start"]));
+        assert!(!should_capture_output(&["-stop"]));
+    }
 
     #[test]
     fn accepts_only_explicit_stopped_status_with_expected_exit_code() {

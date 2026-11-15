@@ -756,7 +756,17 @@ mod status_tests {
     }
 
     #[test]
-    fn accepts_only_explicit_running_status_with_zero_exit_code() {
+    fn accepts_explicit_running_status_in_hybrid_mode() {
+        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Hybrid"));
+    }
+
+    #[test]
+    fn accepts_explicit_running_status_in_other_mode_for_stop_detection() {
+        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Other"));
+    }
+
+    #[test]
+    fn rejects_nonzero_or_ambiguous_running_status() {
         assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));

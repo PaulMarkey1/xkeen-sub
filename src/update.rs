@@ -98,7 +98,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     let store = load_subscriptions()?;
     backup.event("UPDATE", &format!("Загружен список подписок: {}.", store.subscriptions.len()))?;
     if store.subscriptions.is_empty() {
-        info("Список подписок пуст.");
+        info("Подписок пока нет. Добавьте подписку, чтобы запустить обновление.");
         return Ok(());
     }
 
@@ -147,16 +147,16 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
 
     if state.downloaded == 0 {
         println!();
-        info("Ни одна подписка не была успешно загружена. Проверка интернет-соединения...");
+        info("Не удалось получить данные подписок. Проверяем подключение к интернету...");
         if has_internet_connection() {
-            warning("Интернет доступен, но серверы подписок не ответили.");
+            warning("Интернет работает, но серверы подписок не ответили. Проверьте ссылки подписок или попробуйте позже.");
         } else {
-            error("Отсутствует интернет-соединение.");
+            error("Нет подключения к интернету. Проверьте соединение и повторите попытку.");
         }
         print_subscription_summary(&state);
         backup.event("ERROR", "Не удалось загрузить ни одну подписку; применение заблокировано.")?;
         backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", false);
-        warning("Подготовка конфигурации прекращена. Рабочие файлы не изменены.");
+        warning("Обновление остановлено. Файлы роутера не менялись.");
         return Ok(());
     }
     if state.processed == 0 {
@@ -164,7 +164,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         print_baseline_plan(&state);
         backup.event("ERROR", "Ни одна подписка не прошла обработку; дальнейшая подготовка прекращена.")?;
         backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", false);
-        warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
+        warning("Не удалось обработать ни одну подписку. Конфигурация роутера осталась без изменений.");
         return Ok(());
     }
 
@@ -297,11 +297,11 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         }
     }
     if validation.is_err() {
-        error("Итоговая проверка блокирует будущее применение.");
+        error("Проверка конфигурации не пройдена. Изменения не применялись.");
     } else if no_file_changes {
-        success("Изменений файлов не требуется; перезапуск XKeen не выполнялся.");
+        success("Конфигурация уже актуальна. Файлы не менялись, перезапуск XKeen не потребовался.");
     } else {
-        success("Обновление выполнено; файлы и состояние XKeen проверены.");
+        success("Готово! Файлы обновлены и проверены, XKeen запущен.");
     }
     Ok(())
 }
@@ -840,9 +840,9 @@ fn print_configuration_summary(
     println!();
     title("ПОДГОТОВКА КОНФИГУРАЦИИ");
     info(&format!("Итоговый Outbound: {} подключений.", tags.len()));
-    info(&format!("Outbound: {}", docs[outbound_index].path.display()));
-    info(&format!("Routing: {}", docs[routing_index].path.display()));
-    for item in obs { success(&format!("subjectSelector обновлён: {} ({})", item.file_name, item.object_name)); }
+    info_prefix(&docs[outbound_index].file_name, &format!("файл с подключениями: {}", docs[outbound_index].path.display()));
+    info_prefix(&docs[routing_index].file_name, &format!("файл с правилами маршрутизации: {}", docs[routing_index].path.display()));
+    for item in obs { info_prefix(&item.file_name, &format!("обновлён список проверяемых подключений ({})", item.object_name)); }
     if balancer.user_balancer_tags.is_empty() {
         info("Пользовательские балансировщики не обнаружены.");
     } else {
@@ -857,9 +857,9 @@ fn print_configuration_summary(
         BalancerCase::OneExistingBalancer => info("Обнаружен один существующий балансировщик."),
         BalancerCase::MultipleExistingBalancers => info("Обнаружено несколько существующих балансировщиков."),
     }
-    if balancer.created { success(&format!("Подготовлено создание {}.", balancer.tag)); }
-    if balancer.updated_existing { success(&format!("Обновлён selector балансировщика {}.", balancer.tag)); }
-    if balancer.transformed_rules > 0 { info(&format!("Routing rules перенаправлено: {}.", balancer.transformed_rules)); }
+    if balancer.created { info_prefix(&balancer.tag, "подготовлен новый балансировщик программы"); }
+    if balancer.updated_existing { info_prefix(&balancer.tag, "обновлён список подключений балансировщика"); }
+    if balancer.transformed_rules > 0 { info(&format!("Правил маршрутизации обновлено: {}.", balancer.transformed_rules)); }
 }
 
 fn print_xray_test(result: &Result<(), String>) {
@@ -868,7 +868,7 @@ fn print_xray_test(result: &Result<(), String>) {
     match result {
         Ok(()) => success("Итоговая проверка Xray завершилась успешно."),
         Err(message) => {
-            error(&format!("Xray отклонил итоговую конфигурацию: {message}"));
+            error(&format!("Xray не принял новую конфигурацию: {message}"));
         }
     }
 }
@@ -996,9 +996,9 @@ fn build_file_plan(
 
 fn print_file_plan(plan: &[PlannedFileOperation]) {
     println!();
-    title("ИТОГОВЫЙ СПИСОК ФАЙЛОВ ДЛЯ ИЗМЕНЕНИЯ");
+    title("ЧТО ИЗМЕНИТСЯ НА РОУТЕРЕ");
     if plan.is_empty() {
-        info("Файлы для изменения отсутствуют.");
+        info("Изменения файлов не нужны.");
         return;
     }
     for operation in plan {
@@ -1010,7 +1010,7 @@ fn print_file_plan(plan: &[PlannedFileOperation]) {
         let size = operation.content.as_ref().map(|bytes| format!(" ({} байт)", bytes.len())).unwrap_or_default();
         info_prefix(&operation.path.display().to_string(), &format!("будет выполнено: {action}; {}{size}.", operation.category));
     }
-    info(&format!("Всего операций: {}.", plan.len()));
+    info(&format!("Всего файловых операций: {}.", plan.len()));
 }
 
 

@@ -9,7 +9,7 @@ pub fn run() -> AppResult<bool> {
     let mut store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
-        success("Список подписок пуст.");
+        info("Подписок пока нет — удалять нечего.");
         return Ok(false);
     }
 
@@ -45,7 +45,7 @@ pub fn run() -> AppResult<bool> {
         let selected_prefix = store.subscriptions[index].prefix.clone();
 
         println!();
-        title("Вы действительно хотите удалить подписку?");
+        title("УДАЛИТЬ ЭТУ ПОДПИСКУ?");
         info(&selected_prefix);
         menu_item("1", "Да");
         menu_item("2", "Нет");
@@ -64,11 +64,11 @@ pub fn run() -> AppResult<bool> {
                 }
 
                 save_subscriptions(&store)?;
-                success("Подписка удалена. Нумерация обновлена.");
+                success("Подписка удалена. Номера оставшихся подписок обновлены.");
                 return Ok(false);
             }
             "2" => {
-                warning("Удаление отменено.");
+                info("Подписка оставлена без изменений.");
                 return Ok(false);
             }
             _ => {

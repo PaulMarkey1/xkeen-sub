@@ -738,8 +738,7 @@ fn is_stopped_status(code: Option<i32>, stdout: &str) -> bool {
 
 fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
     let normalized = stdout.to_lowercase();
-    let expected_mode = !normalized.contains("в режиме")
-        || normalized.contains("в режиме hybrid")
+    let expected_mode = normalized.contains("в режиме hybrid")
         || normalized.contains("в режиме mixed");
     code == Some(0)
         && normalized.contains("прокси-клиент")
@@ -776,7 +775,7 @@ mod status_tests {
 
     #[test]
     fn rejects_nonzero_or_ambiguous_running_status() {
-        assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
+        assert!(!is_running_status(Some(0), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент НЕ запущен"));

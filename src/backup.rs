@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Command;
 
-use crate::terminal::{error, info, menu_item, read_input, success, title, warning, ProgressBar};
+use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, read_input, success, title, warning, ProgressBar};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -393,7 +393,7 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
             let mut settings = load_settings()?;
             settings.retention_days = days;
             save_settings(&settings)?;
-            success(&format!("Срок хранения установлен: {days} календарных дней."));
+            success(&format!("Срок хранения резервных копий — {days} дней."));
             Ok(())
         }
         [action, value] if action == "limit" => {
@@ -402,14 +402,14 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
             let mut settings = load_settings()?;
             settings.daily_limit = limit;
             save_settings(&settings)?;
-            success(&format!("Дневной лимит установлен: {limit} записей."));
+            success(&format!("Дневной лимит резервных копий — {limit} записей."));
             Ok(())
         }
         [action, value] if action == "mode" => {
             let mut settings = load_settings()?;
             settings.mode = parse_mode(value)?;
             save_settings(&settings)?;
-            success(&format!("Режим хранения: {}.", mode_label(&settings.mode)));
+            success(&format!("Режим хранения изменён: {}.", mode_label(&settings.mode)));
             Ok(())
         }
         _ => {
@@ -425,7 +425,7 @@ fn run_menu() -> AppResult<bool> {
         println!();
         title("XKEEN-SUB — НАСТРОЙКИ РЕЗЕРВИРОВАНИЯ");
         crate::terminal::separator("────────────────────────────────────────");
-        info("Резервное копирование: ВКЛЮЧЕНО");
+        info("Защита включена: перед изменением файлов сохраняется резервная копия.");
         menu_item("1", &format!("Срок хранения: {} дней (минимум)", settings.retention_days));
         menu_item("2", &format!("Лимит записей за день: {} (минимум)", settings.daily_limit));
         menu_item("3", &format!("Режим хранения: {}", mode_label(&settings.mode)));
@@ -458,7 +458,7 @@ fn change_days() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.retention_days = days;
                 save_settings(&settings)?;
-                success(&format!("Срок хранения изменён: {days} дней."));
+                success(&format!("Готово! Резервные копии будут храниться {days} дней."));
                 return Ok(());
             }
             _ => error(&format!("Введите целое число не меньше {MIN_RETENTION_DAYS} или 0 для отмены.")),
@@ -479,7 +479,7 @@ fn change_limit() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.daily_limit = limit;
                 save_settings(&settings)?;
-                success(&format!("Дневной лимит изменён: {limit} записей."));
+                success(&format!("Готово! В день можно сохранять до {limit} резервных копий."));
                 return Ok(());
             }
             _ => error(&format!("Введите целое число не меньше {MIN_DAILY_LIMIT} или 0 для отмены.")),
@@ -499,14 +499,14 @@ fn change_mode() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.mode = RetentionMode::Automatic;
                 save_settings(&settings)?;
-                success("Включено автоматическое удаление по установленным правилам.");
+                success("Автоматическая очистка включена: старые копии будут удаляться по заданным правилам.");
                 return Ok(());
             }
             "2" => {
                 let mut settings = load_settings()?;
                 settings.mode = RetentionMode::Unlimited;
                 save_settings(&settings)?;
-                success("Бессрочное хранение включено. Автоматическое удаление отключено.");
+                success("Резервные копии будут храниться, пока вы не удалите их вручную.");
                 return Ok(());
             }
             "0" => return Ok(()),
@@ -520,7 +520,7 @@ fn list_interactive() -> AppResult<bool> {
         let records = load_records()?;
         title("XKEEN-SUB — РЕЗЕРВНЫЕ КОПИИ");
         if records.is_empty() {
-            info("Резервных копий пока нет.");
+            info("Резервных копий пока нет. Они появятся после первого обновления.");
             return Ok(false);
         }
 
@@ -537,7 +537,7 @@ fn list_interactive() -> AppResult<bool> {
             let time = summary.get("time").cloned().unwrap_or_else(|| "неизвестно".to_owned());
             let status = summary.get("status").cloned().unwrap_or_else(|| "неизвестно".to_owned());
             let saved = summary.get("saved").cloned().unwrap_or_else(|| "?".to_owned());
-            menu_item(&(index + 1).to_string(), &format!("backup{} — {} — {} — сохранено файлов: {}", record.number, time, status, saved));
+            menu_item_prefix(&(index + 1).to_string(), &format!("backup{}", record.number), &format!("{time} · {status} · файлов сохранено: {saved}"));
         }
         println!();
         info(&format!("Всего резервных копий: {}", records.len()));
@@ -622,10 +622,10 @@ fn show_files(record: &BackupRecord) -> AppResult<()> {
         info("В этой резервной записи нет файловых операций.");
     } else {
         for (source, stored) in files {
-            info(&format!("Сохранённый оригинал: {}  →  {}", source.display(), stored.display()));
+            info_prefix(&source.display().to_string(), &format!("сохранён в копии как {}.", stored.display()));
         }
         for path in created {
-            info(&format!("Будет удалён при восстановлении (файл создан обновлением): {}", path.display()));
+            info_prefix(&path.display().to_string(), "будет удалён при восстановлении — файл создан обновлением.");
         }
     }
     let _ = read_input("Нажмите Enter для возврата...")?;

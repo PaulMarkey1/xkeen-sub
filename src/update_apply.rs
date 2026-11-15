@@ -738,10 +738,14 @@ fn is_stopped_status(code: Option<i32>, stdout: &str) -> bool {
 
 fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
     let normalized = stdout.to_lowercase();
+    let expected_mode = !normalized.contains("в режиме")
+        || normalized.contains("в режиме hybrid")
+        || normalized.contains("в режиме mixed");
     code == Some(0)
         && normalized.contains("прокси-клиент")
         && normalized.contains("запущен")
         && !normalized.contains("не запущен")
+        && expected_mode
 }
 
 #[cfg(test)]
@@ -761,8 +765,13 @@ mod status_tests {
     }
 
     #[test]
-    fn accepts_explicit_running_status_in_other_mode_for_stop_detection() {
-        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Other"));
+    fn rejects_other_mode_as_healthy_running_state() {
+        assert!(!is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Other"));
+    }
+
+    #[test]
+    fn accepts_legacy_mixed_name_for_hybrid_mode() {
+        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Mixed"));
     }
 
     #[test]

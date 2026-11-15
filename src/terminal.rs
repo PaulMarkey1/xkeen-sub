@@ -81,6 +81,15 @@ impl ProgressBar {
         self.active = false;
     }
 
+    pub fn stop(&mut self, message: &str) {
+        if !self.active {
+            return;
+        }
+        self.render(message);
+        println!();
+        self.active = false;
+    }
+
     fn render(&self, message: &str) {
         let width = 24usize;
         let filled = width * self.current / self.total;

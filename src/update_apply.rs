@@ -613,8 +613,8 @@ fn is_xray_proxy_cmdline(cmdline: &[u8]) -> bool {
     }
 
     let one_shot = args.iter().skip(1).any(|arg| {
-        matches!(*arg, b"-test" | b"--test" | b"-test=true" | b"--test=true"
-            | b"-dump" | b"--dump" | b"-dump=true" | b"--dump=true")
+        *arg == b"-test" || *arg == b"--test" || *arg == b"-test=true" || *arg == b"--test=true"
+            || *arg == b"-dump" || *arg == b"--dump" || *arg == b"-dump=true" || *arg == b"--dump=true"
     });
     if one_shot {
         return false;
@@ -627,7 +627,8 @@ fn is_xray_proxy_cmdline(cmdline: &[u8]) -> bool {
     let command = args[1];
     command == b"run"
         || (command.starts_with(b"-")
-            && !matches!(command, b"-h" | b"--h" | b"-help" | b"--help" | b"-version" | b"--version"))
+            && command != b"-h" && command != b"--h" && command != b"-help"
+            && command != b"--help" && command != b"-version" && command != b"--version")
 }
 
 fn xray_process_running() -> std::io::Result<bool> {

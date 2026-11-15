@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
+use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, read_input, success, title, warning};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -22,7 +22,7 @@ pub fn update() -> AppResult<()> {
 
     title("ОБНОВЛЕНИЕ ПРОГРАММЫ");
     info(&format!("Текущая версия: xkeen-sub {}", env!("XKEEN_SUB_VERSION")));
-    info("Проверка последнего релиза...");
+    info("Проверяем, доступна ли новая версия...");
     let download_result = download(&url, &temporary);
     if let Err(error) = download_result {
         let _ = fs::remove_file(&temporary);
@@ -52,8 +52,8 @@ pub fn update() -> AppResult<()> {
 
     let new_version = binary_version(&temporary);
     match &new_version {
-        Some(version) => info(&format!("Устанавливаемая версия: {version}")),
-        None => info("Загруженный бинарный файл не сообщает номер версии."),
+        Some(version) => info(&format!("Будет установлена версия: {version}")),
+        None => info("Не удалось определить номер версии загруженного файла; проверка запуска прошла успешно."),
     }
 
     fs::rename(&temporary, &executable)?;
@@ -71,7 +71,7 @@ pub fn reinstall() -> AppResult<()> {
 
     title("ПЕРЕУСТАНОВКА ПРОГРАММЫ");
     info(&format!("Текущая версия: xkeen-sub {}", env!("XKEEN_SUB_VERSION")));
-    info("Получение последних пяти релизов GitHub...");
+    info("Получаем список доступных версий...");
     let releases_url = format!("https://api.github.com/repos/{REPO}/releases?per_page=5");
     let fetch_result = download(&releases_url, &releases_file);
     if let Err(error) = fetch_result {
@@ -117,26 +117,26 @@ pub fn reinstall() -> AppResult<()> {
     println!();
     title("ДОСТУПНЫЕ ВЕРСИИ ДЛЯ ЭТОЙ АРХИТЕКТУРЫ");
     for (index, (tag, date, _)) in choices.iter().enumerate() {
-        menu_item(&(index + 1).to_string(), &format!("{tag} ({date})"));
+        menu_item_prefix(&(index + 1).to_string(), tag, &format!("выпущена {date}"));
     }
     menu_item("0", "Отмена");
 
     let selected = loop {
         let input = read_input("Выберите версию для установки: ")?;
         if input == "0" {
-            warning("Переустановка отменена. Текущая версия не изменена.");
+            info("Переустановка отменена. Установленная версия осталась прежней.");
             return Ok(());
         }
         match input.parse::<usize>() {
             Ok(number) if (1..=choices.len()).contains(&number) => break number - 1,
-            _ => error(&format!("Введите номер от 1 до {} или 0 для отмены.", choices.len())),
+            _ => error(&format!("Введите номер от 1 до {} или 0, чтобы отменить установку.", choices.len())),
         }
     };
 
     let (tag, _, url) = &choices[selected];
     let temporary = temporary_path(&executable, "reinstall");
-    info(&format!("Выбрана версия: {tag}"));
-    info(&format!("Загрузка {tag}..."));
+    info(&format!("Вы выбрали версию {tag}."));
+    info(&format!("Скачиваем версию {tag}..."));
     let download_result = download(url, &temporary);
     if let Err(error) = download_result {
         let _ = fs::remove_file(&temporary);
@@ -174,10 +174,10 @@ pub fn reinstall() -> AppResult<()> {
             ).into());
         }
         Some(installed_version) => {
-            info(&format!("Проверена версия бинарного файла: {installed_version}"));
+            info(&format!("Версия загруженной программы проверена: {installed_version}."));
         }
         None => {
-            info(&format!("Бинарный файл не сообщает версию; выбранный релиз: {tag}."));
+            info(&format!("Номер версии в файле не определился. Выбранный релиз: {tag}."));
         }
     }
 
@@ -185,8 +185,8 @@ pub fn reinstall() -> AppResult<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
     }
-    success(&format!("Установлена версия {tag}."));
-    info("Файл sub.json не изменялся.");
+    success(&format!("Готово! Установлена версия {tag}."));
+    info("Список ваших подписок сохранён без изменений.");
     Ok(())
 }
 
@@ -208,13 +208,13 @@ pub fn uninstall() -> AppResult<()> {
     };
 
     println!();
-    title("БУДУТ УДАЛЕНЫ");
-    info(&format!("• Исполняемый файл: {}", executable.display()));
-    info(&format!("• Остаточный файл настроек старой версии: {}", config_path.display()));
+    title("ЧТО БУДЕТ УДАЛЕНО");
+    info_prefix(&executable.display().to_string(), "файл программы будет удалён");
+    info_prefix(&config_path.display().to_string(), "остаточный файл настроек будет удалён");
     if delete_subscriptions {
-        info(&format!("• Файл подписок: {}", subscriptions_path.display()));
+        info_prefix(&subscriptions_path.display().to_string(), "файл подписок тоже будет удалён");
     } else {
-        info(&format!("• Файл подписок будет сохранён: {}", subscriptions_path.display()));
+        info_prefix(&subscriptions_path.display().to_string(), "файл подписок останется на месте");
     }
 
     println!();
@@ -224,11 +224,11 @@ pub fn uninstall() -> AppResult<()> {
     match read_input("Выберите пункт: ")?.as_str() {
         "1" => {}
         "2" => {
-            warning("Удаление отменено.");
+            info("Удаление отменено. Файлы программы и подписок сохранены.");
             return Ok(());
         }
         _ => {
-            error("Неизвестный пункт. Удаление отменено.");
+            error("Неизвестный выбор. Удаление отменено, файлы не затронуты.");
             return Ok(());
         }
     }
@@ -245,7 +245,7 @@ pub fn uninstall() -> AppResult<()> {
     }
 
     remove_if_exists(&executable)?;
-    success("xkeen-sub удалён.");
+    success("Программа xkeen-sub удалена.");
     Ok(())
 }
 

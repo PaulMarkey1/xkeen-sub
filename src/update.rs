@@ -247,7 +247,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 category: operation.category.to_owned(),
             })
             .collect();
-        let progress_total = if plan.is_empty() { 0 } else { backup_sources.len() + plan.len() * 3 + 1 };
+        let progress_total = if plan.is_empty() { 0 } else { backup_sources.len() + plan.len() * 3 + 2 };
         let mut progress = ProgressBar::new(progress_total);
         match backup.backup_files_with_progress(&backup_sources, &mut progress) {
             Ok(saved) => {

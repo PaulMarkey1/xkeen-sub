@@ -571,6 +571,10 @@ struct CommandResult {
     timed_out: bool,
 }
 
+fn should_capture_output(args: &[&str]) -> bool {
+    args == ["-status"]
+}
+
 fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResult> {
     let command_text = format!("XKEEN_FOREGROUND=1 xkeen {}", args.join(" "));
     let started = timestamp();
@@ -581,7 +585,7 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
     // make the reader threads block forever in read_to_end()/join(), even after
     // the xkeen command itself has exited. Null stdio keeps those commands
     // independent from any daemon process they spawn.
-    let capture_output = args == ["-status"];
+    let capture_output = should_capture_output(args);
     let stdout_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
     let stderr_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
     let mut child = match Command::new("xkeen").args(args).env("XKEEN_FOREGROUND", "1")
@@ -770,9 +774,11 @@ mod status_tests {
 
     #[test]
     fn captures_output_only_for_status_commands() {
-        assert!(["-status"] == ["-status"]);
-        assert!(!["-start"] == ["-status"]);
-        assert!(!["-stop"] == ["-status"]);
+        use super::should_capture_output;
+
+        assert!(should_capture_output(&["-status"]));
+        assert!(!should_capture_output(&["-start"]));
+        assert!(!should_capture_output(&["-stop"]));
     }
 
     #[test]

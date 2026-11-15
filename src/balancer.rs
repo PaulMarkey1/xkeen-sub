@@ -80,7 +80,7 @@ pub fn prepare_balancers(
         }
         BalancerCase::OneExistingBalancer => {
             if let Some(index) = program_index {
-                set_selector(&mut balancers[index], final_tags)?;
+                set_program_balancer(&mut balancers[index], final_tags)?;
                 updated_existing = true;
             } else {
                 let selector = balancers[0].get("selector").and_then(Value::as_array);
@@ -148,8 +148,17 @@ fn new_program_balancer(tags: &[String]) -> Value {
     serde_json::json!({
         "tag": PROGRAM_BALANCER_TAG,
         "selector": tags,
+        "fallbackTag": "direct",
         "strategy": { "type": "leastPing" }
     })
+}
+
+fn set_program_balancer(balancer: &mut Value, tags: &[String]) -> AppResult<()> {
+    set_selector(balancer, tags)?;
+    balancer.as_object_mut()
+        .ok_or("Балансировщик должен быть JSON-объектом.")?
+        .insert("fallbackTag".to_owned(), Value::String("direct".to_owned()));
+    Ok(())
 }
 
 fn set_selector(balancer: &mut Value, tags: &[String]) -> AppResult<()> {

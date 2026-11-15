@@ -680,8 +680,8 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     }
 
     let start = run_xkeen(&["-start"], backup);
-    // A non-zero exit code from -start is not by itself a failure if XKeen
-    // actually reaches the expected running state (for example, Hybrid mode).
+    // The final status is authoritative; routing mode does not determine
+    // whether the proxy process is running.
     let status = wait_for_running_status(backup)?;
     let running = !status.timed_out && is_running_status(status.code, &status.stdout);
     let start_description = match &start {
@@ -704,8 +704,8 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
 
 fn start_after_rollback(backup: &mut BackupSession) -> String {
     let start = run_xkeen(&["-start"], backup);
-    // The final status is authoritative; XKeen can report a non-zero command
-    // exit even though the proxy client is already running in Hybrid mode.
+    // The final status is authoritative; routing mode does not determine
+    // whether the proxy process is running.
     let status = wait_for_running_status(backup);
 
     let running = matches!(&status, Ok(result) if !result.timed_out && is_running_status(result.code, &result.stdout));
@@ -769,8 +769,8 @@ mod status_tests {
     }
 
     #[test]
-    fn rejects_nonzero_or_ambiguous_running_status() {
-        assert!(!is_running_status(Some(0), "Прокси-клиент запущен"));
+    fn rejects_nonzero_or_negative_running_status() {
+        assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент НЕ запущен"));

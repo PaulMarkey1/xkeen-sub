@@ -65,7 +65,7 @@ impl ProgressBar {
         if !self.active {
             return;
         }
-        const SPINNER: [&str; 4] = ["|", "/", "-", "\\\\"];
+        const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
         let status = format!("{} {message}", SPINNER[self.frame % SPINNER.len()]);
         self.frame += 1;
         self.render(&status);

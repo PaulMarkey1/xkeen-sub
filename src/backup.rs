@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Command;
 
-use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
+use crate::terminal::{error, info, menu_item, read_input, success, title, warning, ProgressBar};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -166,6 +166,14 @@ impl BackupSession {
     }
 
     pub(crate) fn backup_files(&mut self, sources: &[BackupSource]) -> AppResult<usize> {
+        self.backup_files_inner(sources, None)
+    }
+
+    pub(crate) fn backup_files_with_progress(&mut self, sources: &[BackupSource], progress: &mut ProgressBar) -> AppResult<usize> {
+        self.backup_files_inner(sources, Some(progress))
+    }
+
+    fn backup_files_inner(&mut self, sources: &[BackupSource], mut progress: Option<&mut ProgressBar>) -> AppResult<usize> {
         if sources.is_empty() {
             self.event("BACKUP", "Нет существующих файлов, требующих резервного копирования.")?;
             return Ok(0);
@@ -224,6 +232,9 @@ impl BackupSession {
             self.append_file_metadata(&original, source_metadata.mode() & 0o7777, source_metadata.uid(), source_metadata.gid(), &original_bytes)?;
             saved += 1;
             self.saved_files = saved;
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.advance("Создание резервной копии");
+            }
         }
 
         self.saved_files = saved;

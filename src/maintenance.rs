@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, read_input, success, title, warning};
+use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 

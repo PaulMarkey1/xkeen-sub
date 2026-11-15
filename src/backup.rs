@@ -548,19 +548,16 @@ fn list_interactive() -> AppResult<bool> {
         }));
         info(&format!("Дневной лимит: {}", settings.daily_limit));
 
-        let input = read_input("Введите номер записи, 0 — назад, 9 — выход: ")?;
+        let input = read_input("Введите номер записи или 0 — назад: ")?;
         if input == "0" {
             return Ok(false);
-        }
-        if input == "9" {
-            return Ok(true);
         }
         match input.parse::<usize>() {
             Ok(number) if (1..=records.len()).contains(&number) => {
                 let id = records[number - 1].id.clone();
                 if show_record_menu(&id)? { return Ok(true); }
             }
-            _ => error(&format!("Введите номер от 1 до {}, 0 или 9.", records.len())),
+            _ => error(&format!("Введите номер от 1 до {} или 0.", records.len())),
         }
     }
 }

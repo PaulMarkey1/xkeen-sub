@@ -116,23 +116,6 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         }
     }).collect());
 
-    let mut docs = load_config_documents()?;
-    backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
-    let outbound_index = find_doc(&docs, OUTBOUND_FILE)
-        .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
-    let routing_index = find_doc(&docs, ROUTING_FILE)
-        .or_else(|| docs.iter().position(|doc| doc.value.get("routing").is_some()))
-        .ok_or("Не найдена конфигурация routing.")?;
-
-    let working = docs[outbound_index].value.get("outbounds")
-        .and_then(Value::as_array).cloned()
-        .ok_or("В рабочем Outbound отсутствует массив outbounds.")?;
-    info(&format!("Рабочий Outbound: {} ({} подключений).",
-        docs[outbound_index].path.display(), working.len()));
-    info(&format!("Routing: {}.", docs[routing_index].path.display()));
-    print_json_section("РАБОЧИЙ OUTBOUND", &Value::Array(working.clone()));
-
-    let api_tags = collect_api_tags(&docs);
     let mut state = RunState::default();
     for subscription in selected {
         backup.event("SUBSCRIPTION", &format!("Начата обработка {}.", subscription.id))?;
@@ -168,6 +151,38 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         return Ok(());
     }
 
+    if state.prepared.is_empty() {
+        print_subscription_summary(&state);
+        print_baseline_plan(&state);
+        backup.event("UPDATE", "Реальных изменений подписок нет. Загрузка конфигураций Xray и проверка Xray не требуются.")?;
+        backup.set_outcome(
+            "БЕЗ ИЗМЕНЕНИЙ",
+            "Все успешно обработанные подписки совпадают с baseline. Конфигурации Xray не загружались, рабочие файлы не изменялись.",
+            true,
+        );
+        println!();
+        title("ОБНОВЛЕНИЕ ЗАВЕРШЕНО");
+        success("Подписки не изменились. Загрузка конфигов Xray и проверка Xray пропущены.");
+        return Ok(());
+    }
+
+    let mut docs = load_config_documents()?;
+    backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
+    let outbound_index = find_doc(&docs, OUTBOUND_FILE)
+        .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
+    let routing_index = find_doc(&docs, ROUTING_FILE)
+        .or_else(|| docs.iter().position(|doc| doc.value.get("routing").is_some()))
+        .ok_or("Не найдена конфигурация routing.")?;
+
+    let working = docs[outbound_index].value.get("outbounds")
+        .and_then(Value::as_array).cloned()
+        .ok_or("В рабочем Outbound отсутствует массив outbounds.")?;
+    info(&format!("Рабочий Outbound: {} ({} подключений).",
+        docs[outbound_index].path.display(), working.len()));
+    info(&format!("Routing: {}.", docs[routing_index].path.display()));
+    print_json_section("РАБОЧИЙ OUTBOUND", &Value::Array(working.clone()));
+
+    let api_tags = collect_api_tags(&docs);
     let updated_groups = updated_groups(&state.prepared);
     let mut archive = load_archive()?;
     let (final_outbounds, replacements, conflicts) =

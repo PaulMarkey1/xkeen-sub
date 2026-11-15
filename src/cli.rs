@@ -24,9 +24,9 @@ pub fn run() -> AppResult<()> {
         [root] if root == "backup" => backup::run(),
         [root, rest @ ..] if root == "backup" => backup::run_command(rest),
         [root] if root == "setup" => setup::run_menu(),
-        [root, action] if root == "setup" && action == "add" => setup::add::run(),
+        [root, action] if root == "setup" && action == "add" => setup::add::run().map(|_| ()),
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
-        [root, action] if root == "setup" && action == "del" => setup::del::run(),
+        [root, action] if root == "setup" && action == "del" => setup::del::run().map(|_| ()),
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
         [action] if action == "update" => update::run(None),
         [action, target] if action == "update" => update::run(Some(target)),
@@ -57,16 +57,16 @@ fn print_help() -> AppResult<()> {
     command_item("  edit", "Редактировать подписку");
     command_item("  help", "Справка по настройке");
     println!();
-    command_item("backup", "Настройки и управление резервными копиями");
+    command_item("backup", "Настроить и просмотреть резервные копии");
     command_item("  days N", "Установить срок хранения (минимум 3 дня)");
     command_item("  limit N", "Установить дневной лимит (минимум 10 записей)");
     command_item("  mode auto|unlimited", "Выбрать режим хранения");
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
-    command_item("update", "Контрольный запуск обновления всех подписок");
-    command_item("  subN", "Контрольный запуск одной подписки");
+    command_item("update", "Обновить все подписки");
+    command_item("  subN", "Обновить одну подписку");
     println!();
     command_item("uxs", "Обновить программу");
-    command_item("reinstall", "Выбрать версию и переустановить программу");
+    command_item("reinstall", "Установить выбранную версию программы");
     command_item("uninstall", "Удалить программу");
     Ok(())
 }

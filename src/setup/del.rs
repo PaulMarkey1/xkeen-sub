@@ -1,16 +1,16 @@
 use std::error::Error;
 use crate::subscriptions::{load_subscriptions, save_subscriptions};
-use crate::terminal::{error, info, menu_item, read_input, success, title, warning, separator};
+use crate::terminal::{error, info, menu_item, read_input, success, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 
-pub fn run() -> AppResult<()> {
+pub fn run() -> AppResult<bool> {
     let mut store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
-        success("Список подписок пуст.");
-        return Ok(());
+        info("Подписок пока нет — удалять нечего.");
+        return Ok(false);
     }
 
     loop {
@@ -22,12 +22,16 @@ pub fn run() -> AppResult<()> {
             menu_item(&(index + 1).to_string(), &subscription.prefix);
         }
 
-        menu_item("0", "Вернуться");
+        menu_item("0", "Назад");
+        menu_item("9", "Выход");
 
         let choice = read_input("Введите номер подписки для удаления: ")?;
 
         if choice == "0" {
-            return Ok(());
+            return Ok(false);
+        }
+        if choice == "9" {
+            return Ok(true);
         }
 
         let index = match choice.parse::<usize>() {
@@ -41,7 +45,7 @@ pub fn run() -> AppResult<()> {
         let selected_prefix = store.subscriptions[index].prefix.clone();
 
         println!();
-        title("Вы действительно хотите удалить подписку?");
+        title("УДАЛИТЬ ЭТУ ПОДПИСКУ?");
         info(&selected_prefix);
         menu_item("1", "Да");
         menu_item("2", "Нет");
@@ -60,16 +64,16 @@ pub fn run() -> AppResult<()> {
                 }
 
                 save_subscriptions(&store)?;
-                success("Подписка удалена. Нумерация обновлена.");
-                return Ok(());
+                success("Подписка удалена. Номера оставшихся подписок обновлены.");
+                return Ok(false);
             }
             "2" => {
-                warning("Удаление отменено.");
-                return Ok(());
+                info("Подписка оставлена без изменений.");
+                return Ok(false);
             }
             _ => {
                 error("Неизвестный пункт. Удаление отменено.");
-                return Ok(());
+                return Ok(false);
             }
         }
     }

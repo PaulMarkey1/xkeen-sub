@@ -22,9 +22,9 @@ pub fn run_menu() -> AppResult<()> {
         let choice = read_input("Выберите пункт: ")?;
 
         match choice.as_str() {
-            "1" => add::run()?,
+            "1" => { if add::run()? { return Ok(()); } },
             "2" => list::run()?,
-            "3" => del::run()?,
+            "3" => { if del::run()? { return Ok(()); } },
             "4" => {
                 if edit::run()? {
                     return Ok(());

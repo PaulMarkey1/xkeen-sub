@@ -58,9 +58,9 @@ pub fn ensure_observatory() -> AppResult<()> {
 
     if !found.is_empty() {
         for item in &found {
-            info(&format!("Найден объект Observatory: {item}"));
+            info(&format!("Конфигурация уже содержит настройки проверки подключений: {item}"));
         }
-        success("Проверка Observatory завершена.");
+        success("Настройки проверки подключений найдены.");
         return Ok(());
     }
 
@@ -121,7 +121,7 @@ fn ensure_observatory_template(config_dir: &Path) -> AppResult<()> {
             })?;
 
             success(&format!(
-                "Объекты Observatory не найдены. Шаблон добавлен в начало файла {}; прежние настройки сохранены.",
+                "Настройки проверки подключений добавлены в файл {}. Остальные параметры сохранены.",
                 path.display()
             ));
             Ok(())
@@ -143,7 +143,7 @@ fn ensure_observatory_template(config_dir: &Path) -> AppResult<()> {
             }
 
             success(&format!(
-                "Объекты Observatory не найдены. Создан файл {}.",
+                "Создан файл {} с настройками проверки подключений.",
                 path.display()
             ));
             Ok(())

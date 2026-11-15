@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Command;
 
-use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
+use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, read_input, success, title, warning, ProgressBar};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -166,6 +166,14 @@ impl BackupSession {
     }
 
     pub(crate) fn backup_files(&mut self, sources: &[BackupSource]) -> AppResult<usize> {
+        self.backup_files_inner(sources, None)
+    }
+
+    pub(crate) fn backup_files_with_progress(&mut self, sources: &[BackupSource], progress: &mut ProgressBar) -> AppResult<usize> {
+        self.backup_files_inner(sources, Some(progress))
+    }
+
+    fn backup_files_inner(&mut self, sources: &[BackupSource], mut progress: Option<&mut ProgressBar>) -> AppResult<usize> {
         if sources.is_empty() {
             self.event("BACKUP", "Нет существующих файлов, требующих резервного копирования.")?;
             return Ok(0);
@@ -224,6 +232,9 @@ impl BackupSession {
             self.append_file_metadata(&original, source_metadata.mode() & 0o7777, source_metadata.uid(), source_metadata.gid(), &original_bytes)?;
             saved += 1;
             self.saved_files = saved;
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.advance("Создание резервной копии");
+            }
         }
 
         self.saved_files = saved;
@@ -367,22 +378,22 @@ impl BackupSession {
 }
 
 pub fn run() -> AppResult<()> {
-    run_menu()
+    run_menu().map(|_| ())
 }
 
 pub fn run_command(args: &[String]) -> AppResult<()> {
     match args {
-        [] => run_menu(),
+        [] => run_menu().map(|_| ()),
         [action] if action == "help" => { print_help(); Ok(()) },
-        [action] if action == "list" => list_interactive(),
-        [action, id] if action == "list" => show_record_menu(id),
+        [action] if action == "list" => list_interactive().map(|_| ()),
+        [action, id] if action == "list" => show_record_menu(id).map(|_| ()),
         [action, value] if action == "days" => {
             let days = u32::try_from(parse_number(value, MIN_RETENTION_DAYS as u64, "срок хранения")?)
                 .map_err(|_| "Срок хранения слишком велик.")?;
             let mut settings = load_settings()?;
             settings.retention_days = days;
             save_settings(&settings)?;
-            success(&format!("Срок хранения установлен: {days} календарных дней."));
+            success(&format!("Срок хранения резервных копий — {days} дней."));
             Ok(())
         }
         [action, value] if action == "limit" => {
@@ -391,14 +402,14 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
             let mut settings = load_settings()?;
             settings.daily_limit = limit;
             save_settings(&settings)?;
-            success(&format!("Дневной лимит установлен: {limit} записей."));
+            success(&format!("Дневной лимит резервных копий — {limit} записей."));
             Ok(())
         }
         [action, value] if action == "mode" => {
             let mut settings = load_settings()?;
             settings.mode = parse_mode(value)?;
             save_settings(&settings)?;
-            success(&format!("Режим хранения: {}.", mode_label(&settings.mode)));
+            success(&format!("Режим хранения изменён: {}.", mode_label(&settings.mode)));
             Ok(())
         }
         _ => {
@@ -408,26 +419,28 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
     }
 }
 
-fn run_menu() -> AppResult<()> {
+fn run_menu() -> AppResult<bool> {
     loop {
         let settings = load_settings()?;
         println!();
         title("XKEEN-SUB — НАСТРОЙКИ РЕЗЕРВИРОВАНИЯ");
         crate::terminal::separator("────────────────────────────────────────");
-        info("Резервное копирование: ВКЛЮЧЕНО");
+        info("Защита включена: перед изменением файлов сохраняется резервная копия.");
         menu_item("1", &format!("Срок хранения: {} дней (минимум)", settings.retention_days));
         menu_item("2", &format!("Лимит записей за день: {} (минимум)", settings.daily_limit));
         menu_item("3", &format!("Режим хранения: {}", mode_label(&settings.mode)));
         menu_item("4", "Просмотреть резервные копии");
         menu_item("5", "Назад");
-        let choice = read_input("Введите соответствующую цифру для изменения параметра: ")?;
+        menu_item("0", "Выход");
+        let choice = read_input("Выберите действие: ")?;
         match choice.as_str() {
             "1" => change_days()?,
             "2" => change_limit()?,
             "3" => change_mode()?,
-            "4" => list_interactive()?,
-            "5" => return Ok(()),
-            _ => error("Неизвестный пункт меню. Введите цифру от 1 до 5."),
+            "4" => { if list_interactive()? { return Ok(true); } },
+            "5" => return Ok(false),
+            "0" => return Ok(true),
+            _ => error("Выберите пункт от 1 до 5 или 0 для выхода."),
         }
     }
 }
@@ -445,7 +458,7 @@ fn change_days() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.retention_days = days;
                 save_settings(&settings)?;
-                success(&format!("Срок хранения изменён: {days} дней."));
+                success(&format!("Готово! Резервные копии будут храниться {days} дней."));
                 return Ok(());
             }
             _ => error(&format!("Введите целое число не меньше {MIN_RETENTION_DAYS} или 0 для отмены.")),
@@ -466,7 +479,7 @@ fn change_limit() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.daily_limit = limit;
                 save_settings(&settings)?;
-                success(&format!("Дневной лимит изменён: {limit} записей."));
+                success(&format!("Готово! В день можно сохранять до {limit} резервных копий."));
                 return Ok(());
             }
             _ => error(&format!("Введите целое число не меньше {MIN_DAILY_LIMIT} или 0 для отмены.")),
@@ -486,14 +499,14 @@ fn change_mode() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.mode = RetentionMode::Automatic;
                 save_settings(&settings)?;
-                success("Включено автоматическое удаление по установленным правилам.");
+                success("Автоматическая очистка включена: старые копии будут удаляться по заданным правилам.");
                 return Ok(());
             }
             "2" => {
                 let mut settings = load_settings()?;
                 settings.mode = RetentionMode::Unlimited;
                 save_settings(&settings)?;
-                success("Бессрочное хранение включено. Автоматическое удаление отключено.");
+                success("Резервные копии будут храниться, пока вы не удалите их вручную.");
                 return Ok(());
             }
             "0" => return Ok(()),
@@ -502,13 +515,13 @@ fn change_mode() -> AppResult<()> {
     }
 }
 
-fn list_interactive() -> AppResult<()> {
+fn list_interactive() -> AppResult<bool> {
     loop {
         let records = load_records()?;
         title("XKEEN-SUB — РЕЗЕРВНЫЕ КОПИИ");
         if records.is_empty() {
-            info("Резервные копии отсутствуют.");
-            return Ok(());
+            info("Резервных копий пока нет. Они появятся после первого обновления.");
+            return Ok(false);
         }
 
         let settings = load_settings()?;
@@ -524,7 +537,7 @@ fn list_interactive() -> AppResult<()> {
             let time = summary.get("time").cloned().unwrap_or_else(|| "неизвестно".to_owned());
             let status = summary.get("status").cloned().unwrap_or_else(|| "неизвестно".to_owned());
             let saved = summary.get("saved").cloned().unwrap_or_else(|| "?".to_owned());
-            menu_item(&(index + 1).to_string(), &format!("backup{} — {} — {} — сохранено файлов: {}", record.number, time, status, saved));
+            menu_item_prefix(&(index + 1).to_string(), &format!("backup{}", record.number), &format!("{time} · {status} · файлов сохранено: {saved}"));
         }
         println!();
         info(&format!("Всего резервных копий: {}", records.len()));
@@ -535,21 +548,24 @@ fn list_interactive() -> AppResult<()> {
         }));
         info(&format!("Дневной лимит: {}", settings.daily_limit));
 
-        let input = read_input("Введите номер записи для просмотра или 0 для выхода: ")?;
+        let input = read_input("Введите номер записи, 0 — назад, 9 — выход: ")?;
         if input == "0" {
-            return Ok(());
+            return Ok(false);
+        }
+        if input == "9" {
+            return Ok(true);
         }
         match input.parse::<usize>() {
             Ok(number) if (1..=records.len()).contains(&number) => {
                 let id = records[number - 1].id.clone();
-                show_record_menu(&id)?;
+                if show_record_menu(&id)? { return Ok(true); }
             }
-            _ => error(&format!("Введите номер от 1 до {} или 0.", records.len())),
+            _ => error(&format!("Введите номер от 1 до {}, 0 или 9.", records.len())),
         }
     }
 }
 
-fn show_record_menu(id: &str) -> AppResult<()> {
+fn show_record_menu(id: &str) -> AppResult<bool> {
     let record = find_record(id)?;
     loop {
         let summary = read_summary(&record.path.join("log.txt"));
@@ -566,9 +582,10 @@ fn show_record_menu(id: &str) -> AppResult<()> {
         menu_item("3", "Восстановить резервную копию");
         menu_item("4", "Удалить резервную копию");
         menu_item("5", "Назад");
-        match read_input("Введите соответствующую цифру: ")?.as_str() {
-            "1" => show_log(&record.path.join("log.txt"))?,
-            "2" => show_files(&record)?,
+        menu_item("0", "Выход");
+        match read_input("Выберите действие: ")?.as_str() {
+            "1" => { if show_log(&record.path.join("log.txt"))? { return Ok(true); } },
+            "2" => { if show_files(&record)? { return Ok(true); } },
             "3" => restore_record(&record)?,
             "4" => {
                 if is_active_record(&record) {
@@ -578,24 +595,24 @@ fn show_record_menu(id: &str) -> AppResult<()> {
                 if confirm(&format!("Удалить резервную запись {}? Это действие нельзя отменить.", record.id))? {
                     fs::remove_dir_all(&record.path)?;
                     success("Резервная копия удалена.");
-                    return Ok(());
+                    return Ok(false);
                 }
             }
-            "5" => return Ok(()),
-            _ => error("Неизвестный пункт. Введите цифру от 1 до 5."),
+            "5" => return Ok(false),
+            "0" => return Ok(true),
+            _ => error("Выберите пункт от 1 до 5 или 0 для выхода."),
         }
     }
 }
 
-fn show_log(path: &Path) -> AppResult<()> {
+fn show_log(path: &Path) -> AppResult<bool> {
     title("ПОДРОБНЫЙ ЖУРНАЛ");
     let content = fs::read_to_string(path)?;
     println!("{content}");
-    let _ = read_input("Нажмите Enter для возврата...")?;
-    Ok(())
+    Ok(read_input("Enter — назад, 0 — выход: ")?.trim() == "0")
 }
 
-fn show_files(record: &BackupRecord) -> AppResult<()> {
+fn show_files(record: &BackupRecord) -> AppResult<bool> {
     title("ФАЙЛЫ В РЕЗЕРВНОЙ КОПИИ");
     let log_path = record.path.join("log.txt");
     let files = read_file_mappings(&log_path)?;
@@ -604,14 +621,13 @@ fn show_files(record: &BackupRecord) -> AppResult<()> {
         info("В этой резервной записи нет файловых операций.");
     } else {
         for (source, stored) in files {
-            info(&format!("Сохранённый оригинал: {}  →  {}", source.display(), stored.display()));
+            info_prefix(&source.display().to_string(), &format!("сохранён в копии как {}.", stored.display()));
         }
         for path in created {
-            info(&format!("Будет удалён при восстановлении (файл создан обновлением): {}", path.display()));
+            info_prefix(&path.display().to_string(), "будет удалён при восстановлении — файл создан обновлением.");
         }
     }
-    let _ = read_input("Нажмите Enter для возврата...")?;
-    Ok(())
+    Ok(read_input("Enter — назад, 0 — выход: ")?.trim() == "0")
 }
 
 fn restore_record(record: &BackupRecord) -> AppResult<()> {

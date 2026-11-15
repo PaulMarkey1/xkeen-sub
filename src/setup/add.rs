@@ -4,25 +4,27 @@ use crate::terminal::{error, info, menu_item, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-pub fn run() -> AppResult<()> {
+pub fn run() -> AppResult<bool> {
     let name = loop {
         title("ДОБАВЛЕНИЕ ПОДПИСКИ");
-        info("Добавить название подписки?");
+        info("Сначала можно задать имя подписки. Его будет видно в списке.");
         menu_item("1", "Да");
         menu_item("2", "Нет");
-        menu_item("0", "Вернуться");
+        menu_item("0", "Назад");
+        menu_item("9", "Выход");
         match read_input("Выберите пункт: ")?.as_str() {
             "1" => {
                 let value = read_input("Введите название для подписки: ")?;
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
-                    error("Название не может быть пустым. Для подписки без названия выберите «Нет».");
+                    error("Имя не может быть пустым. Если имя не нужно, выберите «Нет».");
                     continue;
                 }
                 break Some(trimmed.to_owned());
             }
             "2" => break None,
-            "0" => return Ok(()),
+            "0" => return Ok(false),
+            "9" => return Ok(true),
             _ => error("Неизвестный пункт. Введите 1, 2 или 0."),
         }
     };
@@ -31,7 +33,7 @@ pub fn run() -> AppResult<()> {
         let value = read_input("Введите URL подписки: ")?;
         match validate_url(value.trim()) {
             Ok(valid_url) => break valid_url,
-            Err(message) => error(&format!("Некорректный URL: {message}")),
+            Err(message) => error(&format!("Ссылка не подошла: {message}. Проверьте адрес и попробуйте ещё раз.")),
         }
     };
 
@@ -51,8 +53,8 @@ pub fn run() -> AppResult<()> {
     });
 
     save_subscriptions(&subscriptions)?;
-    success("Подписка добавлена.");
-    Ok(())
+    success("Готово! Подписка добавлена.");
+    Ok(false)
 }
 
 fn validate_url(value: &str) -> Result<String, &'static str> {

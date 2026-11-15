@@ -7,7 +7,7 @@ use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, mer
 use crate::update_apply::{self, PlannedFileOperation, PlannedOperationKind};
 use crate::subscription_download::download_subscription;
 use crate::subscriptions::{load_subscriptions, Subscription};
-use crate::terminal::{error, info, success, title, warning};
+use crate::terminal::{error, info, info_prefix, success, title, warning, ProgressBar};
 use crate::xray_test::{test_config_set_detailed, XrayConfigInput};
 
 use serde_json::Value;
@@ -98,7 +98,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     let store = load_subscriptions()?;
     backup.event("UPDATE", &format!("Загружен список подписок: {}.", store.subscriptions.len()))?;
     if store.subscriptions.is_empty() {
-        info("Список подписок пуст.");
+        info("Подписок пока нет. Добавьте подписку, чтобы запустить обновление.");
         return Ok(());
     }
 
@@ -147,16 +147,16 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
 
     if state.downloaded == 0 {
         println!();
-        info("Ни одна подписка не была успешно загружена. Проверка интернет-соединения...");
+        info("Не удалось получить данные подписок. Проверяем подключение к интернету...");
         if has_internet_connection() {
-            warning("Интернет доступен, но серверы подписок не ответили.");
+            warning("Интернет работает, но серверы подписок не ответили. Проверьте ссылки подписок или попробуйте позже.");
         } else {
-            error("Отсутствует интернет-соединение.");
+            error("Нет подключения к интернету. Проверьте соединение и повторите попытку.");
         }
         print_subscription_summary(&state);
         backup.event("ERROR", "Не удалось загрузить ни одну подписку; применение заблокировано.")?;
         backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", false);
-        warning("Подготовка конфигурации прекращена. Рабочие файлы не изменены.");
+        warning("Обновление остановлено. Файлы роутера не менялись.");
         return Ok(());
     }
     if state.processed == 0 {
@@ -164,7 +164,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         print_baseline_plan(&state);
         backup.event("ERROR", "Ни одна подписка не прошла обработку; дальнейшая подготовка прекращена.")?;
         backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", false);
-        warning("Ни одна подписка не прошла обработку. Подготовка конфигурации прекращена.");
+        warning("Не удалось обработать ни одну подписку. Конфигурация роутера осталась без изменений.");
         return Ok(());
     }
 
@@ -248,11 +248,14 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 category: operation.category.to_owned(),
             })
             .collect();
-        match backup.backup_files(&backup_sources) {
+        let progress_total = if plan.is_empty() { 0 } else { backup_sources.len() + plan.len() * 3 + 2 };
+        let mut progress = ProgressBar::new(progress_total);
+        match backup.backup_files_with_progress(&backup_sources, &mut progress) {
             Ok(saved) => {
                 backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
-                match update_apply::execute(&plan, backup) {
+                match update_apply::execute(&plan, backup, &mut progress) {
                     Ok(()) => {
+                        progress.finish("Все операции завершены");
                         backup.set_outcome(
                             "УСПЕШНО",
                             if no_file_changes {
@@ -264,6 +267,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                         );
                     }
                     Err(error) => {
+                        progress.stop("Применение остановлено");
                         backup.set_outcome(
                             "ОШИБКА ПРИМЕНЕНИЯ",
                             &format!("Применение не завершено. Результат отката и проверки XKeen записан в журнал: {error}"),
@@ -274,6 +278,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
                 }
             }
             Err(error) => {
+                progress.stop("Резервную копию не удалось создать");
                 backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
                 backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), false);
                 return Err(error);
@@ -293,11 +298,11 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         }
     }
     if validation.is_err() {
-        error("Итоговая проверка блокирует будущее применение.");
+        error("Проверка конфигурации не пройдена. Изменения не применялись.");
     } else if no_file_changes {
-        success("Изменений файлов не требуется; перезапуск XKeen не выполнялся.");
+        success("Конфигурация уже актуальна. Файлы не менялись, перезапуск XKeen не потребовался.");
     } else {
-        success("Обновление выполнено; файлы и состояние XKeen проверены.");
+        success("Готово! Файлы обновлены и проверены, XKeen запущен.");
     }
     Ok(())
 }
@@ -500,14 +505,14 @@ fn prepare_subscription(
     if let Some(previous_bytes) = previous.as_deref().filter(|_| previous_parsed.is_some()) {
         if byte_contents_equal(Some(previous_bytes), &downloaded) {
             state.processed += 1;
-            success("Уровень 1: исходный файл полностью совпадает с корректным baseline. Подписка не изменилась.");
+            success("Сервер вернул те же данные, что и при прошлом обновлении. Изменений нет.");
             backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты совпадают с baseline; изменений нет.", subscription.id))?;
             return Ok(());
         }
-        info("Уровень 1: исходный файл отличается от baseline.");
+        info("Полученные данные отличаются от сохранённой копии. Проверяем, что именно изменилось.");
         backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты отличаются от baseline.", subscription.id))?;
     } else {
-        info("Уровень 1: сравнение пропущено — baseline отсутствует или повреждён.");
+        info("Сохранённой копии подписки нет или она повреждена. Сравним подключения по отдельности.");
         backup.event("COMPARE", &format!("{}: уровень 1 пропущен — baseline отсутствует или повреждён.", subscription.id))?;
     }
 
@@ -551,18 +556,18 @@ fn prepare_subscription(
     if let Some(previous_json) = previous_json.as_deref() {
         if byte_contents_equal(Some(previous_json), &current_json) {
             state.processed += 1;
-            success("Уровень 2: сформированные Outbound полностью совпадают. Рабочая конфигурация и baseline не меняются.");
+            success("Состав подключений не изменился. Рабочие файлы останутся прежними.");
             backup.event("COMPARE", &format!("{}: уровень 2 — сформированные Outbound совпадают побайтно.", subscription.id))?;
             return Ok(());
         }
-        info("Уровень 2: сформированные Outbound отличаются. Запускаем сравнение по Tag.");
+        info("Состав подключений изменился. Теперь проверяем каждое подключение отдельно.");
         backup.event("COMPARE", &format!("{}: уровень 2 — Outbound отличаются; запускается сравнение по Tag.", subscription.id))?;
     } else {
-        info("Уровень 2: сравнение пропущено — baseline отсутствует или повреждён. Запускаем сравнение по Tag как для новой подписки.");
+        info("Нет сохранённой копии подписки. Проверяем подключения так же, как при первом добавлении.");
         backup.event("COMPARE", &format!("{}: уровень 2 пропущен; выполняется сравнение новой подписки по Tag.", subscription.id))?;
     }
 
-    info("Уровень 3: сравнение подключений по Tag...");
+    info("Сверяем подключения по их идентификаторам...");
     let mut report = match compare_subscription(previous_json.as_deref(), &current_json) {
         Ok(report) => report,
         Err(err) => {
@@ -784,7 +789,7 @@ fn print_comparison(report: &ComparisonReport) {
     for item in &report.changed {
         warning(&format!("  Изменено: {}", item.tag));
         for change in &item.changes {
-            info(&format!("    {}: {} -> {}", change.path, show_value(change.previous.as_ref()), show_value(change.current.as_ref())));
+            info_prefix(&change.path, &format!("значение изменилось: {} → {}", show_value(change.previous.as_ref()), show_value(change.current.as_ref())));
         }
     }
     info(&format!("  Без изменений: {}", report.unchanged));
@@ -813,19 +818,19 @@ fn print_updated_outbound(prepared: &[PreparedSubscription]) {
 
 fn print_json_section(label: &str, value: &Value) {
     let count = value.as_array().map(Vec::len).unwrap_or(0);
-    info(&format!("{label}: {count} элементов подготовлено; содержимое скрыто."));
+    info(&format!("{label}: подготовлено элементов — {count}. Подробный список скрыт, чтобы не перегружать экран."));
 }
 
 fn print_merge_summary(replacements: &[String], conflicts: &[String], archive: &ArchivePlan) {
     println!();
     title("ОБЪЕДИНЕНИЕ OUTBOUND");
-    info("Изменившиеся группы заменяются целиком; остальные группы берутся из Рабочего Outbound.");
-    info("Пользовательские подключения располагаются в конце.");
+    info("Если подписка изменилась, её группа обновляется целиком. Остальные подключения сохраняются.");
+    info("Ваши собственные подключения остаются в конце списка.");
     for item in replacements { success(item); }
     for item in conflicts { warning(item); }
-    info(&format!("Будет добавлено в архив: {}. Путь: {}.", archive.added, USER_ARCHIVE));
+    info(&format!("В архив будут добавлены ваши прежние подключения: {}.", archive.added));
     if archive.added > 0 {
-        info(&format!("В архив подготовлено {} подключений; содержимое скрыто.", archive.added));
+        info(&format!("Подготовлена копия {} подключений. Подробный список сохранён в архиве.", archive.added));
     }
 }
 
@@ -836,11 +841,11 @@ fn print_configuration_summary(
     println!();
     title("ПОДГОТОВКА КОНФИГУРАЦИИ");
     info(&format!("Итоговый Outbound: {} подключений.", tags.len()));
-    info(&format!("Outbound: {}", docs[outbound_index].path.display()));
-    info(&format!("Routing: {}", docs[routing_index].path.display()));
-    for item in obs { success(&format!("subjectSelector обновлён: {} ({})", item.file_name, item.object_name)); }
+    info_prefix(&docs[outbound_index].file_name, &format!("файл с подключениями: {}", docs[outbound_index].path.display()));
+    info_prefix(&docs[routing_index].file_name, &format!("файл с правилами маршрутизации: {}", docs[routing_index].path.display()));
+    for item in obs { info_prefix(&item.file_name, &format!("обновлён список проверяемых подключений ({})", item.object_name)); }
     if balancer.user_balancer_tags.is_empty() {
-        info("Пользовательские балансировщики не обнаружены.");
+        info("В конфигурации не найдено настроенных вами балансировщиков.");
     } else {
         info(&format!(
             "Обнаружены пользовательские балансировщики ({}): {}.",
@@ -853,9 +858,9 @@ fn print_configuration_summary(
         BalancerCase::OneExistingBalancer => info("Обнаружен один существующий балансировщик."),
         BalancerCase::MultipleExistingBalancers => info("Обнаружено несколько существующих балансировщиков."),
     }
-    if balancer.created { success(&format!("Подготовлено создание {}.", balancer.tag)); }
-    if balancer.updated_existing { success(&format!("Обновлён selector балансировщика {}.", balancer.tag)); }
-    if balancer.transformed_rules > 0 { info(&format!("Routing rules перенаправлено: {}.", balancer.transformed_rules)); }
+    if balancer.created { info_prefix(&balancer.tag, "подготовлен новый балансировщик программы"); }
+    if balancer.updated_existing { info_prefix(&balancer.tag, "обновлён список подключений балансировщика"); }
+    if balancer.transformed_rules > 0 { info(&format!("Правил маршрутизации обновлено: {}.", balancer.transformed_rules)); }
 }
 
 fn print_xray_test(result: &Result<(), String>) {
@@ -864,7 +869,7 @@ fn print_xray_test(result: &Result<(), String>) {
     match result {
         Ok(()) => success("Итоговая проверка Xray завершилась успешно."),
         Err(message) => {
-            error(&format!("Xray отклонил итоговую конфигурацию: {message}"));
+            error(&format!("Xray не принял новую конфигурацию: {message}"));
         }
     }
 }
@@ -876,12 +881,12 @@ fn print_baseline_plan(state: &RunState) {
         info("Изменений baseline не требуется.");
     }
     for (id, path) in &state.baseline_removals {
-        warning(&format!("{id}: повреждённый baseline подготовлен к удалению после успешного применения изменений — {}.", path.display()));
+        info_prefix(id, &format!("повреждённая сохранённая копия будет удалена после успешного обновления: {}.", path.display()));
     }
     for item in &state.baseline_updates {
-        info(&format!(
-            "{} -> {} ({} байт; сохранить после успешной замены рабочих файлов).",
-            item.id, item.path.display(), item.original.len()
+        info_prefix(&item.id, &format!(
+            "обновится после применения рабочих файлов: {} ({} байт).",
+            item.path.display(), item.original.len()
         ));
     }
     info("Baseline будет применён после конфигураций Xray и пользовательского архива.");
@@ -889,10 +894,10 @@ fn print_baseline_plan(state: &RunState) {
 
 fn print_prepared_documents(docs: &[ConfigDocument]) {
     println!();
-    title("ПОДГОТОВЛЕННЫЕ ДОКУМЕНТЫ (В ПАМЯТИ)");
+    title("ФАЙЛЫ, ПОДГОТОВЛЕННЫЕ К ОБНОВЛЕНИЮ");
     for doc in docs {
         let text = serde_json::to_string(&doc.value).unwrap_or_else(|_| doc.original.clone());
-        info(&format!("{} — {} байт подготовлено.", doc.file_name, text.len()));
+        info_prefix(&doc.file_name, &format!("подготовлен, {} байт.", text.len()));
     }
 }
 
@@ -992,9 +997,9 @@ fn build_file_plan(
 
 fn print_file_plan(plan: &[PlannedFileOperation]) {
     println!();
-    title("ИТОГОВЫЙ СПИСОК ФАЙЛОВ ДЛЯ ИЗМЕНЕНИЯ");
+    title("ЧТО ИЗМЕНИТСЯ НА РОУТЕРЕ");
     if plan.is_empty() {
-        info("Файлы для изменения отсутствуют.");
+        info("Изменения файлов не нужны.");
         return;
     }
     for operation in plan {
@@ -1004,9 +1009,9 @@ fn print_file_plan(plan: &[PlannedFileOperation]) {
             PlannedOperationKind::Delete => "Удаление",
         };
         let size = operation.content.as_ref().map(|bytes| format!(" ({} байт)", bytes.len())).unwrap_or_default();
-        info(&format!("{action}: {} — {}{size}", operation.path.display(), operation.category));
+        info_prefix(&operation.path.display().to_string(), &format!("будет выполнено: {action}; {}{size}.", operation.category));
     }
-    info(&format!("Всего операций: {}.", plan.len()));
+    info(&format!("Всего файловых операций: {}.", plan.len()));
 }
 
 

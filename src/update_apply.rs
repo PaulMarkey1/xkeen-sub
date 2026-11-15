@@ -1,7 +1,7 @@
 use crate::backup::BackupSession;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -565,55 +565,22 @@ fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession
 
 struct CommandResult {
     code: Option<i32>,
-    success: bool,
-    stdout: String,
-    stderr: String,
     timed_out: bool,
-}
-
-fn should_capture_output(args: &[&str]) -> bool {
-    args == ["-status"]
 }
 
 fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResult> {
     let command_text = format!("XKEEN_FOREGROUND=1 xkeen {}", args.join(" "));
     let started = timestamp();
     backup.event("COMMAND", &format!("Команда: {command_text}; начало: {started}."))?;
-    // Only -status needs captured output for state detection. The -start and
-    // -stop commands may launch/stop background processes that inherit their
-    // parent's file descriptors. Piped descriptors would then remain open and
-    // make the reader threads block forever in read_to_end()/join(), even after
-    // the xkeen command itself has exited. Null stdio keeps those commands
-    // independent from any daemon process they spawn.
-    let capture_output = should_capture_output(args);
-    let stdout_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
-    let stderr_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
+    // Не захватываем stdout/stderr: команды XKeen могут запускать фоновые
+    // процессы, которые наследуют файловые дескрипторы родителя.
     let mut child = match Command::new("xkeen").args(args).env("XKEEN_FOREGROUND", "1")
-        .stdout(stdout_stdio).stderr(stderr_stdio).spawn() {
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(child) => child,
         Err(error) => {
             backup.event("COMMAND", &format!("Команда: {command_text}; ошибка запуска: {error}; завершение: {}.", timestamp()))?;
             return Err(format!("Не удалось запустить {command_text}: {error}").into());
         }
-    };
-    let (out_thread, err_thread) = if capture_output {
-        let stdout = child.stdout.take().ok_or("Не удалось получить stdout команды XKeen.")?;
-        let stderr = child.stderr.take().ok_or("Не удалось получить stderr команды XKeen.")?;
-        let out_thread = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let mut reader = stdout;
-            let _ = reader.read_to_end(&mut bytes);
-            bytes
-        });
-        let err_thread = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let mut reader = stderr;
-            let _ = reader.read_to_end(&mut bytes);
-            bytes
-        });
-        (Some(out_thread), Some(err_thread))
-    } else {
-        (None, None)
     };
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let (status, timed_out) = loop {
@@ -625,23 +592,167 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
         }
         thread::sleep(Duration::from_millis(100));
     };
-    let stdout = out_thread
-        .and_then(|handle| handle.join().ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    let stderr = err_thread
-        .and_then(|handle| handle.join().ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
     let code = status.as_ref().and_then(|value| value.code());
-    let successful = status.as_ref().map(|value| value.success()).unwrap_or(false) && !timed_out;
-    let ended = timestamp();
     backup.event("COMMAND", &format!(
-        "Команда: {command_text}; завершение: {ended}; exit_code: {:?}; timeout: {}.\nstdout:\n{}\nstderr:\n{}",
-        code, timed_out, if stdout.is_empty() { "<пусто>" } else { &stdout }, if stderr.is_empty() { "<пусто>" } else { &stderr }
+        "Команда: {command_text}; завершение: {}; exit_code: {:?}; timeout: {}.",
+        timestamp(), code, timed_out
     ))?;
-    Ok(CommandResult { code, success: successful, stdout, stderr, timed_out })
+    Ok(CommandResult { code, timed_out })
 }
+
+// Повторяет критерии proxy_pids() из XKeen:
+// учитывается только процесс xray с рабочей командой, а одноразовые
+// test/dump и help/version исключаются.
+fn is_xray_proxy_cmdline(cmdline: &[u8]) -> bool {
+    let mut args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+    while args.last().is_some_and(|arg| arg.is_empty()) {
+        args.pop();
+    }
+    if args.is_empty() {
+        return false;
+    }
+
+    let one_shot = args.iter().skip(1).any(|arg| {
+        matches!(*arg, b"-test" | b"--test" | b"-test=true" | b"--test=true"
+            | b"-dump" | b"--dump" | b"-dump=true" | b"--dump=true")
+    });
+    if one_shot {
+        return false;
+    }
+
+    if args.len() == 1 {
+        return true;
+    }
+
+    let command = args[1];
+    command == b"run"
+        || (command.starts_with(b"-")
+            && !matches!(command, b"-h" | b"--h" | b"-help" | b"--help" | b"-version" | b"--version"))
+}
+
+fn xray_process_running() -> std::io::Result<bool> {
+    for entry in fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let process_dir = entry.path();
+        let comm = match fs::read_to_string(process_dir.join("comm")) {
+            Ok(comm) => comm,
+            Err(_) => continue, // Процесс мог завершиться во время обхода.
+        };
+        if comm.trim_end() != "xray" {
+            continue;
+        }
+        let cmdline = match fs::read(process_dir.join("cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(_) => continue,
+        };
+        if is_xray_proxy_cmdline(&cmdline) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+fn wait_for_stopped_status(backup: &mut BackupSession) -> AppResult<bool> {
+    let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
+    loop {
+        let running = xray_process_running()
+            .map_err(|error| format!("Не удалось проверить процессы Xray в /proc: {error}"))?;
+        if !running {
+            backup.event("XKEEN", "Проверка процесса: рабочий процесс Xray остановлен.")?;
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(STATUS_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<bool> {
+    let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
+    loop {
+        let running = xray_process_running()
+            .map_err(|error| format!("Не удалось проверить процессы Xray в /proc: {error}"))?;
+        if running {
+            backup.event("XKEEN", "Проверка процесса: рабочий процесс Xray запущен.")?;
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(STATUS_POLL_INTERVAL);
+    }
+}
+
+fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
+    let stop = run_xkeen(&["-stop"], backup);
+    let stopped = wait_for_stopped_status(backup)?;
+    let stop_description = match &stop {
+        Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
+        Err(error) => format!("ошибка запуска команды: {error}"),
+    };
+    backup.event("XKEEN", &format!(
+        "Проверка остановки: рабочий процесс Xray остановлен={stopped}; {stop_description}"
+    ))?;
+    if !stopped {
+        return Err(format!(
+            "Остановка XKeen не подтверждена: рабочий процесс Xray всё ещё обнаруживается; {stop_description}"
+        ).into());
+    }
+
+    let start = run_xkeen(&["-start"], backup);
+    let running = wait_for_running_status(backup)?;
+    let start_description = match &start {
+        Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
+        Err(error) => format!("ошибка запуска команды: {error}"),
+    };
+    backup.event("XKEEN", &format!(
+        "Проверка запуска: рабочий процесс Xray запущен={running}; {start_description}."
+    ))?;
+    if !running {
+        return Err(format!(
+            "Запуск XKeen не подтверждён: рабочий процесс Xray не обнаружен; {start_description}"
+        ).into());
+    }
+    backup.event("XKEEN", "Остановка, запуск и проверка рабочего процесса Xray завершились успешно.")?;
+    Ok(())
+}
+
+fn start_after_rollback(backup: &mut BackupSession) -> String {
+    let start = run_xkeen(&["-start"], backup);
+    let status = wait_for_running_status(backup);
+
+    let running = matches!(status, Ok(true));
+    let start_description = match &start {
+        Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
+        Err(error) => format!("ошибка запуска команды: {error}"),
+    };
+    let status_description = match &status {
+        Ok(true) => "рабочий процесс Xray обнаружен".to_owned(),
+        Ok(false) => "рабочий процесс Xray не обнаружен по истечении тайм-аута".to_owned(),
+        Err(error) => format!("ошибка проверки процессов: {error}"),
+    };
+    backup.event("ROLLBACK", &format!(
+        "Результат запуска XKeen после отката: рабочий процесс Xray запущен={running}; {start_description}; {status_description}"
+    )).ok();
+
+    if running {
+        "запущен, процесс Xray подтверждён".to_owned()
+    } else {
+        let message = format!(
+            "Не удалось подтвердить запуск XKeen после отката: {start_description}; {status_description}"
+        );
+        backup.event("ERROR", &message).ok();
+        message
+    }
+}
+
 
 const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);

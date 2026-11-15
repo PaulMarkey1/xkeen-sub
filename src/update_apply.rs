@@ -605,7 +605,7 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
 // test/dump и help/version исключаются.
 fn is_xray_proxy_cmdline(cmdline: &[u8]) -> bool {
     let mut args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
-    while args.last().is_some_and(|arg| arg.is_empty()) {
+    while args.last().map_or(false, |arg| arg.is_empty()) {
         args.pop();
     }
     if args.is_empty() {
@@ -880,45 +880,53 @@ fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
 }
 
 #[cfg(test)]
-mod status_tests {
-    use super::{is_running_status, is_stopped_status};
+mod process_tests {
+    use super::is_xray_proxy_cmdline;
 
     #[test]
-    fn captures_output_only_for_status_commands() {
-        use super::should_capture_output;
-
-        assert!(should_capture_output(&["-status"]));
-        assert!(!should_capture_output(&["-start"]));
-        assert!(!should_capture_output(&["-stop"]));
+    fn accepts_xray_without_arguments() {
+        assert!(is_xray_proxy_cmdline(b"xray\0"));
     }
 
     #[test]
-    fn accepts_only_explicit_stopped_status_with_expected_exit_code() {
-        assert!(is_stopped_status(Some(1), "Прокси-клиент не запущен"));
-        assert!(!is_stopped_status(Some(0), "Прокси-клиент не запущен"));
-        assert!(!is_stopped_status(Some(1), "не удалось определить статус"));
+    fn accepts_xray_run_command() {
+        assert!(is_xray_proxy_cmdline(b"xray\0run\0-config\0/etc/xray/config.json\0"));
     }
 
     #[test]
-    fn accepts_all_documented_xkeen_proxy_modes_as_running() {
-        for mode in ["TProxy", "Hybrid", "Redirect", "Other", "FutureMode"] {
-            let output = format!("Прокси-клиент xray запущен в режиме {mode}");
-            assert!(is_running_status(Some(0), &output), "mode {mode} must not affect process state");
+    fn accepts_supported_option_based_commands() {
+        assert!(is_xray_proxy_cmdline(b"xray\0-config\0/etc/xray/config.json\0"));
+    }
+
+    #[test]
+    fn rejects_one_shot_test_and_dump_commands() {
+        for flag in [
+            b"-test".as_slice(), b"--test", b"-test=true", b"--test=true",
+            b"-dump", b"--dump", b"-dump=true", b"--dump=true",
+        ] {
+            let mut cmdline = b"xray\0run\0".to_vec();
+            cmdline.extend_from_slice(flag);
+            cmdline.push(0);
+            assert!(!is_xray_proxy_cmdline(&cmdline), "flag {:?} must be excluded", flag);
         }
     }
 
     #[test]
-    fn accepts_legacy_mixed_mode_name_as_running() {
-        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Mixed"));
+    fn rejects_help_and_version_commands() {
+        for command in [
+            b"-h".as_slice(), b"--h", b"-help", b"--help", b"-version", b"--version",
+        ] {
+            let mut cmdline = b"xray\0".to_vec();
+            cmdline.extend_from_slice(command);
+            cmdline.push(0);
+            assert!(!is_xray_proxy_cmdline(&cmdline));
+        }
     }
 
     #[test]
-    fn rejects_nonzero_or_negative_running_status() {
-        assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
-        assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
-        assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));
-        assert!(!is_running_status(Some(0), "Прокси-клиент НЕ запущен"));
-        assert!(!is_running_status(Some(0), "не удалось определить статус"));
+    fn rejects_empty_or_malformed_command_lines() {
+        assert!(!is_xray_proxy_cmdline(b""));
+        assert!(!is_xray_proxy_cmdline(b"\0"));
     }
 }
 

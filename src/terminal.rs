@@ -40,12 +40,13 @@ pub struct ProgressBar {
     total: usize,
     current: usize,
     active: bool,
+    frame: usize,
 }
 
 impl ProgressBar {
     pub fn new(total: usize) -> Self {
         let active = total > 0;
-        let progress = Self { total, current: 0, active };
+        let progress = Self { total, current: 0, active, frame: 0 };
         if active {
             progress.render("Подготовка");
         }
@@ -58,6 +59,16 @@ impl ProgressBar {
         }
         self.current = (self.current + 1).min(self.total);
         self.render(message);
+    }
+
+    pub fn pulse(&mut self, message: &str) {
+        if !self.active {
+            return;
+        }
+        const SPINNER: [&str; 4] = ["|", "/", "-", "\\\\"];
+        let status = format!("{} {message}", SPINNER[self.frame % SPINNER.len()]);
+        self.frame += 1;
+        self.render(&status);
     }
 
     pub fn finish(&mut self, message: &str) {

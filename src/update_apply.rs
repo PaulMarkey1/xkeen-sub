@@ -619,11 +619,48 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
     Ok(CommandResult { code, success: successful, stdout, stderr, timed_out })
 }
 
+const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+fn wait_for_stopped_status(backup: &mut BackupSession) -> AppResult<CommandResult> {
+    let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
+    let mut last_status = None;
+    loop {
+        let status = run_xkeen(&["-status"], backup)?;
+        let stopped = !status.timed_out && is_stopped_status(status.code, &status.stdout);
+        if stopped {
+            return Ok(status);
+        }
+        last_status = Some(status);
+        if Instant::now() >= deadline {
+            return Ok(last_status.expect("at least one status check was performed"));
+        }
+        thread::sleep(STATUS_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<CommandResult> {
+    let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
+    let mut last_status = None;
+    loop {
+        let status = run_xkeen(&["-status"], backup)?;
+        let running = !status.timed_out && is_running_status(status.code, &status.stdout);
+        if running {
+            return Ok(status);
+        }
+        last_status = Some(status);
+        if Instant::now() >= deadline {
+            return Ok(last_status.expect("at least one status check was performed"));
+        }
+        thread::sleep(STATUS_POLL_INTERVAL);
+    }
+}
+
 fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     let stop = run_xkeen(&["-stop"], backup);
-    let status = run_xkeen(&["-status"], backup);
-    let stop_success = matches!(&stop, Ok(result) if result.success);
-    let stopped = matches!(&status, Ok(result) if !result.timed_out && is_stopped_status(result.code, &result.stdout));
+    // The status command is authoritative: the stop command may return before
+    // XKeen has finished stopping.
+    let status = wait_for_stopped_status(backup);
     let stop_description = match &stop {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),
@@ -632,28 +669,34 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
         Ok(result) => format!("exit_code={:?}, timeout={}, stdout={}", result.code, result.timed_out, result.stdout),
         Err(error) => format!("ошибка проверки статуса: {error}"),
     };
+    let stopped = matches!(&status, Ok(result) if !result.timed_out && is_stopped_status(result.code, &result.stdout));
     backup.event("XKEEN", &format!(
-        "Проверка остановки: stop_success={stop_success}; состояние остановлено={stopped}; {stop_description}; {status_description}"
+        "Проверка остановки: состояние остановлено={stopped}; {stop_description}; {status_description}"
     ))?;
-    if !stop_success || !stopped {
+    if !stopped {
         return Err(format!(
             "Остановка XKeen не подтверждена: {stop_description}; {status_description}"
         ).into());
     }
 
-    let start = run_xkeen(&["-start"], backup)?;
-    if !start.success {
-        return Err(format!("xkeen -start завершился ошибкой (код {:?}, timeout={}).", start.code, start.timed_out).into());
-    }
-    thread::sleep(Duration::from_secs(5));
-    let status = run_xkeen(&["-status"], backup)?;
+    let start = run_xkeen(&["-start"], backup);
+    // The final status is authoritative; routing mode does not determine
+    // whether the proxy process is running.
+    let status = wait_for_running_status(backup)?;
     let running = !status.timed_out && is_running_status(status.code, &status.stdout);
+    let start_description = match &start {
+        Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
+        Err(error) => format!("ошибка запуска команды: {error}"),
+    };
     backup.event("XKEEN", &format!(
-        "Проверка запуска: start_success={}, status_code={:?}, состояние запущено={}.",
-        start.success, status.code, running
+        "Проверка запуска: состояние запущено={running}; {start_description}; status_code={:?}; stdout={}.",
+        status.code, status.stdout
     ))?;
     if !running {
-        return Err(format!("Запуск XKeen не подтверждён: exit_code={:?}; stdout={}", status.code, status.stdout).into());
+        return Err(format!(
+            "Запуск XKeen не подтверждён: {start_description}; exit_code={:?}; stdout={}",
+            status.code, status.stdout
+        ).into());
     }
     backup.event("XKEEN", "Остановка, запуск и проверка статуса XKeen завершились успешно.")?;
     Ok(())
@@ -661,10 +704,10 @@ fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
 
 fn start_after_rollback(backup: &mut BackupSession) -> String {
     let start = run_xkeen(&["-start"], backup);
-    thread::sleep(Duration::from_secs(5));
-    let status = run_xkeen(&["-status"], backup);
+    // The final status is authoritative; routing mode does not determine
+    // whether the proxy process is running.
+    let status = wait_for_running_status(backup);
 
-    let start_ok = matches!(&start, Ok(result) if result.success);
     let running = matches!(&status, Ok(result) if !result.timed_out && is_running_status(result.code, &result.stdout));
     let start_description = match &start {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
@@ -675,14 +718,14 @@ fn start_after_rollback(backup: &mut BackupSession) -> String {
         Err(error) => format!("ошибка проверки статуса: {error}"),
     };
     backup.event("ROLLBACK", &format!(
-        "Результат запуска XKeen после отката: start_success={start_ok}; состояние запущено={running}; {start_description}; {status_description}"
+        "Результат запуска XKeen после отката: состояние запущено={running}; {start_description}; {status_description}"
     )).ok();
 
-    if start_ok && running {
+    if running {
         "запущен, статус подтверждён".to_owned()
     } else {
         let message = format!(
-            "Не удалось подтвердить запуск XKeen после отката: start_success={start_ok}; состояние запущено={running}; {start_description}; {status_description}"
+            "Не удалось подтвердить запуск XKeen после отката: состояние запущено={running}; {start_description}; {status_description}"
         );
         backup.event("ERROR", &message).ok();
         message
@@ -713,7 +756,20 @@ mod status_tests {
     }
 
     #[test]
-    fn accepts_only_explicit_running_status_with_zero_exit_code() {
+    fn accepts_all_documented_xkeen_proxy_modes_as_running() {
+        for mode in ["TProxy", "Hybrid", "Redirect", "Other", "FutureMode"] {
+            let output = format!("Прокси-клиент xray запущен в режиме {mode}");
+            assert!(is_running_status(Some(0), &output), "mode {mode} must not affect process state");
+        }
+    }
+
+    #[test]
+    fn accepts_legacy_mixed_mode_name_as_running() {
+        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Mixed"));
+    }
+
+    #[test]
+    fn rejects_nonzero_or_negative_running_status() {
         assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
         assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));

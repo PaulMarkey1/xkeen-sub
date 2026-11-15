@@ -23,7 +23,65 @@ pub fn command_item(command: &str, description: &str) {
 }
 
 pub fn info(message: &str) {
-    println!("{CYAN}{message}{RESET}");
+    println!("{message}");
+}
+
+/// Prints an object name in cyan and its explanation in the terminal's normal color.
+pub fn info_prefix(prefix: &str, message: &str) {
+    println!("{CYAN}{prefix}{RESET} — {message}");
+}
+
+/// A determinate progress bar for file operations.
+pub struct ProgressBar {
+    total: usize,
+    current: usize,
+    active: bool,
+}
+
+impl ProgressBar {
+    pub fn new(total: usize) -> Self {
+        let active = total > 0;
+        let progress = Self { total, current: 0, active };
+        if active {
+            progress.render("Подготовка");
+        }
+        progress
+    }
+
+    pub fn advance(&mut self, message: &str) {
+        if !self.active {
+            return;
+        }
+        self.current = (self.current + 1).min(self.total);
+        self.render(message);
+    }
+
+    pub fn finish(&mut self, message: &str) {
+        if !self.active {
+            return;
+        }
+        self.current = self.total;
+        self.render(message);
+        println!();
+        self.active = false;
+    }
+
+    fn render(&self, message: &str) {
+        let width = 24usize;
+        let filled = width * self.current / self.total;
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(width - filled));
+        let percent = self.current * 100 / self.total;
+        print!("\r{CYAN}[{bar}]{RESET} {percent:>3}% ({}/{}) {message}\x1b[K", self.current, self.total);
+        let _ = io::stdout().flush();
+    }
+}
+
+impl Drop for ProgressBar {
+    fn drop(&mut self) {
+        if self.active {
+            println!();
+        }
+    }
 }
 
 pub fn success(message: &str) {

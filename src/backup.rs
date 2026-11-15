@@ -520,8 +520,8 @@ fn list_interactive() -> AppResult<bool> {
         let records = load_records()?;
         title("XKEEN-SUB — РЕЗЕРВНЫЕ КОПИИ");
         if records.is_empty() {
-            info("Резервные копии отсутствуют.");
-            return Ok(());
+            info("Резервных копий пока нет.");
+            return Ok(false);
         }
 
         let settings = load_settings()?;

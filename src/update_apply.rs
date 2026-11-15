@@ -738,13 +738,10 @@ fn is_stopped_status(code: Option<i32>, stdout: &str) -> bool {
 
 fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
     let normalized = stdout.to_lowercase();
-    let expected_mode = normalized.contains("в режиме hybrid")
-        || normalized.contains("в режиме mixed");
     code == Some(0)
         && normalized.contains("прокси-клиент")
         && normalized.contains("запущен")
         && !normalized.contains("не запущен")
-        && expected_mode
 }
 
 #[cfg(test)]
@@ -759,17 +756,15 @@ mod status_tests {
     }
 
     #[test]
-    fn accepts_explicit_running_status_in_hybrid_mode() {
-        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Hybrid"));
+    fn accepts_all_documented_xkeen_proxy_modes_as_running() {
+        for mode in ["TProxy", "Hybrid", "Redirect", "Other", "FutureMode"] {
+            let output = format!("Прокси-клиент xray запущен в режиме {mode}");
+            assert!(is_running_status(Some(0), &output), "mode {mode} must not affect process state");
+        }
     }
 
     #[test]
-    fn rejects_other_mode_as_healthy_running_state() {
-        assert!(!is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Other"));
-    }
-
-    #[test]
-    fn accepts_legacy_mixed_name_for_hybrid_mode() {
+    fn accepts_legacy_mixed_mode_name_as_running() {
         assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Mixed"));
     }
 

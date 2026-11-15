@@ -3,7 +3,7 @@ use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROG
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::outbound_compare::{compare_subscription, ComparisonReport};
 use crate::subscription_parser::parse_subscription;
-use crate::update_merge::{collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan, USER_ARCHIVE};
+use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan, USER_ARCHIVE};
 use crate::update_apply::{self, PlannedFileOperation, PlannedOperationKind};
 use crate::subscription_download::download_subscription;
 use crate::subscriptions::{load_subscriptions, Subscription};
@@ -172,7 +172,8 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     let mut archive = load_archive()?;
     let (final_outbounds, replacements, conflicts) =
         merge_outbounds(&working, &store.subscriptions, &updated_groups, &mut archive)?;
-    let tags = collect_tags(&final_outbounds)?;
+    let all_tags = collect_tags(&final_outbounds)?;
+    let tags = collect_selector_tags(&final_outbounds, &api_tags)?;
     print_json_section("ИТОГОВЫЙ OUTBOUND", &Value::Array(final_outbounds.clone()));
 
     let mut outbound_doc = docs[outbound_index].value.clone();
@@ -211,12 +212,12 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     backup.event("OBSERVATORY", &format!("Подготовлено обновлений subjectSelector: {}.", obs_updates.len()))?;
 
     backup.event("CONFIG", "Подготовка конфигураций завершена. Запускается обязательная проверка Xray.")?;
-    let validation = validate_all(&docs, &final_outbounds, &tags, &balancer);
+    let validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
 
     print_subscription_summary(&state);
     print_updated_outbound(&state.prepared);
     print_merge_summary(&replacements, &conflicts, &archive);
-    print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &tags);
+    print_configuration_summary(&docs, outbound_index, routing_index, &obs_updates, &balancer, &all_tags);
     print_xray_test(&validation);
     print_baseline_plan(&state);
     print_prepared_documents(&docs);

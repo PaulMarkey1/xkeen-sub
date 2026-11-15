@@ -80,7 +80,7 @@ pub fn prepare_balancers(
         }
         BalancerCase::OneExistingBalancer => {
             if let Some(index) = program_index {
-                set_selector(&mut balancers[index], final_tags)?;
+                set_program_balancer(&mut balancers[index], final_tags)?;
                 updated_existing = true;
             } else {
                 let selector = balancers[0].get("selector").and_then(Value::as_array);
@@ -116,7 +116,7 @@ pub fn prepare_balancers(
         }
         BalancerCase::MultipleExistingBalancers => {
             if let Some(index) = program_index {
-                set_selector(&mut balancers[index], final_tags)?;
+                set_program_balancer(&mut balancers[index], final_tags)?;
                 updated_existing = true;
             } else {
                 // User-defined balancers and routing rules remain untouched.
@@ -148,8 +148,17 @@ fn new_program_balancer(tags: &[String]) -> Value {
     serde_json::json!({
         "tag": PROGRAM_BALANCER_TAG,
         "selector": tags,
+        "fallbackTag": "direct",
         "strategy": { "type": "leastPing" }
     })
+}
+
+fn set_program_balancer(balancer: &mut Value, tags: &[String]) -> AppResult<()> {
+    set_selector(balancer, tags)?;
+    balancer.as_object_mut()
+        .ok_or("Балансировщик должен быть JSON-объектом.")?
+        .insert("fallbackTag".to_owned(), Value::String("direct".to_owned()));
+    Ok(())
 }
 
 fn set_selector(balancer: &mut Value, tags: &[String]) -> AppResult<()> {
@@ -279,6 +288,7 @@ mod tests {
             config["routing"]["balancers"][0]["selector"],
             json!(["sub1--node", "custom"])
         );
+        assert_eq!(config["routing"]["balancers"][0]["fallbackTag"], "direct");
     }
 
     #[test]
@@ -382,6 +392,14 @@ mod tests {
             config["routing"]["balancers"][1]["selector"],
             json!(["sub1--node", "custom"])
         );
+        assert_eq!(config["routing"]["balancers"][1]["fallbackTag"], "direct");
+    }
+
+    #[test]
+    fn case_one_adds_direct_fallback_to_new_program_balancer() {
+        let mut config = json!({"routing":{"rules":[]}});
+        prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
+        assert_eq!(config["routing"]["balancers"][0]["fallbackTag"], "direct");
     }
 
     #[test]

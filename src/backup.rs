@@ -331,7 +331,7 @@ impl BackupSession {
 
     pub(crate) fn finish(&mut self) -> AppResult<()> {
         if self.finished {
-            return Ok(false);
+            return Ok(());
         }
         self.event("UPDATE", &self.outcome_summary.clone())?;
         let existing = fs::read_to_string(&self.log_path)?;

@@ -74,6 +74,7 @@ impl StagingDirectory {
         for operation in plan {
             validate_target(operation)?;
             let Some(path) = self.file_for(operation)? else {
+                progress.advance("Подготовка файлов");
                 staged.push(None);
                 continue;
             };

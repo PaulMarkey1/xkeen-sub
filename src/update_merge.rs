@@ -169,9 +169,28 @@ pub(crate) fn collect_tags(outbounds: &[Value]) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_outbound, subscription_id_number, subscription_number, ArchivePlan};
+    use super::{archive_outbound, collect_selector_tags, subscription_id_number, subscription_number, ArchivePlan};
     use crate::outbound_compare::outbound_parameters_equal;
     use serde_json::json;
+
+    #[test]
+    fn selector_tags_exclude_service_protocols_and_api_tag() {
+        use std::collections::HashSet;
+        let outbounds = vec![
+            json!({"tag":"dns-out","protocol":"dns"}),
+            json!({"tag":"loop","protocol":"loopback"}),
+            json!({"tag":"direct","protocol":"freedom"}),
+            json!({"tag":"reject","protocol":"blackhole"}),
+            json!({"tag":"api-out","protocol":"dokodemo-door"}),
+            json!({"tag":"vless-node","protocol":"vless"}),
+            json!({"tag":"socks-node","protocol":"socks"}),
+        ];
+        let api_tags: HashSet<String> = ["api-out".to_owned()].into_iter().collect();
+
+        let tags = collect_selector_tags(&outbounds, &api_tags).unwrap();
+
+        assert_eq!(tags, vec!["vless-node", "socks-node"]);
+    }
 
     #[test]
     fn identifies_subscription_tags() {

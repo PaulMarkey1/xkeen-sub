@@ -29,6 +29,7 @@ struct ConfigDocument {
     file_name: String,
     path: PathBuf,
     original: String,
+    original_value: Value,
     value: Value,
 }
 
@@ -695,7 +696,13 @@ fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
             .map_err(|err| format!("Ошибка разбора {}: {err}", path.display()))?;
         let file_name = path.file_name().and_then(|n| n.to_str())
             .ok_or("Не удалось определить имя конфигурационного файла.")?.to_owned();
-        docs.push(ConfigDocument { file_name, path, original, value });
+        docs.push(ConfigDocument {
+            file_name,
+            path,
+            original,
+            original_value: value.clone(),
+            value,
+        });
     }
     Ok(docs)
 }
@@ -896,9 +903,11 @@ fn build_file_plan(
     let mut plan: BTreeMap<PathBuf, PlannedFileOperation> = BTreeMap::new();
 
     for doc in docs {
-        let mut content = serde_json::to_vec_pretty(&doc.value)?;
-        content.push(b'\n');
-        if content != doc.original.as_bytes() {
+        // Keep untouched JSON/JSON5 files byte-for-byte as they were read.
+        // Re-serialize only documents whose parsed configuration was changed.
+        if doc.value != doc.original_value {
+            let mut content = serde_json::to_vec_pretty(&doc.value)?;
+            content.push(b'\n');
             plan.insert(doc.path.clone(), PlannedFileOperation {
                 path: doc.path.clone(),
                 category: "Конфигурация Xray",
@@ -1027,6 +1036,7 @@ mod file_plan_tests {
             file_name: "config.json".to_owned(),
             path: root.join("config.json"),
             original: String::from_utf8(original).unwrap(),
+            original_value: value.clone(),
             value,
         };
         let state = RunState {
@@ -1041,6 +1051,54 @@ mod file_plan_tests {
 
         let plan = build_file_plan(&[doc], &state, &archive).unwrap();
         assert!(plan.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unchanged_parsed_config_is_not_rewritten_when_source_format_differs() {
+        let root = temporary_path("plan-semantic-equality");
+        fs::create_dir_all(&root).unwrap();
+
+        let original = "{\n  // Keep this comment and formatting.\n  \"log\": { \"loglevel\": \"warning\" }\n}\n";
+        let value = serde_json::from_str::<serde_json::Value>(
+            r#"{ "log": { "loglevel": "warning" } }"#,
+        ).unwrap();
+        let doc = ConfigDocument {
+            file_name: "01_log.json".to_owned(),
+            path: root.join("01_log.json"),
+            original: original.to_owned(),
+            original_value: value.clone(),
+            value,
+        };
+        let state = RunState::default();
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[doc], &state, &archive).unwrap();
+        assert!(plan.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn changed_parsed_config_is_included_in_file_plan() {
+        let root = temporary_path("plan-semantic-change");
+        fs::create_dir_all(&root).unwrap();
+
+        let original_value = json!({"log":{"loglevel":"warning"}});
+        let current_value = json!({"log":{"loglevel":"debug"}});
+        let doc = ConfigDocument {
+            file_name: "01_log.json".to_owned(),
+            path: root.join("01_log.json"),
+            original: r#"{ "log": { "loglevel": "warning" } }"#.to_owned(),
+            original_value,
+            value: current_value,
+        };
+        let state = RunState::default();
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[doc], &state, &archive).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, PlannedOperationKind::Replace);
+        assert_eq!(plan[0].path, root.join("01_log.json"));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -331,7 +331,7 @@ impl BackupSession {
 
     pub(crate) fn finish(&mut self) -> AppResult<()> {
         if self.finished {
-            return Ok(());
+            return Ok(false);
         }
         self.event("UPDATE", &self.outcome_summary.clone())?;
         let existing = fs::read_to_string(&self.log_path)?;
@@ -378,15 +378,15 @@ impl BackupSession {
 }
 
 pub fn run() -> AppResult<()> {
-    run_menu()
+    run_menu().map(|_| ())
 }
 
 pub fn run_command(args: &[String]) -> AppResult<()> {
     match args {
-        [] => run_menu(),
+        [] => run_menu().map(|_| ()),
         [action] if action == "help" => { print_help(); Ok(()) },
-        [action] if action == "list" => list_interactive(),
-        [action, id] if action == "list" => show_record_menu(id),
+        [action] if action == "list" => list_interactive().map(|_| ()),
+        [action, id] if action == "list" => show_record_menu(id).map(|_| ()),
         [action, value] if action == "days" => {
             let days = u32::try_from(parse_number(value, MIN_RETENTION_DAYS as u64, "срок хранения")?)
                 .map_err(|_| "Срок хранения слишком велик.")?;
@@ -419,7 +419,7 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
     }
 }
 
-fn run_menu() -> AppResult<()> {
+fn run_menu() -> AppResult<bool> {
     loop {
         let settings = load_settings()?;
         println!();
@@ -431,14 +431,16 @@ fn run_menu() -> AppResult<()> {
         menu_item("3", &format!("Режим хранения: {}", mode_label(&settings.mode)));
         menu_item("4", "Просмотреть резервные копии");
         menu_item("5", "Назад");
-        let choice = read_input("Введите соответствующую цифру для изменения параметра: ")?;
+        menu_item("0", "Выход");
+        let choice = read_input("Выберите действие: ")?;
         match choice.as_str() {
             "1" => change_days()?,
             "2" => change_limit()?,
             "3" => change_mode()?,
-            "4" => list_interactive()?,
-            "5" => return Ok(()),
-            _ => error("Неизвестный пункт меню. Введите цифру от 1 до 5."),
+            "4" => { if list_interactive()? { return Ok(true); } },
+            "5" => return Ok(false),
+            "0" => return Ok(true),
+            _ => error("Выберите пункт от 1 до 5 или 0 для выхода."),
         }
     }
 }
@@ -513,7 +515,7 @@ fn change_mode() -> AppResult<()> {
     }
 }
 
-fn list_interactive() -> AppResult<()> {
+fn list_interactive() -> AppResult<bool> {
     loop {
         let records = load_records()?;
         title("XKEEN-SUB — РЕЗЕРВНЫЕ КОПИИ");
@@ -546,21 +548,24 @@ fn list_interactive() -> AppResult<()> {
         }));
         info(&format!("Дневной лимит: {}", settings.daily_limit));
 
-        let input = read_input("Введите номер записи для просмотра или 0 для выхода: ")?;
+        let input = read_input("Введите номер записи, 0 — назад, 9 — выход: ")?;
         if input == "0" {
-            return Ok(());
+            return Ok(false);
+        }
+        if input == "9" {
+            return Ok(true);
         }
         match input.parse::<usize>() {
             Ok(number) if (1..=records.len()).contains(&number) => {
                 let id = records[number - 1].id.clone();
-                show_record_menu(&id)?;
+                if show_record_menu(&id)? { return Ok(true); }
             }
-            _ => error(&format!("Введите номер от 1 до {} или 0.", records.len())),
+            _ => error(&format!("Введите номер от 1 до {}, 0 или 9.", records.len())),
         }
     }
 }
 
-fn show_record_menu(id: &str) -> AppResult<()> {
+fn show_record_menu(id: &str) -> AppResult<bool> {
     let record = find_record(id)?;
     loop {
         let summary = read_summary(&record.path.join("log.txt"));
@@ -577,7 +582,8 @@ fn show_record_menu(id: &str) -> AppResult<()> {
         menu_item("3", "Восстановить резервную копию");
         menu_item("4", "Удалить резервную копию");
         menu_item("5", "Назад");
-        match read_input("Введите соответствующую цифру: ")?.as_str() {
+        menu_item("0", "Выход");
+        match read_input("Выберите действие: ")?.as_str() {
             "1" => show_log(&record.path.join("log.txt"))?,
             "2" => show_files(&record)?,
             "3" => restore_record(&record)?,
@@ -589,11 +595,12 @@ fn show_record_menu(id: &str) -> AppResult<()> {
                 if confirm(&format!("Удалить резервную запись {}? Это действие нельзя отменить.", record.id))? {
                     fs::remove_dir_all(&record.path)?;
                     success("Резервная копия удалена.");
-                    return Ok(());
+                    return Ok(false);
                 }
             }
-            "5" => return Ok(()),
-            _ => error("Неизвестный пункт. Введите цифру от 1 до 5."),
+            "5" => return Ok(false),
+            "0" => return Ok(true),
+            _ => error("Выберите пункт от 1 до 5 или 0 для выхода."),
         }
     }
 }

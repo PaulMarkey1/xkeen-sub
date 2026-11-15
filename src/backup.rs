@@ -6,7 +6,6 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
 
@@ -973,8 +972,6 @@ fn read_file_metadata(log_path: &Path, source: &Path) -> AppResult<Option<FileMe
     Ok(None)
 }
 
-static RESTORE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) -> AppResult<()> {
     let parent = path.parent().ok_or("Не удалось определить каталог восстанавливаемого файла.")?;
     fs::create_dir_all(parent)?;
@@ -983,7 +980,7 @@ fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) 
             return Err(format!("Нельзя восстановить файл поверх небезопасного объекта: {}", path.display()).into());
         }
     }
-    let counter = RESTORE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let counter = crate::temp_counter::next();
     let name = path.file_name().and_then(|value| value.to_str()).ok_or("Недопустимое имя файла восстановления.")?;
     let temporary = parent.join(format!(".{name}.xkeen-sub-restore-{}-{counter}.tmp", std::process::id()));
     let mut temporary_created = false;

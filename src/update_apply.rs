@@ -5,7 +5,6 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -109,8 +108,6 @@ impl Drop for StagingDirectory {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
-
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession) -> AppResult<()> {
     if plan.is_empty() {
@@ -327,7 +324,7 @@ fn apply_one(operation: &PlannedFileOperation, staged: Option<&Path>) -> Result<
             let expected = operation.content.as_deref().ok_or_else(|| ("Не задано содержимое операции.".to_owned(), false))?;
             let parent = operation.path.parent().ok_or_else(|| ("Не определён каталог назначения.".to_owned(), false))?;
             let name = operation.path.file_name().and_then(|value| value.to_str()).ok_or_else(|| ("Недопустимое имя целевого файла.".to_owned(), false))?;
-            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let counter = crate::temp_counter::next();
             let temporary = parent.join(format!(".{name}.xkeen-sub-{}-{counter}.tmp", std::process::id()));
             let mut temporary_created = false;
             let mut destination_mutated = false;

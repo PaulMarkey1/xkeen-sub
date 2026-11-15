@@ -10,6 +10,7 @@ mod subscriptions;
 mod subscription_download;
 mod subscription_parser;
 mod terminal;
+mod temp_counter;
 mod xray_test;
 mod update;
 mod update_merge;

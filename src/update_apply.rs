@@ -1,7 +1,7 @@
 use crate::backup::BackupSession;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -565,55 +565,22 @@ fn retry_remove_created(path: &Path, expected: &[u8], backup: &mut BackupSession
 
 struct CommandResult {
     code: Option<i32>,
-    success: bool,
-    stdout: String,
-    stderr: String,
     timed_out: bool,
-}
-
-fn should_capture_output(args: &[&str]) -> bool {
-    args == ["-status"]
 }
 
 fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResult> {
     let command_text = format!("XKEEN_FOREGROUND=1 xkeen {}", args.join(" "));
     let started = timestamp();
     backup.event("COMMAND", &format!("Команда: {command_text}; начало: {started}."))?;
-    // Only -status needs captured output for state detection. The -start and
-    // -stop commands may launch/stop background processes that inherit their
-    // parent's file descriptors. Piped descriptors would then remain open and
-    // make the reader threads block forever in read_to_end()/join(), even after
-    // the xkeen command itself has exited. Null stdio keeps those commands
-    // independent from any daemon process they spawn.
-    let capture_output = should_capture_output(args);
-    let stdout_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
-    let stderr_stdio = if capture_output { Stdio::piped() } else { Stdio::null() };
+    // Не захватываем stdout/stderr: команды XKeen могут запускать фоновые
+    // процессы, которые наследуют файловые дескрипторы родителя.
     let mut child = match Command::new("xkeen").args(args).env("XKEEN_FOREGROUND", "1")
-        .stdout(stdout_stdio).stderr(stderr_stdio).spawn() {
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(child) => child,
         Err(error) => {
             backup.event("COMMAND", &format!("Команда: {command_text}; ошибка запуска: {error}; завершение: {}.", timestamp()))?;
             return Err(format!("Не удалось запустить {command_text}: {error}").into());
         }
-    };
-    let (out_thread, err_thread) = if capture_output {
-        let stdout = child.stdout.take().ok_or("Не удалось получить stdout команды XKeen.")?;
-        let stderr = child.stderr.take().ok_or("Не удалось получить stderr команды XKeen.")?;
-        let out_thread = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let mut reader = stdout;
-            let _ = reader.read_to_end(&mut bytes);
-            bytes
-        });
-        let err_thread = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let mut reader = stderr;
-            let _ = reader.read_to_end(&mut bytes);
-            bytes
-        });
-        (Some(out_thread), Some(err_thread))
-    } else {
-        (None, None)
     };
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let (status, timed_out) = loop {
@@ -625,56 +592,100 @@ fn run_xkeen(args: &[&str], backup: &mut BackupSession) -> AppResult<CommandResu
         }
         thread::sleep(Duration::from_millis(100));
     };
-    let stdout = out_thread
-        .and_then(|handle| handle.join().ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    let stderr = err_thread
-        .and_then(|handle| handle.join().ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
     let code = status.as_ref().and_then(|value| value.code());
-    let successful = status.as_ref().map(|value| value.success()).unwrap_or(false) && !timed_out;
-    let ended = timestamp();
     backup.event("COMMAND", &format!(
-        "Команда: {command_text}; завершение: {ended}; exit_code: {:?}; timeout: {}.\nstdout:\n{}\nstderr:\n{}",
-        code, timed_out, if stdout.is_empty() { "<пусто>" } else { &stdout }, if stderr.is_empty() { "<пусто>" } else { &stderr }
+        "Команда: {command_text}; завершение: {}; exit_code: {:?}; timeout: {}.",
+        timestamp(), code, timed_out
     ))?;
-    Ok(CommandResult { code, success: successful, stdout, stderr, timed_out })
+    Ok(CommandResult { code, timed_out })
+}
+
+// Повторяет критерии proxy_pids() из XKeen:
+// учитывается только процесс xray с рабочей командой, а одноразовые
+// test/dump и help/version исключаются.
+fn is_xray_proxy_cmdline(cmdline: &[u8]) -> bool {
+    let mut args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+    while args.last().map_or(false, |arg| arg.is_empty()) {
+        args.pop();
+    }
+    if args.is_empty() || args[0].is_empty() {
+        return false;
+    }
+
+    let one_shot = args.iter().skip(1).any(|arg| {
+        *arg == b"-test" || *arg == b"--test" || *arg == b"-test=true" || *arg == b"--test=true"
+            || *arg == b"-dump" || *arg == b"--dump" || *arg == b"-dump=true" || *arg == b"--dump=true"
+    });
+    if one_shot {
+        return false;
+    }
+
+    if args.len() == 1 {
+        return true;
+    }
+
+    let command = args[1];
+    command == b"run"
+        || (command.starts_with(b"-")
+            && command != b"-h" && command != b"--h" && command != b"-help"
+            && command != b"--help" && command != b"-version" && command != b"--version")
+}
+
+fn xray_process_running() -> std::io::Result<bool> {
+    for entry in fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let process_dir = entry.path();
+        let comm = match fs::read_to_string(process_dir.join("comm")) {
+            Ok(comm) => comm,
+            Err(_) => continue, // Процесс мог завершиться во время обхода.
+        };
+        if comm.trim_end() != "xray" {
+            continue;
+        }
+        let cmdline = match fs::read(process_dir.join("cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(_) => continue,
+        };
+        if is_xray_proxy_cmdline(&cmdline) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 const STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-fn wait_for_stopped_status(backup: &mut BackupSession) -> AppResult<CommandResult> {
+fn wait_for_stopped_status(backup: &mut BackupSession) -> AppResult<bool> {
     let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
-    let mut last_status = None;
     loop {
-        let status = run_xkeen(&["-status"], backup)?;
-        let stopped = !status.timed_out && is_stopped_status(status.code, &status.stdout);
-        if stopped {
-            return Ok(status);
+        let running = xray_process_running()
+            .map_err(|error| format!("Не удалось проверить процессы Xray в /proc: {error}"))?;
+        if !running {
+            backup.event("XKEEN", "Проверка процесса: рабочий процесс Xray остановлен.")?;
+            return Ok(true);
         }
-        last_status = Some(status);
         if Instant::now() >= deadline {
-            return Ok(last_status.expect("at least one status check was performed"));
+            return Ok(false);
         }
         thread::sleep(STATUS_POLL_INTERVAL);
     }
 }
 
-fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<CommandResult> {
+fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<bool> {
     let deadline = Instant::now() + STATUS_POLL_TIMEOUT;
-    let mut last_status = None;
     loop {
-        let status = run_xkeen(&["-status"], backup)?;
-        let running = !status.timed_out && is_running_status(status.code, &status.stdout);
+        let running = xray_process_running()
+            .map_err(|error| format!("Не удалось проверить процессы Xray в /proc: {error}"))?;
         if running {
-            return Ok(status);
+            backup.event("XKEEN", "Проверка процесса: рабочий процесс Xray запущен.")?;
+            return Ok(true);
         }
-        last_status = Some(status);
         if Instant::now() >= deadline {
-            return Ok(last_status.expect("at least one status check was performed"));
+            return Ok(false);
         }
         thread::sleep(STATUS_POLL_INTERVAL);
     }
@@ -682,132 +693,116 @@ fn wait_for_running_status(backup: &mut BackupSession) -> AppResult<CommandResul
 
 fn restart_xkeen(backup: &mut BackupSession) -> AppResult<()> {
     let stop = run_xkeen(&["-stop"], backup);
-    // The status command is authoritative: the stop command may return before
-    // XKeen has finished stopping.
-    let status = wait_for_stopped_status(backup);
+    let stopped = wait_for_stopped_status(backup)?;
     let stop_description = match &stop {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),
     };
-    let status_description = match &status {
-        Ok(result) => format!("exit_code={:?}, timeout={}, stdout={}", result.code, result.timed_out, result.stdout),
-        Err(error) => format!("ошибка проверки статуса: {error}"),
-    };
-    let stopped = matches!(&status, Ok(result) if !result.timed_out && is_stopped_status(result.code, &result.stdout));
     backup.event("XKEEN", &format!(
-        "Проверка остановки: состояние остановлено={stopped}; {stop_description}; {status_description}"
+        "Проверка остановки: рабочий процесс Xray остановлен={stopped}; {stop_description}"
     ))?;
     if !stopped {
         return Err(format!(
-            "Остановка XKeen не подтверждена: {stop_description}; {status_description}"
+            "Остановка XKeen не подтверждена: рабочий процесс Xray всё ещё обнаруживается; {stop_description}"
         ).into());
     }
 
     let start = run_xkeen(&["-start"], backup);
-    // The final status is authoritative; routing mode does not determine
-    // whether the proxy process is running.
-    let status = wait_for_running_status(backup)?;
-    let running = !status.timed_out && is_running_status(status.code, &status.stdout);
+    let running = wait_for_running_status(backup)?;
     let start_description = match &start {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),
     };
     backup.event("XKEEN", &format!(
-        "Проверка запуска: состояние запущено={running}; {start_description}; status_code={:?}; stdout={}.",
-        status.code, status.stdout
+        "Проверка запуска: рабочий процесс Xray запущен={running}; {start_description}."
     ))?;
     if !running {
         return Err(format!(
-            "Запуск XKeen не подтверждён: {start_description}; exit_code={:?}; stdout={}",
-            status.code, status.stdout
+            "Запуск XKeen не подтверждён: рабочий процесс Xray не обнаружен; {start_description}"
         ).into());
     }
-    backup.event("XKEEN", "Остановка, запуск и проверка статуса XKeen завершились успешно.")?;
+    backup.event("XKEEN", "Остановка, запуск и проверка рабочего процесса Xray завершились успешно.")?;
     Ok(())
 }
 
 fn start_after_rollback(backup: &mut BackupSession) -> String {
     let start = run_xkeen(&["-start"], backup);
-    // The final status is authoritative; routing mode does not determine
-    // whether the proxy process is running.
     let status = wait_for_running_status(backup);
 
-    let running = matches!(&status, Ok(result) if !result.timed_out && is_running_status(result.code, &result.stdout));
+    let running = matches!(status, Ok(true));
     let start_description = match &start {
         Ok(result) => format!("exit_code={:?}, timeout={}", result.code, result.timed_out),
         Err(error) => format!("ошибка запуска команды: {error}"),
     };
     let status_description = match &status {
-        Ok(result) => format!("exit_code={:?}, stdout={}", result.code, result.stdout),
-        Err(error) => format!("ошибка проверки статуса: {error}"),
+        Ok(true) => "рабочий процесс Xray обнаружен".to_owned(),
+        Ok(false) => "рабочий процесс Xray не обнаружен по истечении тайм-аута".to_owned(),
+        Err(error) => format!("ошибка проверки процессов: {error}"),
     };
     backup.event("ROLLBACK", &format!(
-        "Результат запуска XKeen после отката: состояние запущено={running}; {start_description}; {status_description}"
+        "Результат запуска XKeen после отката: рабочий процесс Xray запущен={running}; {start_description}; {status_description}"
     )).ok();
 
     if running {
-        "запущен, статус подтверждён".to_owned()
+        "запущен, процесс Xray подтверждён".to_owned()
     } else {
         let message = format!(
-            "Не удалось подтвердить запуск XKeen после отката: состояние запущено={running}; {start_description}; {status_description}"
+            "Не удалось подтвердить запуск XKeen после отката: {start_description}; {status_description}"
         );
         backup.event("ERROR", &message).ok();
         message
     }
 }
 
-fn is_stopped_status(code: Option<i32>, stdout: &str) -> bool {
-    code == Some(1) && stdout.to_lowercase().contains("прокси-клиент не запущен")
-}
-
-fn is_running_status(code: Option<i32>, stdout: &str) -> bool {
-    let normalized = stdout.to_lowercase();
-    code == Some(0)
-        && normalized.contains("прокси-клиент")
-        && normalized.contains("запущен")
-        && !normalized.contains("не запущен")
-}
 
 #[cfg(test)]
-mod status_tests {
-    use super::{is_running_status, is_stopped_status};
+mod process_tests {
+    use super::is_xray_proxy_cmdline;
 
     #[test]
-    fn captures_output_only_for_status_commands() {
-        use super::should_capture_output;
-
-        assert!(should_capture_output(&["-status"]));
-        assert!(!should_capture_output(&["-start"]));
-        assert!(!should_capture_output(&["-stop"]));
+    fn accepts_xray_without_arguments() {
+        assert!(is_xray_proxy_cmdline(b"xray\0"));
     }
 
     #[test]
-    fn accepts_only_explicit_stopped_status_with_expected_exit_code() {
-        assert!(is_stopped_status(Some(1), "Прокси-клиент не запущен"));
-        assert!(!is_stopped_status(Some(0), "Прокси-клиент не запущен"));
-        assert!(!is_stopped_status(Some(1), "не удалось определить статус"));
+    fn accepts_xray_run_command() {
+        assert!(is_xray_proxy_cmdline(b"xray\0run\0-config\0/etc/xray/config.json\0"));
     }
 
     #[test]
-    fn accepts_all_documented_xkeen_proxy_modes_as_running() {
-        for mode in ["TProxy", "Hybrid", "Redirect", "Other", "FutureMode"] {
-            let output = format!("Прокси-клиент xray запущен в режиме {mode}");
-            assert!(is_running_status(Some(0), &output), "mode {mode} must not affect process state");
+    fn accepts_supported_option_based_commands() {
+        assert!(is_xray_proxy_cmdline(b"xray\0-config\0/etc/xray/config.json\0"));
+    }
+
+    #[test]
+    fn rejects_one_shot_test_and_dump_commands() {
+        for flag in [
+            b"-test".as_slice(), b"--test", b"-test=true", b"--test=true",
+            b"-dump", b"--dump", b"-dump=true", b"--dump=true",
+        ] {
+            let mut cmdline = b"xray\0run\0".to_vec();
+            cmdline.extend_from_slice(flag);
+            cmdline.push(0);
+            assert!(!is_xray_proxy_cmdline(&cmdline), "flag {:?} must be excluded", flag);
         }
     }
 
     #[test]
-    fn accepts_legacy_mixed_mode_name_as_running() {
-        assert!(is_running_status(Some(0), "Прокси-клиент xray запущен в режиме Mixed"));
+    fn rejects_help_and_version_commands() {
+        for command in [
+            b"-h".as_slice(), b"--h", b"-help", b"--help", b"-version", b"--version",
+        ] {
+            let mut cmdline = b"xray\0".to_vec();
+            cmdline.extend_from_slice(command);
+            cmdline.push(0);
+            assert!(!is_xray_proxy_cmdline(&cmdline));
+        }
     }
 
     #[test]
-    fn rejects_nonzero_or_negative_running_status() {
-        assert!(is_running_status(Some(0), "Прокси-клиент запущен"));
-        assert!(!is_running_status(Some(1), "Прокси-клиент запущен"));
-        assert!(!is_running_status(Some(0), "Прокси-клиент не запущен"));
-        assert!(!is_running_status(Some(0), "Прокси-клиент НЕ запущен"));
-        assert!(!is_running_status(Some(0), "не удалось определить статус"));
+    fn rejects_empty_or_malformed_command_lines() {
+        assert!(!is_xray_proxy_cmdline(b""));
+        assert!(!is_xray_proxy_cmdline(b"\0"));
     }
 }
 

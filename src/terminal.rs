@@ -18,6 +18,10 @@ pub fn menu_item(number: &str, message: &str) {
     println!("{YELLOW}{number}{RESET}. {message}");
 }
 
+pub fn menu_item_prefix(number: &str, prefix: &str, message: &str) {
+    println!("{YELLOW}{number}{RESET}. {CYAN}{prefix}{RESET} — {message}");
+}
+
 pub fn command_item(command: &str, description: &str) {
     println!("  {CYAN}{command:<27}{RESET} {description}");
 }

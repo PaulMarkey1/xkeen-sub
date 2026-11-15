@@ -1,4 +1,5 @@
 use crate::backup::BackupSession;
+use crate::terminal::ProgressBar;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -68,7 +69,7 @@ impl StagingDirectory {
         Ok(Some(self.root.join(folder).join(name)))
     }
 
-    fn prepare(&self, plan: &[PlannedFileOperation], backup: &mut BackupSession) -> AppResult<Vec<Option<PathBuf>>> {
+    fn prepare(&self, plan: &[PlannedFileOperation], backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<Vec<Option<PathBuf>>> {
         let mut staged = Vec::with_capacity(plan.len());
         for operation in plan {
             validate_target(operation)?;
@@ -86,6 +87,7 @@ impl StagingDirectory {
                 return Err(format!("Побайтовая проверка staging-файла не пройдена: {}", path.display()).into());
             }
             backup.event("STAGING", &format!("Подготовлен и проверен файл: {}.", path.display()))?;
+            progress.advance("Подготовка файлов");
             staged.push(Some(path));
         }
         Ok(staged)
@@ -109,14 +111,14 @@ impl Drop for StagingDirectory {
     }
 }
 
-pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession) -> AppResult<()> {
+pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
     if plan.is_empty() {
         backup.event("APPLY", "План пуст: изменения файлов не требуются; перезапуск XKeen пропущен.")?;
         return Ok(());
     }
 
     let staging = StagingDirectory::create()?;
-    let staged = match staging.prepare(plan, backup) {
+    let staged = match staging.prepare(plan, backup, progress) {
         Ok(staged) => staged,
         Err(error) => {
             backup.event("ERROR", &format!("Подготовка staging завершилась ошибкой; применение не начиналось: {error}"))?;
@@ -172,6 +174,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         match apply_one(&plan[index], staged[index].as_deref()) {
             Ok(()) => {
                 applied.push(index);
+                progress.advance("Применение изменений");
                 if let Err(log_error) = backup.event("APPLY", &format!("Операция применена: {:?} {}.", plan[index].kind, plan[index].path.display())) {
                     let message = format!("Не удалось записать результат применения {} в журнал: {log_error}", plan[index].path.display());
                     let rollback = rollback(plan, &staged, &applied, backup);
@@ -193,7 +196,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         }
     }
 
-    if let Err(error) = verify_applied(plan, &staged, backup) {
+    if let Err(error) = verify_applied(plan, &staged, backup, progress) {
         backup.event("ERROR", &format!("Контроль итогового состояния файлов не пройден: {error}")).ok();
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
@@ -211,6 +214,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession)
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
     }
 
+    progress.advance("Перезапуск XKeen подтверждён");
     if let Err(log_error) = backup.event("APPLY", "Все файлы применены и проверены; XKeen запущен, статус подтверждён.") {
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
@@ -413,7 +417,7 @@ fn set_owner(path: &Path, uid: u32, gid: u32) -> AppResult<()> {
     Ok(())
 }
 
-fn verify_applied(plan: &[PlannedFileOperation], staged: &[Option<PathBuf>], backup: &mut BackupSession) -> AppResult<()> {
+fn verify_applied(plan: &[PlannedFileOperation], staged: &[Option<PathBuf>], backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
     for (index, operation) in plan.iter().enumerate() {
         match operation.kind {
             PlannedOperationKind::Delete => {
@@ -433,6 +437,7 @@ fn verify_applied(plan: &[PlannedFileOperation], staged: &[Option<PathBuf>], bac
             }
         }
         backup.event("VERIFY", &format!("Итоговое состояние подтверждено: {}.", operation.path.display()))?;
+        progress.advance("Проверка файлов");
     }
     Ok(())
 }

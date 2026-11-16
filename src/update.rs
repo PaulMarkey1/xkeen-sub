@@ -613,8 +613,20 @@ fn prepare_subscription(
     if let Some(previous_json) = previous_json.as_deref() {
         if byte_contents_equal(Some(previous_json), &current_json) {
             state.processed += 1;
-            success("Состав подключений не изменился. Рабочие файлы останутся прежними.");
-            backup.event("COMPARE", &format!("{}: уровень 2 — сформированные Outbound совпадают побайтно.", subscription.id))?;
+            state.baseline_updates.push(PreparedBaseline {
+                id: subscription.id.clone(),
+                original: downloaded,
+                path: baseline.clone(),
+            });
+            success("Состав поддерживаемых подключений не изменился. Будет обновлён только baseline.");
+            backup.event("COMPARE", &format!(
+                "{}: уровень 2 — сформированные Outbound совпадают побайтно; подготовлено обновление только baseline.",
+                subscription.id
+            ))?;
+            backup.event("BASELINE", &format!(
+                "{}: исходные байты подписки изменились, но поддерживаемые Outbound прежние; новая версия подготовлена для baseline.",
+                subscription.id
+            ))?;
             return Ok(());
         }
         info("Состав подключений изменился. Теперь проверяем каждое подключение отдельно.");

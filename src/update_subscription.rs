@@ -341,6 +341,21 @@ mod subscription_comparison_tests {
     }
 
     #[test]
+    fn baseline_path_supports_subscriptions_without_a_name() {
+        let subscription = Subscription {
+            id: "sub4".to_owned(),
+            name: None,
+            url: "https://example.test/sub".to_owned(),
+            prefix: "sub4--".to_owned(),
+        };
+
+        assert_eq!(
+            baseline_path(&subscription).unwrap(),
+            Path::new("/opt/etc/xkeen-sub/baseline/sub4.json")
+        );
+    }
+
+    #[test]
     fn baseline_path_rejects_path_separators_in_subscription_name() {
         let subscription = Subscription {
             id: "sub1".to_owned(),

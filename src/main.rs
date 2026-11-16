@@ -7,6 +7,7 @@ mod observatory;
 mod outbound_compare;
 mod setup;
 mod subscriptions;
+mod system;
 mod subscription_download;
 mod subscription_identity;
 mod subscription_parser;

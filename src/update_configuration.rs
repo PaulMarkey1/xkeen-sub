@@ -8,7 +8,7 @@ use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROG
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
 use crate::subscriptions::Subscription;
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
-use crate::update::{PreparedSubscription, RunState};
+use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan};

@@ -113,6 +113,22 @@ impl Drop for StagingDirectory {
 }
 
 pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
+    execute_internal(plan, backup, progress, true)
+}
+
+pub(crate) fn execute_baseline_only(plan: &[PlannedFileOperation], backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
+    if plan.iter().any(|operation| operation.category != "Baseline" && operation.category != "Повреждённый baseline") {
+        return Err("В режиме обновления только baseline обнаружена посторонняя файловая операция.".into());
+    }
+    execute_internal(plan, backup, progress, false)
+}
+
+fn execute_internal(
+    plan: &[PlannedFileOperation],
+    backup: &mut BackupSession,
+    progress: &mut ProgressBar,
+    restart_service: bool,
+) -> AppResult<()> {
     if plan.is_empty() {
         backup.event("APPLY", "План пуст: изменения файлов не требуются; перезапуск XKeen пропущен.")?;
         return Ok(());
@@ -143,7 +159,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
                     backup.event("ERROR", &format!("Не удалось подготовить каталог baseline: {error}")).ok();
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
-                    let restart = start_after_rollback(backup);
+                    let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
                     let _ = staging.cleanup(backup);
                     return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
                 }
@@ -157,7 +173,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
                     backup.event("ERROR", &message).ok();
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
-                    let restart = start_after_rollback(backup);
+                    let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
                     let _ = staging.cleanup(backup);
                     return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
                 }
@@ -166,7 +182,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
                     backup.event("ERROR", &message).ok();
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
-                    let restart = start_after_rollback(backup);
+                    let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
                     let _ = staging.cleanup(backup);
                     return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
                 }
@@ -180,7 +196,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
                     let message = format!("Не удалось записать результат применения {} в журнал: {log_error}", plan[index].path.display());
                     let rollback = rollback(plan, &staged, &applied, backup);
                     cleanup_created_baseline_directory(baseline_directory_created, backup);
-                    let restart = start_after_rollback(backup);
+                    let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
                     let _ = staging.cleanup(backup);
                     return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
                 }
@@ -190,7 +206,7 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
                 backup.event("ERROR", &format!("Ошибка применения {}: {message}", plan[index].path.display())).ok();
                 let rollback = rollback(plan, &staged, &applied, backup);
                 cleanup_created_baseline_directory(baseline_directory_created, backup);
-                let restart = start_after_rollback(backup);
+                let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
                 let _ = staging.cleanup(backup);
                 return Err(format!("{message}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
             }
@@ -201,24 +217,31 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
         backup.event("ERROR", &format!("Контроль итогового состояния файлов не пройден: {error}")).ok();
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
-        let restart = start_after_rollback(backup);
+        let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
         let _ = staging.cleanup(backup);
         return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
     }
 
-    if let Err(error) = restart_xkeen(backup, progress) {
-        backup.event("ERROR", &format!("Перезапуск или проверка XKeen завершились ошибкой: {error}")).ok();
-        let rollback = rollback(plan, &staged, &applied, backup);
-        cleanup_created_baseline_directory(baseline_directory_created, backup);
-        let restart = start_after_rollback(backup);
-        let _ = staging.cleanup(backup);
-        return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+    if restart_service {
+        if let Err(error) = restart_xkeen(backup, progress) {
+            backup.event("ERROR", &format!("Перезапуск или проверка XKeen завершились ошибкой: {error}")).ok();
+            let rollback = rollback(plan, &staged, &applied, backup);
+            cleanup_created_baseline_directory(baseline_directory_created, backup);
+            let restart = start_after_rollback(backup);
+            let _ = staging.cleanup(backup);
+            return Err(format!("{error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
+        }
     }
 
-    if let Err(log_error) = backup.event("APPLY", "Все файлы применены и проверены; XKeen запущен, статус подтверждён.") {
+    let completion_message = if restart_service {
+        "Все файлы применены и проверены; XKeen запущен, статус подтверждён."
+    } else {
+        "Baseline применён и проверен. Рабочие файлы не изменялись; перезапуск XKeen пропущен."
+    };
+    if let Err(log_error) = backup.event("APPLY", completion_message) {
         let rollback = rollback(plan, &staged, &applied, backup);
         cleanup_created_baseline_directory(baseline_directory_created, backup);
-        let restart = start_after_rollback(backup);
+        let restart = if restart_service { start_after_rollback(backup) } else { "не требовался".to_owned() };
         let _ = staging.cleanup(backup);
         return Err(format!("Не удалось записать итог успешного применения в журнал: {log_error}; откат: {}; запуск XKeen после отката: {}", rollback, restart).into());
     }

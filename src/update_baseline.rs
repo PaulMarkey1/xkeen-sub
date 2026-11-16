@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use crate::backup::{BackupSession, BackupSource};
-use crate::terminal::{info, success, title, ProgressBar};
+use crate::terminal::{success, title, ProgressBar};
 use crate::update_state::RunState;
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_merge::ArchivePlan;

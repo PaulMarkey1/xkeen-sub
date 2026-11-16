@@ -34,7 +34,7 @@ pub(crate) fn update_configuration(
     state: &RunState,
     backup: &mut BackupSession,
 ) -> AppResult<()> {
-    update_configuration_with_mode(subscriptions, state, backup, false, None)
+    update_configuration_with_mode(subscriptions, state, backup, false, None).map(|_| ())
 }
 
 /// Rebuilds every subscription-managed outbound group from baseline snapshots.
@@ -43,7 +43,7 @@ pub(crate) fn rebuild_configuration(
     state: &RunState,
     backup: &mut BackupSession,
     store: &SubscriptionStore,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     update_configuration_with_mode(subscriptions, state, backup, true, Some(store))
 }
 
@@ -53,7 +53,7 @@ fn update_configuration_with_mode(
     backup: &mut BackupSession,
     rebuild_all: bool,
     registry: Option<&SubscriptionStore>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let prepared = prepare_configuration(subscriptions, state, backup, rebuild_all)?;
     apply_configuration(prepared, state, backup, registry)
 }
@@ -157,7 +157,7 @@ fn apply_configuration(
     state: &RunState,
     backup: &mut BackupSession,
     registry: Option<&SubscriptionStore>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let PreparedConfiguration {
         docs,
         outbound_index,
@@ -255,7 +255,7 @@ fn apply_configuration(
     } else {
         success("Готово! Файлы обновлены и проверены, XKeen запущен.");
     }
-    Ok(())
+    Ok(validation.is_ok())
 }
 
 fn updated_groups(prepared: &[PreparedSubscription]) -> BTreeMap<u64, Vec<Value>> {

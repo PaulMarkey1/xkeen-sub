@@ -11,7 +11,7 @@ use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, OUTBOUND_FILE, ROUTING_FILE};
-use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan};
+use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
 use crate::update_plan::build_file_plan;
 use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
@@ -34,7 +34,25 @@ pub(crate) fn update_configuration(
     state: &RunState,
     backup: &mut BackupSession,
 ) -> AppResult<()> {
-    let prepared = prepare_configuration(subscriptions, state, backup)?;
+    update_configuration_with_mode(subscriptions, state, backup, false)
+}
+
+/// Rebuilds every subscription-managed outbound group from baseline snapshots.
+pub(crate) fn rebuild_configuration(
+    subscriptions: &[Subscription],
+    state: &RunState,
+    backup: &mut BackupSession,
+) -> AppResult<()> {
+    update_configuration_with_mode(subscriptions, state, backup, true)
+}
+
+fn update_configuration_with_mode(
+    subscriptions: &[Subscription],
+    state: &RunState,
+    backup: &mut BackupSession,
+    rebuild_all: bool,
+) -> AppResult<()> {
+    let prepared = prepare_configuration(subscriptions, state, backup, rebuild_all)?;
     apply_configuration(prepared, state, backup)
 }
 
@@ -42,6 +60,7 @@ fn prepare_configuration(
     subscriptions: &[Subscription],
     state: &RunState,
     backup: &mut BackupSession,
+    rebuild_all: bool,
 ) -> AppResult<PreparedConfiguration> {
     let mut docs = load_config_documents()?;
     backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
@@ -62,8 +81,11 @@ fn prepare_configuration(
     let api_tags = collect_api_tags(&docs);
     let updated_groups = updated_groups(&state.prepared);
     let mut archive = load_archive()?;
-    let (final_outbounds, replacements, conflicts) =
-        merge_outbounds(&working, subscriptions, &updated_groups, &mut archive)?;
+    let (final_outbounds, replacements, conflicts) = if rebuild_all {
+        (rebuild_outbounds(&working, subscriptions, &updated_groups)?, Vec::new(), Vec::new())
+    } else {
+        merge_outbounds(&working, subscriptions, &updated_groups, &mut archive)?
+    };
     let all_tags = collect_tags(&final_outbounds)?;
     let tags = collect_selector_tags(&final_outbounds, &api_tags)?;
     print_json_section("ИТОГОВЫЙ OUTBOUND", &Value::Array(final_outbounds.clone()));

@@ -64,8 +64,10 @@ pub fn prepare_balancers(
 
     match case {
         BalancerCase::NoExistingBalancers => {
-            let transformed_rules =
+            let redirected_rules =
                 redirect_rules_to_program_balancer(routing, working_outbounds, api_tags)?;
+            let normalized_balancer_tags = normalize_existing_balancer_tags(routing)?;
+            let transformed_rules = redirected_rules + normalized_balancer_tags;
             balancers.push(new_program_balancer(final_tags));
             created = true;
             routing.insert("balancers".to_owned(), Value::Array(balancers));
@@ -170,6 +172,32 @@ fn set_selector(balancer: &mut Value, tags: &[String]) -> AppResult<()> {
         Value::Array(tags.iter().cloned().map(Value::String).collect()),
     );
     Ok(())
+}
+
+fn normalize_existing_balancer_tags(routing: &mut Map<String, Value>) -> AppResult<usize> {
+    let Some(rules_value) = routing.get_mut("rules") else {
+        return Ok(0);
+    };
+    let rules = rules_value
+        .as_array_mut()
+        .ok_or("Поле routing.rules должно быть массивом.")?;
+
+    let mut changed = 0;
+    for rule in rules {
+        let Some(object) = rule.as_object_mut() else {
+            continue;
+        };
+        let Some(balancer_tag) = object.get_mut("balancerTag") else {
+            continue;
+        };
+
+        if balancer_tag.as_str() != Some(PROGRAM_BALANCER_TAG) {
+            *balancer_tag = Value::String(PROGRAM_BALANCER_TAG.to_owned());
+            changed += 1;
+        }
+    }
+
+    Ok(changed)
 }
 
 fn redirect_rules_to_program_balancer(
@@ -289,6 +317,74 @@ mod tests {
             json!(["sub1--node", "custom"])
         );
         assert_eq!(config["routing"]["balancers"][0]["fallbackTag"], "direct");
+    }
+
+    #[test]
+    fn missing_balancers_redirects_existing_balancer_tags_to_program_balancer() {
+        let mut config = json!({
+            "routing": {
+                "rules": [
+                    {"type":"field","balancerTag":"old-balancer","domain":["example.com"]},
+                    {"type":"field","balancerTag":"another-balancer","ip":["1.2.3.4"]},
+                    {"type":"field","balancerTag":PROGRAM_BALANCER_TAG,"network":"tcp"}
+                ]
+            }
+        });
+
+        let result =
+            prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
+
+        assert_eq!(result.case, BalancerCase::NoExistingBalancers);
+        assert!(result.created);
+        assert_eq!(result.transformed_rules, 2);
+        assert_eq!(
+            config["routing"]["rules"][0],
+            json!({"type":"field","balancerTag":PROGRAM_BALANCER_TAG,"domain":["example.com"]})
+        );
+        assert_eq!(
+            config["routing"]["rules"][1],
+            json!({"type":"field","balancerTag":PROGRAM_BALANCER_TAG,"ip":["1.2.3.4"]})
+        );
+        assert_eq!(
+            config["routing"]["rules"][2],
+            json!({"type":"field","balancerTag":PROGRAM_BALANCER_TAG,"network":"tcp"})
+        );
+        assert_eq!(
+            config["routing"]["balancers"][0]["tag"],
+            PROGRAM_BALANCER_TAG
+        );
+    }
+
+    #[test]
+    fn empty_balancers_normalizes_balancer_tags_and_keeps_outbound_redirect_behavior() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [],
+                "rules": [
+                    {"balancerTag":"missing-user-balancer","domain":["example.com"]},
+                    {"outboundTag":"direct","network":"tcp"},
+                    {"outboundTag":"my-freedom"},
+                    {"outboundTag":"api-tag"}
+                ]
+            }
+        });
+        let api: HashSet<String> = ["api-tag".to_owned()].into_iter().collect();
+
+        let result = prepare_balancers(&mut config, &working(), &tags(), &api).unwrap();
+
+        assert_eq!(result.transformed_rules, 2);
+        assert_eq!(
+            config["routing"]["rules"][0]["balancerTag"],
+            PROGRAM_BALANCER_TAG
+        );
+        assert_eq!(
+            config["routing"]["rules"][1]["balancerTag"],
+            PROGRAM_BALANCER_TAG
+        );
+        assert_eq!(config["routing"]["rules"][1]["network"], "tcp");
+        assert_eq!(config["routing"]["rules"][1].get("outboundTag"), None);
+        assert_eq!(config["routing"]["rules"][2]["outboundTag"], "my-freedom");
+        assert_eq!(config["routing"]["rules"][3]["outboundTag"], "api-tag");
     }
 
     #[test]

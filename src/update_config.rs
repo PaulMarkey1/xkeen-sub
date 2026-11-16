@@ -22,7 +22,7 @@ pub(crate) struct ConfigDocument {
     pub(crate) value: Value,
 }
 
-fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
+pub(crate) fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
     let dir = Path::new(CONFIG_DIR);
     if !dir.is_dir() {
         return Err(format!("Каталог Xray не найден: {}", dir.display()).into());
@@ -65,17 +65,17 @@ fn is_json_config(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn find_doc(docs: &[ConfigDocument], name: &str) -> Option<usize> {
+pub(crate) fn find_doc(docs: &[ConfigDocument], name: &str) -> Option<usize> {
     docs.iter().position(|doc| doc.file_name == name)
 }
 
-fn collect_api_tags(docs: &[ConfigDocument]) -> HashSet<String> {
+pub(crate) fn collect_api_tags(docs: &[ConfigDocument]) -> HashSet<String> {
     docs.iter().filter_map(|doc| doc.value.get("api"))
         .filter_map(|api| api.get("tag")).filter_map(Value::as_str)
         .map(str::to_owned).collect()
 }
 
-fn validate_all(
+pub(crate) fn validate_all(
     docs: &[ConfigDocument],
     outbounds: &[Value],
     tags: &[String],

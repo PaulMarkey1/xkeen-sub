@@ -12,7 +12,7 @@ use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, CONFIG_DIR, OUTBOUND_FILE, ROUTING_FILE};
-use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
+use crate::update_merge::{collect_selector_tags, collect_tags, ensure_service_outbounds, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
 use crate::update_plan::{build_file_plan, build_file_plan_with_registry};
 use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
@@ -79,11 +79,15 @@ fn prepare_configuration(
     let api_tags = collect_api_tags(&docs);
     let updated_groups = updated_groups(&state.prepared);
     let mut archive = load_archive()?;
-    let (final_outbounds, replacements, conflicts) = if rebuild_all {
+    let (mut final_outbounds, replacements, conflicts) = if rebuild_all {
         (rebuild_outbounds(&working, subscriptions, &updated_groups)?, Vec::new(), Vec::new())
     } else {
         merge_outbounds(&working, subscriptions, &updated_groups, &mut archive)?
     };
+    let added_services = ensure_service_outbounds(&mut final_outbounds)?;
+    for item in &added_services {
+        backup.event("OUTBOUND", &format!("Добавлено обязательное системное подключение {item}."))?;
+    }
     let all_tags = collect_tags(&final_outbounds)?;
     let tags = collect_selector_tags(&final_outbounds, &api_tags)?;
     print_json_section("ИТОГОВЫЙ OUTBOUND", &Value::Array(final_outbounds.clone()));

@@ -9,6 +9,7 @@ mod setup;
 mod subscriptions;
 mod subscription_download;
 mod subscription_parser;
+mod subscription_url;
 mod terminal;
 mod temp_counter;
 mod xray_test;

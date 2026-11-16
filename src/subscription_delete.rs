@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::backup::BackupSession;
 use crate::subscription_identity::SubscriptionIdentity;
 use crate::subscription_parser::parse_subscription;
-use crate::subscriptions::{Subscription, SubscriptionStore};
+use crate::subscriptions::SubscriptionStore;
 use crate::terminal::{error, success, warning};
 use crate::update_configuration::rebuild_configuration;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
@@ -74,6 +74,7 @@ fn prepare_deletion(
     removed_index: usize,
     backup: &mut BackupSession,
 ) -> AppResult<RunState> {
+    let original_ids: Vec<String> = store.subscriptions.iter().map(|item| item.id.clone()).collect();
     let original_paths = store.subscriptions.iter()
         .map(baseline_path)
         .collect::<AppResult<Vec<_>>>()?;
@@ -88,11 +89,7 @@ fn prepare_deletion(
     for (new_index, subscription) in store.subscriptions.iter_mut().enumerate() {
         let old_index = if new_index < removed_index { new_index } else { new_index + 1 };
         let old_path = &original_paths[old_index];
-        let old_id = original_paths[old_index]
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("baseline")
-            .to_owned();
+        let old_id = original_ids[old_index].clone();
 
         let raw_baseline = fs::read(old_path).map_err(|failure| {
             format!(
@@ -153,7 +150,6 @@ fn prepare_deletion(
         state.processed += 1;
     }
 
-    state.baseline_removals.push((removed_id.clone(), original_paths[removed_index].clone()));
     state.baseline_removals.sort_by(|left, right| left.1.cmp(&right.1));
     state.baseline_removals.dedup_by(|left, right| left.1 == right.1);
 

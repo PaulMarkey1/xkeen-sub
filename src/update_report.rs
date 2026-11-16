@@ -71,7 +71,7 @@ pub(crate) fn print_configuration_summary(
     info(&format!("Итоговый Outbound: {} подключений.", tags.len()));
     info_prefix(&docs[outbound_index].file_name, &format!("файл с подключениями: {}", docs[outbound_index].path.display()));
     info_prefix(&docs[routing_index].file_name, &format!("файл с правилами маршрутизации: {}", docs[routing_index].path.display()));
-    for item in obs { info_prefix(&item.file_name, &format!("обновлён список проверяемых подключений ({})", item.object_name)); }
+    for item in obs {\n        let action = if item.created { "подготовлен шаблон" } else { "обновлён список проверяемых подключений" };\n        info_prefix(&item.file_name, &format!("{action} ({})", item.object_name));\n    }
     if balancer.user_balancer_tags.is_empty() {
         info("В конфигурации не найдено настроенных вами балансировщиков.");
     } else {

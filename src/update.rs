@@ -27,20 +27,20 @@ struct PreparedSubscription {
     outbounds: Vec<Value>,
 }
 
-struct PreparedBaseline {
-    id: String,
-    original: Vec<u8>,
-    path: PathBuf,
+pub(crate) struct PreparedBaseline {
+    pub(crate) id: String,
+    pub(crate) original: Vec<u8>,
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Default)]
-struct RunState {
-    prepared: Vec<PreparedSubscription>,
-    baseline_updates: Vec<PreparedBaseline>,
-    baseline_removals: Vec<(String, PathBuf)>,
-    failed: Vec<(String, String)>,
-    downloaded: usize,
-    processed: usize,
+pub(crate) struct RunState {
+    pub(crate) prepared: Vec<PreparedSubscription>,
+    pub(crate) baseline_updates: Vec<PreparedBaseline>,
+    pub(crate) baseline_removals: Vec<(String, PathBuf)>,
+    pub(crate) failed: Vec<(String, String)>,
+    pub(crate) downloaded: usize,
+    pub(crate) processed: usize,
 }
 
 /// Downloads and analyses subscriptions, prepares documents, validates the

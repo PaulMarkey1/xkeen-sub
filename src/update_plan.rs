@@ -117,7 +117,7 @@ pub(crate) fn build_file_plan_with_registry(
     let mut plan = build_file_plan(docs, state, archive)?;
     let path = PathBuf::from(SUBSCRIPTIONS_FILE);
     let mut content = serde_json::to_vec_pretty(store)?;
-    content.push(b'\\n');
+    content.push(b'\n');
 
     match fs::read(&path) {
         Ok(original) if original == content => {}

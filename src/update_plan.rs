@@ -22,12 +22,33 @@ pub(crate) fn build_file_plan(
         // Keep untouched JSON/JSON5 files byte-for-byte as they were read.
         // Re-serialize only documents whose parsed configuration was changed.
         if doc.value != doc.original_value {
+            let kind = if doc.is_new {
+                match fs::symlink_metadata(&doc.path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        PlannedOperationKind::Create
+                    }
+                    Ok(_) => {
+                        return Err(format!(
+                            "Новый конфигурационный файл неожиданно уже существует: {}",
+                            doc.path.display()
+                        ).into());
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "Не удалось проверить новый конфигурационный файл {}: {error}",
+                            doc.path.display()
+                        ).into());
+                    }
+                }
+            } else {
+                PlannedOperationKind::Replace
+            };
             let mut content = serde_json::to_vec_pretty(&doc.value)?;
             content.push(b'\n');
             plan.insert(doc.path.clone(), PlannedFileOperation {
                 path: doc.path.clone(),
                 category: "Конфигурация Xray",
-                kind: PlannedOperationKind::Replace,
+                kind,
                 content: Some(content),
             });
         }
@@ -169,6 +190,7 @@ mod file_plan_tests {
             original: String::from_utf8(original).unwrap(),
             original_value: value.clone(),
             value,
+            is_new: false,
         };
         let state = RunState {
             baseline_updates: vec![PreparedBaseline {
@@ -222,6 +244,7 @@ mod file_plan_tests {
             original: r#"{ "log": { "loglevel": "warning" } }"#.to_owned(),
             original_value,
             value: current_value,
+            is_new: false,
         };
         let state = RunState::default();
         let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };

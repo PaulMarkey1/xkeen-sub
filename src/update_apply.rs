@@ -46,7 +46,7 @@ impl StagingDirectory {
             let _ = fs::remove_dir_all(&root);
             return Err(format!("Не удалось ограничить права staging-каталога {}: {error}", root.display()).into());
         }
-        for name in ["configs", "archive", "baseline"] {
+        for name in ["configs", "archive", "baseline", "subscriptions"] {
             if let Err(error) = fs::create_dir(root.join(name)) {
                 let _ = fs::remove_dir_all(&root);
                 return Err(format!("Не удалось создать staging-подкаталог {name}: {error}").into());
@@ -63,6 +63,7 @@ impl StagingDirectory {
             "Конфигурация Xray" => "configs",
             "Архив пользовательских подключений" => "archive",
             "Baseline" => "baseline",
+            "Реестр подписок" => "subscriptions",
             other => return Err(format!("Неизвестная категория операции: {other}").into()),
         };
         let name = operation.path.file_name().ok_or("У операции отсутствует имя файла.")?;
@@ -285,7 +286,8 @@ fn category_order(category: &str) -> u8 {
         "Конфигурация Xray" => 0,
         "Архив пользовательских подключений" => 1,
         "Baseline" | "Повреждённый baseline" => 2,
-        _ => 3,
+        "Реестр подписок" => 3,
+        _ => 4,
     }
 }
 
@@ -298,6 +300,7 @@ fn validate_target(operation: &PlannedFileOperation) -> AppResult<()> {
         "Конфигурация Xray" => path.starts_with(CONFIG_ROOT),
         "Архив пользовательских подключений" => path == Path::new(ARCHIVE_PATH),
         "Baseline" | "Повреждённый baseline" => path.starts_with(BASELINE_ROOT),
+        "Реестр подписок" => path == Path::new("/opt/etc/xkeen-sub/sub.json"),
         _ => false,
     };
     if !allowed {

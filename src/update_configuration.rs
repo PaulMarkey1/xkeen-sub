@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::Path;
 
 use serde_json::Value;
 
 use crate::backup::{BackupSession, BackupSource};
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
-use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
+use crate::observatory::{prepare_observatory, ObservatoryUpdate};
 use crate::subscriptions::{Subscription, SubscriptionStore};
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
-use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, OUTBOUND_FILE, ROUTING_FILE};
+use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, CONFIG_DIR, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
 use crate::update_plan::{build_file_plan, build_file_plan_with_registry};
 use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
@@ -99,10 +100,19 @@ fn prepare_configuration(
 
     let mut obs_docs: Vec<(String, Value)> =
         docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
-    let obs_updates = synchronize_subject_selectors(&mut obs_docs, &tags)?;
+    let obs_updates = prepare_observatory(&mut obs_docs, &tags)?;
     for (name, value) in obs_docs {
         if let Some(doc) = docs.iter_mut().find(|doc| doc.file_name == name) {
             doc.value = value;
+        } else {
+            docs.push(ConfigDocument {
+                file_name: name.clone(),
+                path: Path::new(CONFIG_DIR).join(&name),
+                original: String::new(),
+                original_value: Value::Null,
+                value,
+                is_new: true,
+            });
         }
     }
 

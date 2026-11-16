@@ -1,4 +1,6 @@
 use crate::outbound_compare::outbound_parameters_equal;
+use crate::subscription_identity::number_from_tag;
+pub(crate) use crate::subscription_identity::number_from_id as subscription_id_number;
 use crate::subscriptions::Subscription;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -15,7 +17,6 @@ pub(crate) struct ArchivePlan {
     pub(crate) added: usize,
 }
 
-
 pub(crate) fn merge_outbounds(
     working: &[Value],
     subscriptions: &[Subscription],
@@ -27,7 +28,7 @@ pub(crate) fn merge_outbounds(
     for outbound in working {
         let tag = outbound.get("tag").and_then(Value::as_str)
             .ok_or("В Рабочем Outbound найден элемент без Tag.")?;
-        if let Some(number) = subscription_number(tag) {
+        if let Some(number) = number_from_tag(tag) {
             groups.entry(number).or_default().push(outbound.clone());
         } else {
             users.push(outbound.clone());
@@ -71,23 +72,6 @@ pub(crate) fn merge_outbounds(
     for (_, group) in groups { final_outbounds.extend(group); }
     final_outbounds.extend(retained);
     Ok((final_outbounds, replacements, conflicts))
-}
-
-pub(crate) fn subscription_id_number(id: &str) -> Option<u64> {
-    let number = id.strip_prefix("sub")?;
-    if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    number.parse().ok()
-}
-
-fn subscription_number(tag: &str) -> Option<u64> {
-    let rest = tag.strip_prefix("sub")?;
-    let (number, suffix) = rest.split_once("--")?;
-    if suffix.is_empty() {
-        return None;
-    }
-    subscription_id_number(&format!("sub{number}"))
 }
 
 pub(crate) fn load_archive() -> AppResult<ArchivePlan> {
@@ -166,10 +150,10 @@ pub(crate) fn collect_tags(outbounds: &[Value]) -> AppResult<Vec<String>> {
     Ok(tags)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{archive_outbound, collect_selector_tags, subscription_id_number, subscription_number, ArchivePlan};
+    use super::{archive_outbound, collect_selector_tags, ArchivePlan};
+    use crate::subscription_identity::{number_from_id, number_from_tag};
     use crate::outbound_compare::outbound_parameters_equal;
     use serde_json::json;
 
@@ -193,11 +177,11 @@ mod tests {
     }
 
     #[test]
-    fn identifies_subscription_tags() {
-        assert_eq!(subscription_number("sub1--Germany--node"), Some(1));
-        assert_eq!(subscription_id_number("sub20"), Some(20));
-        assert_eq!(subscription_number("sub20--node"), Some(20));
-        assert_eq!(subscription_number("custom"), None);
+    fn identifies_subscription_tags_and_ids() {
+        assert_eq!(number_from_tag("sub1--Germany--node"), Some(1));
+        assert_eq!(number_from_id("sub20"), Some(20));
+        assert_eq!(number_from_tag("sub20--node"), Some(20));
+        assert_eq!(number_from_tag("custom"), None);
     }
 
     #[test]

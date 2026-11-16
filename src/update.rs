@@ -4,6 +4,7 @@ use crate::observatory::synchronize_subject_selectors;
 use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::subscriptions::{load_subscriptions, Subscription};
+use crate::system::command_exists;
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_plan::build_file_plan;
@@ -432,8 +433,4 @@ fn has_internet_connection() -> bool {
     false
 }
 
-fn command_exists(command: &str) -> bool {
-    Command::new("sh").args(["-c", &format!("command -v {command} >/dev/null 2>&1")])
-        .status().map(|s| s.success()).unwrap_or(false)
-}
 

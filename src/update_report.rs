@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::balancer::{BalancerCase, BalancerPreparation};
 use crate::observatory::ObservatoryUpdate;
 use crate::outbound_compare::ComparisonReport;
-use crate::update::RunState;
+use crate::update_state::RunState;
 use crate::update_apply::{PlannedFileOperation, PlannedOperationKind};
 use crate::update_config::ConfigDocument;
 use crate::update_merge::ArchivePlan;

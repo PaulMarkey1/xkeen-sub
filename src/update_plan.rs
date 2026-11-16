@@ -9,6 +9,7 @@ use crate::update_state::{PreparedBaseline, RunState};
 use crate::update_config::ConfigDocument;
 use crate::update_apply::{PlannedFileOperation, PlannedOperationKind};
 use crate::update_merge::{ArchivePlan, USER_ARCHIVE};
+use crate::subscriptions::{SubscriptionStore, SUBSCRIPTIONS_FILE};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -104,6 +105,41 @@ pub(crate) fn build_file_plan(
     }
 
     Ok(plan.into_values().collect())
+}
+
+/// Extends the normal update plan with an atomic subscription registry replacement.
+pub(crate) fn build_file_plan_with_registry(
+    docs: &[ConfigDocument],
+    state: &RunState,
+    archive: &ArchivePlan,
+    store: &SubscriptionStore,
+) -> AppResult<Vec<PlannedFileOperation>> {
+    let mut plan = build_file_plan(docs, state, archive)?;
+    let path = PathBuf::from(SUBSCRIPTIONS_FILE);
+    let mut content = serde_json::to_vec_pretty(store)?;
+    content.push(b'\\n');
+
+    match fs::read(&path) {
+        Ok(original) if original == content => {}
+        Ok(_) => plan.push(PlannedFileOperation {
+            path,
+            category: "Реестр подписок",
+            kind: PlannedOperationKind::Replace,
+            content: Some(content),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            plan.push(PlannedFileOperation {
+                path,
+                category: "Реестр подписок",
+                kind: PlannedOperationKind::Create,
+                content: Some(content),
+            });
+        }
+        Err(error) => return Err(format!("Не удалось прочитать реестр подписок: {error}").into()),
+    }
+
+    plan.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(plan)
 }
 
 #[cfg(test)]

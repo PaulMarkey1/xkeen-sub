@@ -2,15 +2,13 @@ use crate::backup::BackupSession;
 use crate::update_merge::subscription_id_number;
 use crate::subscriptions::{load_subscriptions, Subscription};
 use crate::system::command_exists;
-use crate::terminal::{error, info, success, title, warning};
+use crate::terminal::{error, info, title, warning};
 use crate::update_subscription::prepare_subscriptions;
-use crate::update_state::RunState;
 use crate::update_configuration::update_configuration;
 use crate::update_baseline::apply_baseline_only;
 use crate::update_report::{print_baseline_plan, print_subscription_summary};
 
 use std::error::Error;
-use std::fs;
 use std::process::Command;
 use std::time::{Duration, Instant};
 

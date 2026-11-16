@@ -4,7 +4,7 @@ use crate::subscription_download::download_subscription;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::Subscription;
 use crate::terminal::{error, info, success, title, warning};
-use crate::update::{PreparedBaseline, PreparedSubscription, RunState};
+use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_report::{print_comparison, show_value};
 
 use serde_json::Value;

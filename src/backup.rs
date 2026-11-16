@@ -386,6 +386,7 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
         [] => run_menu().map(|_| ()),
         [action] if action == "help" => { print_help(); Ok(()) },
         [action] if action == "list" => list_interactive().map(|_| ()),
+        [action] if action == "full" => create_full_backup(),
         [action, id] if action == "list" => show_record_menu(id).map(|_| ()),
         [action, value] if action == "days" => {
             let days = u32::try_from(parse_number(value, MIN_RETENTION_DAYS as u64, "срок хранения")?)
@@ -430,7 +431,8 @@ fn run_menu() -> AppResult<bool> {
         menu_item("2", &format!("Лимит записей за день: {} (минимум)", settings.daily_limit));
         menu_item("3", &format!("Режим хранения: {}", mode_label(&settings.mode)));
         menu_item("4", "Просмотреть резервные копии");
-        menu_item("5", "Назад");
+        menu_item("5", "Создать полный бэкап конфигураций");
+        menu_item("6", "Назад");
         menu_item("0", "Выход");
         let choice = read_input("Выберите действие: ")?;
         match choice.as_str() {
@@ -438,9 +440,10 @@ fn run_menu() -> AppResult<bool> {
             "2" => change_limit()?,
             "3" => change_mode()?,
             "4" => { if list_interactive()? { return Ok(true); } },
-            "5" => return Ok(false),
+            "5" => create_full_backup()?,
+            "6" => return Ok(false),
             "0" => return Ok(true),
-            _ => error("Выберите пункт от 1 до 5 или 0 для выхода."),
+            _ => error("Выберите пункт от 1 до 6 или 0 для выхода."),
         }
     }
 }
@@ -513,6 +516,82 @@ fn change_mode() -> AppResult<()> {
             _ => error("Введите 1, 2 или 0."),
         }
     }
+}
+
+fn create_full_backup() -> AppResult<()> {
+    title("СОЗДАНИЕ ПОЛНОГО БЭКАПА");
+    info("Будут сохранены все обычные файлы конфигурации Xray и xkeen-sub.");
+    info("Включая подписки, baseline, архив пользовательских подключений и настройки резервирования.");
+    if !confirm("Создать полную резервную копию текущего состояния?")? {
+        warning("Создание полного бэкапа отменено.");
+        return Ok(());
+    }
+
+    let mut sources = Vec::new();
+    collect_backup_files(Path::new("/opt/etc/xray/configs"), "Конфигурация Xray", &mut sources)?;
+    collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "Конфигурация xkeen-sub", &mut sources)?;
+    sources.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+
+    if sources.is_empty() {
+        return Err("Не найдено файлов конфигурации для резервирования.".into());
+    }
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut backup = BackupSession::start("Полный бэкап конфигураций Xray и xkeen-sub")?;
+    backup.set_plan_count(sources.len());
+    let saved = match backup.backup_files(&sources) {
+        Ok(saved) if saved == sources.len() => saved,
+        Ok(saved) => {
+            let message = format!("Сохранено {saved} из {} файлов; полный бэкап не подтверждён.", sources.len());
+            backup.set_outcome("ОШИБКА", &message, false);
+            backup.finish()?;
+            return Err(message.into());
+        }
+        Err(error) => {
+            backup.set_outcome("ОШИБКА", &format!("Полный бэкап не завершён: {error}"), false);
+            backup.finish()?;
+            return Err(error);
+        }
+    };
+    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Сохранено и проверено {saved} файлов конфигурации Xray и xkeen-sub."), true);
+    backup.finish()?;
+    success(&format!("Полный бэкап создан. Сохранено и проверено файлов: {saved}. ID: {}", backup.id()));
+    Ok(())
+}
+
+fn collect_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("Каталог конфигурации не найден: {}", root.display()).into());
+        }
+        Err(error) => return Err(format!("Не удалось проверить каталог {}: {error}", root.display()).into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("Каталог конфигурации не является обычным каталогом: {}", root.display()).into());
+    }
+
+    let mut entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("Не удалось проверить {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("Полный бэкап прерван: обнаружена символическая ссылка {}.", path.display()).into());
+        }
+        if metadata.is_dir() {
+            if path == Path::new(BACKUP_DIR) {
+                continue;
+            }
+            collect_backup_files(&path, category, output)?;
+        } else if metadata.is_file() {
+            output.push(BackupSource { path, category: category.to_owned() });
+        } else {
+            return Err(format!("Полный бэкап прерван: неподдерживаемый объект {}.", path.display()).into());
+        }
+    }
+    Ok(())
 }
 
 fn list_interactive() -> AppResult<bool> {
@@ -633,7 +712,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
         return Ok(());
     }
     let status = read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
-    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "УСПЕШНО" {
+    if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "ПОЛНЫЙ БЭКАП СОЗДАН" && status != "УСПЕШНО" {
         warning("Эта запись не содержит подтверждённую полную резервную копию. Восстановление запрещено.");
         return Ok(());
     }
@@ -821,6 +900,7 @@ fn print_help() {
     command_help("backup days N", "Установить срок хранения в календарных днях (минимум 3)");
     command_help("backup limit N", "Установить дневной лимит записей (минимум 10)");
     command_help("backup mode auto|unlimited", "Выбрать автоматическое или бессрочное хранение");
+    command_help("backup full", "Создать полный бэкап конфигураций Xray и xkeen-sub");
     command_help("backup list", "Просмотреть резервные копии");
     command_help("backup list ID", "Открыть выбранную резервную запись");
 }
@@ -1042,8 +1122,10 @@ fn is_allowed_restore_path(path: &Path) -> bool {
     if path == archive || path == subscriptions {
         return true;
     }
+    let xkeen_root = Path::new("/opt/etc/xkeen-sub");
+    let backup_root = Path::new(BACKUP_DIR);
     let has_parent = path.components().any(|component| matches!(component, Component::ParentDir));
-    !has_parent && (path.starts_with(xray_root) || path.starts_with(baseline_root))
+    !has_parent && (path.starts_with(xray_root) || (path.starts_with(xkeen_root) && !path.starts_with(backup_root)))
 }
 
 fn validate_relative_path(path: &Path) -> AppResult<()> {
@@ -1186,6 +1268,9 @@ mod tests {
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1--Germany.json")));
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/old-user-outbound.json")));
+        assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/sub.json")));
+        assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/backup-settings.json")));
+        assert!(!is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/backup/14-11-2026--backup1/file.json")));
         assert!(!is_allowed_restore_path(Path::new("/etc/passwd")));
         assert!(!is_allowed_restore_path(Path::new("/opt/etc/xray/configs/../passwd")));
     }

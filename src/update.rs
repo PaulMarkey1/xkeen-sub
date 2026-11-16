@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const BASELINE_DIR: &str = "/opt/etc/xkeen-sub/baseline";
-struct PreparedSubscription {
-    id: String,
-    outbounds: Vec<Value>,
+pub(crate) struct PreparedSubscription {
+    pub(crate) id: String,
+    pub(crate) outbounds: Vec<Value>,
 }
 
 pub(crate) struct PreparedBaseline {

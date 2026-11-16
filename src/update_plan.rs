@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::update::{PreparedBaseline, RunState};
+use crate::update_state::{PreparedBaseline, RunState};
 use crate::update_config::ConfigDocument;
 use crate::update_apply::{PlannedFileOperation, PlannedOperationKind};
 use crate::update_merge::{ArchivePlan, USER_ARCHIVE};

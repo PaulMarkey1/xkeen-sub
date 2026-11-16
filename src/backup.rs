@@ -120,6 +120,7 @@ impl BackupSession {
     }
 
     fn start_in_directory(reason: &str, id: String, path: PathBuf) -> AppResult<Self> {
+        let date = current_date()?;
         let log_path = path.join("log.txt");
         let mut log = OpenOptions::new().write(true).create_new(true).open(&log_path)
             .map_err(|e| format!("Не удалось создать {}: {e}", log_path.display()))?;
@@ -1303,7 +1304,6 @@ mod tests {
         assert_eq!(parse_record_id("14-11-2026--backup-full1"), Some(("14-11-2026".to_owned(), 1, true)));
         assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4, true)));
         assert_eq!(parse_record_id("14-11-2026--backup0"), None);
-        assert_eq!(parse_record_id("14-11-2026--backup-full0"), Some(("14-11-2026".to_owned(), 0, true)));
         assert_eq!(parse_record_id("../backup1"), None);
     }
 

@@ -1,5 +1,6 @@
 use std::error::Error;
-use crate::subscription_url::{normalize_subscription_url, SubscriptionUrlError};
+use crate::subscription_identity::SubscriptionIdentity;
+use crate::subscription_url::normalize_subscription_url;
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
 use crate::terminal::{error, info, menu_item, read_input, success, title};
 
@@ -42,18 +43,16 @@ pub fn run() -> AppResult<bool> {
     };
 
     let mut subscriptions = load_subscriptions()?;
-    let next_number = subscriptions.subscriptions.len() + 1;
-    let id = format!("sub{next_number}");
-    let prefix = match name.as_deref() {
-        Some(subscription_name) => format!("{id}--{subscription_name}--"),
-        None => format!("{id}--"),
-    };
+    let identity = SubscriptionIdentity::from_number(
+        subscriptions.subscriptions.len() + 1,
+        name.as_deref(),
+    );
 
     subscriptions.subscriptions.push(Subscription {
-        id,
+        id: identity.id,
         name,
         url,
-        prefix,
+        prefix: identity.prefix,
     });
 
     save_subscriptions(&subscriptions)?;

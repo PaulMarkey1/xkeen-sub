@@ -11,9 +11,9 @@ use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, OUTBOUND_FILE, ROUTING_FILE};
-use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, ArchivePlan};
+use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan};
 use crate::update_plan::build_file_plan;
-use crate::update_report::{print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_updated_outbound, print_xray_test};
+use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -23,8 +23,6 @@ struct PreparedConfiguration {
     routing_index: usize,
     obs_updates: Vec<ObservatoryUpdate>,
     balancer: BalancerPreparation,
-    tags: Vec<String>,
-    final_outbounds: Vec<Value>,
     replacements: Vec<String>,
     conflicts: Vec<String>,
     archive: ArchivePlan,
@@ -65,7 +63,7 @@ fn prepare_configuration(
     let updated_groups = updated_groups(&state.prepared);
     let mut archive = load_archive()?;
     let (final_outbounds, replacements, conflicts) =
-        merge_outbounds(&working, &store.subscriptions, &updated_groups, &mut archive)?;
+        merge_outbounds(&working, subscriptions, &updated_groups, &mut archive)?;
     let all_tags = collect_tags(&final_outbounds)?;
     let tags = collect_selector_tags(&final_outbounds, &api_tags)?;
     print_json_section("ИТОГОВЫЙ OUTBOUND", &Value::Array(final_outbounds.clone()));
@@ -123,8 +121,6 @@ fn prepare_configuration(
         routing_index,
         obs_updates,
         balancer,
-        tags,
-        final_outbounds,
         replacements,
         conflicts,
         archive,
@@ -143,8 +139,6 @@ fn apply_configuration(
         routing_index,
         obs_updates,
         balancer,
-        tags,
-        final_outbounds,
         replacements,
         conflicts,
         archive,
@@ -157,7 +151,7 @@ fn apply_configuration(
         backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", false);
     } else {
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
-        let plan = build_file_plan(&docs, &state, &archive)?;
+        let plan = build_file_plan(&docs, state, &archive)?;
         no_file_changes = plan.is_empty();
         print_file_plan(&plan);
         backup.set_plan_count(plan.len());

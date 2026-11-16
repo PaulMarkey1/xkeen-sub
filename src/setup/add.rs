@@ -1,4 +1,5 @@
 use std::error::Error;
+use crate::subscription_url::{normalize_subscription_url, SubscriptionUrlError};
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
 use crate::terminal::{error, info, menu_item, read_input, success, title};
 
@@ -31,9 +32,12 @@ pub fn run() -> AppResult<bool> {
 
     let url = loop {
         let value = read_input("Введите URL подписки: ")?;
-        match validate_url(value.trim()) {
+        match normalize_subscription_url(value.trim()) {
             Ok(valid_url) => break valid_url,
-            Err(message) => error(&format!("Ссылка не подошла: {message}. Проверьте адрес и попробуйте ещё раз.")),
+            Err(reason) => error(&format!(
+                "Ссылка не подошла: {}. Проверьте адрес и попробуйте ещё раз.",
+                reason.add_prompt_message()
+            )),
         }
     };
 
@@ -56,16 +60,3 @@ pub fn run() -> AppResult<bool> {
     success("Готово! Подписка добавлена.");
     Ok(false)
 }
-
-fn validate_url(value: &str) -> Result<String, &'static str> {
-    let parsed = url::Url::parse(value).map_err(|_| "не удалось разобрать адрес")?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => return Err("разрешены только схемы HTTP и HTTPS"),
-    }
-    if parsed.host().is_none() {
-        return Err("в адресе отсутствует host");
-    }
-    Ok(parsed.to_string())
-}
-

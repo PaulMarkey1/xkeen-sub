@@ -50,12 +50,13 @@ fn print_help() -> AppResult<()> {
     command_item("help", "Показать справку");
     command_item("--version", "Показать номер версии");
     println!();
-    command_item("setup", "Настройка подписок");
-    command_item("  add", "Добавить подписку");
-    command_item("  list", "Просмотреть подписки");
-    command_item("  del", "Удалить подписку");
-    command_item("  edit", "Редактировать подписку");
-    command_item("  help", "Справка по настройке");
+    separator("Команды настройки подписок (все команды начинаются с setup):");
+    command_item("setup", "Открыть меню настройки подписок");
+    command_item("setup add", "Добавить подписку");
+    command_item("setup list", "Просмотреть подписки");
+    command_item("setup del", "Удалить подписку");
+    command_item("setup edit", "Редактировать подписку");
+    command_item("setup help", "Показать справку по настройке");
     println!();
     command_item("backup", "Настроить и просмотреть резервные копии");
     command_item("  days N", "Установить срок хранения (минимум 3 дня)");
@@ -75,10 +76,10 @@ fn print_setup_help() -> AppResult<()> {
     title("XKEEN-SUB — настройка подписок");
     println!();
     separator("Использование:");
-    command_item("setup", "Открыть меню настройки");
-    command_item("  add", "Добавить подписку");
-    command_item("  list", "Просмотреть подписки");
-    command_item("  del", "Удалить подписку");
-    command_item("  edit", "Редактировать подписку");
+    command_item("xkeen-sub setup", "Открыть меню настройки");
+    command_item("xkeen-sub setup add", "Добавить подписку");
+    command_item("xkeen-sub setup list", "Просмотреть подписки");
+    command_item("xkeen-sub setup del", "Удалить подписку");
+    command_item("xkeen-sub setup edit", "Редактировать подписку");
     Ok(())
 }

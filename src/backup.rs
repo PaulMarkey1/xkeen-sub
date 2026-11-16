@@ -772,11 +772,14 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
             if let Some(parent) = source.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&saved, source)
-                .map_err(|e| format!("Не удалось восстановить {}: {e}", source.display()))?;
-            if fs::read(&saved)? != fs::read(source)? {
-                return Err(format!("Проверка восстановленного файла не пройдена: {}", source.display()).into());
+            let bytes = fs::read(&saved)
+                .map_err(|e| format!("Не удалось прочитать резервный файл {}: {e}", saved.display()))?;
+            let metadata = read_file_metadata(&record.path.join("log.txt"), source)?
+                .ok_or_else(|| format!("В журнале отсутствуют метаданные файла: {}", source.display()))?;
+            if file_checksum(&bytes) != metadata.checksum {
+                return Err(format!("Контрольная сумма резервного файла не совпадает: {}", saved.display()).into());
             }
+            restore_file_atomically(source, &bytes, metadata)?;
         }
 
         for path in &created_paths {

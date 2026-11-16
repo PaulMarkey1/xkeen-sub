@@ -19,12 +19,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 struct PreparedConfiguration {
     docs: Vec<ConfigDocument>,
-    outbound_index: usize,
-    routing_index: usize,
-    obs_updates: Vec<ObservatoryUpdate>,
     balancer: BalancerPreparation,
-    replacements: Vec<String>,
-    conflicts: Vec<String>,
     archive: ArchivePlan,
     validation: Result<(), String>,
 }
@@ -141,12 +136,7 @@ fn prepare_configuration(
 
     Ok(PreparedConfiguration {
         docs,
-        outbound_index,
-        routing_index,
-        obs_updates,
         balancer,
-        replacements,
-        conflicts,
         archive,
         validation,
     })
@@ -160,12 +150,7 @@ fn apply_configuration(
 ) -> AppResult<bool> {
     let PreparedConfiguration {
         docs,
-        outbound_index,
-        routing_index,
-        obs_updates,
         balancer,
-        replacements,
-        conflicts,
         archive,
         validation,
     } = prepared;

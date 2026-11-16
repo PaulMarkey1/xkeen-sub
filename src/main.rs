@@ -17,6 +17,7 @@ mod xray_test;
 mod update;
 mod update_config;
 mod update_plan;
+mod update_report;
 mod update_merge;
 mod update_apply;
 

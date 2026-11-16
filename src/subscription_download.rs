@@ -3,6 +3,7 @@ use std::process::{Command, Output};
 
 use crate::subscription_url::parse_subscription_url;
 use crate::subscriptions::Subscription;
+use crate::system::command_exists;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -83,11 +84,4 @@ fn run_wget(url: &str) -> std::io::Result<Output> {
         .output()
 }
 
-fn command_exists(command: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {command} >/dev/null 2>&1")])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
 

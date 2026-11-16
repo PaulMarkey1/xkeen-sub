@@ -29,7 +29,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
         if backup.is_running() {
             backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
         }
-    } else if backup_status_is_running(&backup) {
+    } else if backup.is_running() {
         backup.set_outcome(
             "ЗАВЕРШЕНО",
             "Обновление завершено без изменения рабочих файлов.",

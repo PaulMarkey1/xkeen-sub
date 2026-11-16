@@ -20,6 +20,7 @@ pub(crate) struct ConfigDocument {
     pub(crate) original: String,
     pub(crate) original_value: Value,
     pub(crate) value: Value,
+    pub(crate) is_new: bool,
 }
 
 pub(crate) fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
@@ -50,6 +51,7 @@ pub(crate) fn load_config_documents() -> AppResult<Vec<ConfigDocument>> {
             original,
             original_value: value.clone(),
             value,
+            is_new: false,
         });
     }
     Ok(docs)

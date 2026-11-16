@@ -154,15 +154,57 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     if state.prepared.is_empty() {
         print_subscription_summary(&state);
         print_baseline_plan(&state);
-        backup.event("UPDATE", "Реальных изменений подписок нет. Загрузка конфигураций Xray и проверка Xray не требуются.")?;
-        backup.set_outcome(
-            "БЕЗ ИЗМЕНЕНИЙ",
-            "Все успешно обработанные подписки совпадают с baseline. Конфигурации Xray не загружались, рабочие файлы не изменялись.",
-            true,
-        );
+
+        if state.baseline_updates.is_empty() && state.baseline_removals.is_empty() {
+            backup.event("UPDATE", "Поддерживаемые подключения и baseline не требуют изменений. Конфигурации Xray не загружались.")?;
+            backup.set_outcome(
+                "БЕЗ ИЗМЕНЕНИЙ",
+                "Поддерживаемые подключения не изменились. Рабочие файлы и baseline не изменялись.",
+                true,
+            );
+            println!();
+            title("ОБНОВЛЕНИЕ ЗАВЕРШЕНО");
+            success("Поддерживаемые подключения не изменились. Рабочие файлы и baseline оставлены без изменений.");
+            return Ok(());
+        }
+
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+        let plan = build_file_plan(&[], &state, &archive)?;
+        print_file_plan(&plan);
+        backup.set_plan_count(plan.len());
+        backup.event("UPDATE", &format!(
+            "Поддерживаемые подключения не изменились. Подготовлено операций только с baseline: {}. Проверка Xray и перезапуск XKeen не требуются.",
+            plan.len()
+        ))?;
+        let sources: Vec<BackupSource> = plan.iter()
+            .filter(|operation| operation.kind != PlannedOperationKind::Create)
+            .map(|operation| BackupSource {
+                path: operation.path.clone(),
+                category: operation.category.to_owned(),
+            })
+            .collect();
+        let progress_total = if plan.is_empty() { 0 } else { sources.len() + plan.len() * 3 + 1 };
+        let mut progress = ProgressBar::new(progress_total);
+        match backup.backup_files_with_progress(&sources, &mut progress) {
+            Ok(saved) => {
+                backup.event("BACKUP", &format!("Резервирование baseline завершено: {saved} файлов сохранено и проверено."))?;
+                if let Err(err) = update_apply::execute_baseline_only(&plan, backup, &mut progress) {
+                    progress.stop("Обновление baseline остановлено");
+                    backup.set_outcome("ОШИБКА BASELINE", &format!("Рабочие файлы Xray не затрагивались. Ошибка обновления baseline: {err}"), false);
+                    return Err(err);
+                }
+                progress.finish("Baseline обновлён");
+                backup.set_outcome("BASELINE ОБНОВЛЁН", "Обновлена только сохранённая версия подписки. Рабочие файлы не менялись, Xray не проверялся и XKeen не перезапускался.", true);
+            }
+            Err(err) => {
+                progress.stop("Резервирование baseline не удалось");
+                backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Обновление baseline не выполнено: {err}"), false);
+                return Err(err);
+            }
+        }
         println!();
         title("ОБНОВЛЕНИЕ ЗАВЕРШЕНО");
-        success("Подписки не изменились. Загрузка конфигов Xray и проверка Xray пропущены.");
+        success("Обновлён только baseline. Рабочие файлы не изменялись, перезапуск XKeen не выполнялся.");
         return Ok(());
     }
 
@@ -632,8 +674,21 @@ fn prepare_subscription(
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;
-        success("Изменений среди распознанных подключений нет. Рабочая группа и baseline сохраняются без изменений.");
-        backup.event("SUBSCRIPTION", &format!("{}: среди распознанных подключений изменений нет; baseline не обновляется.", subscription.id))?;
+        if previous.as_deref().map(|bytes| !byte_contents_equal(Some(bytes), &downloaded)).unwrap_or(true) {
+            state.baseline_updates.push(PreparedBaseline {
+                id: subscription.id.clone(),
+                original: downloaded,
+                path: baseline.clone(),
+            });
+            backup.event("BASELINE", &format!(
+                "{}: поддерживаемые Outbound не изменились; новая исходная версия подписки подготовлена для обновления только baseline.",
+                subscription.id
+            ))?;
+            success("Поддерживаемые подключения не изменились. Будет обновлён только baseline.");
+        } else {
+            success("Изменений среди распознанных подключений нет. Рабочая группа и baseline остаются без изменений.");
+            backup.event("SUBSCRIPTION", &format!("{}: поддерживаемые подключения и исходные байты не изменились.", subscription.id))?;
+        }
         return Ok(());
     }
 
@@ -900,11 +955,11 @@ fn print_baseline_plan(state: &RunState) {
     }
     for item in &state.baseline_updates {
         info_prefix(&item.id, &format!(
-            "обновится после применения рабочих файлов: {} ({} байт).",
+            "обновится после успешной обработки: {} ({} байт).",
             item.path.display(), item.original.len()
         ));
     }
-    info("Baseline будет применён после конфигураций Xray и пользовательского архива.");
+    info("При изменении поддерживаемых подключений baseline применяется вместе с рабочими файлами; при отсутствии таких изменений — отдельно, без проверки Xray и перезапуска XKeen.");
 }
 
 fn print_prepared_documents(docs: &[ConfigDocument]) {

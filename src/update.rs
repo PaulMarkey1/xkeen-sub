@@ -8,7 +8,7 @@ use crate::system::command_exists;
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_plan::build_file_plan;
-use crate::update_subscription::prepare_subscription;
+use crate::update_subscription::prepare_subscriptions;
 use crate::update_report::{print_baseline_plan, print_comparison, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
 use serde_json::Value;
@@ -104,17 +104,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         }
     }).collect());
 
-    let mut state = RunState::default();
-    for subscription in selected {
-        backup.event("SUBSCRIPTION", &format!("Начата обработка {}.", subscription.id))?;
-        prepare_subscription(subscription, &mut state, backup)?;
-        backup.event(
-            "SUBSCRIPTION",
-            &format!("Обработка {} завершена. Загружено: {}, подготовлено изменений: {}, ошибок: {}.",
-                subscription.id, state.downloaded, state.prepared.len(), state.failed.len()),
-        )?;
-    }
-    backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());
+    let state = prepare_subscriptions(&selected, backup)?;
 
     if state.downloaded == 0 {
         println!();

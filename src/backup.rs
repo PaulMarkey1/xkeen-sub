@@ -1036,9 +1036,10 @@ fn restore_file_atomically(path: &Path, content: &[u8], metadata: FileMetadata) 
 
 fn is_allowed_restore_path(path: &Path) -> bool {
     let archive = Path::new("/opt/etc/xkeen-sub/old-user-outbound.json");
+    let subscriptions = Path::new("/opt/etc/xkeen-sub/sub.json");
     let xray_root = Path::new("/opt/etc/xray/configs");
     let baseline_root = Path::new("/opt/etc/xkeen-sub/baseline");
-    if path == archive {
+    if path == archive || path == subscriptions {
         return true;
     }
     let has_parent = path.components().any(|component| matches!(component, Component::ParentDir));

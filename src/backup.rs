@@ -59,6 +59,7 @@ struct BackupRecord {
     path: PathBuf,
     date: String,
     number: usize,
+    is_full: bool,
 }
 
 pub(crate) struct BackupSession {
@@ -81,7 +82,22 @@ impl BackupSession {
     }
 
     fn start_full(reason: &str) -> AppResult<Self> {
-        Self::start_with_suffix(reason, "-full")
+        let root = Path::new(BACKUP_DIR);
+        fs::create_dir_all(root)
+            .map_err(|e| format!("Не удалось создать каталог резервных копий {}: {e}", root.display()))?;
+        let date = current_date()?;
+        let mut number = next_full_number(root, &date)?;
+        let (id, path) = loop {
+            let suffix = if number == 0 { String::new() } else { number.to_string() };
+            let id = format!("{date}--backup-full{suffix}");
+            let path = root.join(&id);
+            match fs::create_dir(&path) {
+                Ok(()) => break (id, path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => number += 1,
+                Err(e) => return Err(format!("Не удалось создать резервную запись {id}: {e}").into()),
+            }
+        };
+        Self::start_in_directory(reason, id, path)
     }
 
     fn start_with_suffix(reason: &str, suffix: &str) -> AppResult<Self> {
@@ -100,7 +116,10 @@ impl BackupSession {
                 Err(e) => return Err(format!("Не удалось создать резервную запись {id}: {e}").into()),
             }
         };
+        Self::start_in_directory(reason, id, path)
+    }
 
+    fn start_in_directory(reason: &str, id: String, path: PathBuf) -> AppResult<Self> {
         let log_path = path.join("log.txt");
         let mut log = OpenOptions::new().write(true).create_new(true).open(&log_path)
             .map_err(|e| format!("Не удалось создать {}: {e}", log_path.display()))?;
@@ -928,8 +947,8 @@ fn load_records() -> AppResult<Vec<BackupRecord>> {
         let entry = entry?;
         if !entry.file_type()?.is_dir() { continue; }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((date, number)) = parse_record_id(&name) {
-            records.push(BackupRecord { id: name, path: entry.path(), date, number });
+        if let Some((date, number, is_full)) = parse_record_id(&name) {
+            records.push(BackupRecord { id: name, path: entry.path(), date, number, is_full });
         }
     }
     records.sort_by(|a, b| {
@@ -947,8 +966,8 @@ fn find_record(id: &str) -> AppResult<BackupRecord> {
     Ok(record)
 }
 
-fn parse_record_id(value: &str) -> Option<(String, usize)> {
-    let (date, number) = value.split_once("--backup")?;
+fn parse_record_id(value: &str) -> Option<(String, usize, bool)> {
+    let (date, suffix) = value.split_once("--backup")?;
     let (day, month_year) = date.split_once('-')?;
     let (month, year) = month_year.split_once('-')?;
     if day.len() != 2 || month.len() != 2 || year.len() != 4
@@ -956,9 +975,22 @@ fn parse_record_id(value: &str) -> Option<(String, usize)> {
         || !month.chars().all(|c| c.is_ascii_digit())
         || !year.chars().all(|c| c.is_ascii_digit())
     { return None; }
-    let number = number.strip_suffix("-full").unwrap_or(number).parse::<usize>().ok()?;
+
+    if let Some(full_number) = suffix.strip_prefix("full") {
+        let number = if full_number.is_empty() { 0 } else { full_number.parse::<usize>().ok()? };
+        return Some((date.to_owned(), number, true));
+    }
+
+    // Keep recognizing names created by the previous full-backup naming scheme.
+    if let Some(number) = suffix.strip_suffix("-full") {
+        let number = number.parse::<usize>().ok()?;
+        if number == 0 { return None; }
+        return Some((date.to_owned(), number, true));
+    }
+
+    let number = suffix.parse::<usize>().ok()?;
     if number == 0 { return None; }
-    Some((date.to_owned(), number))
+    Some((date.to_owned(), number, false))
 }
 
 fn next_number(root: &Path, date: &str) -> AppResult<usize> {
@@ -966,11 +998,23 @@ fn next_number(root: &Path, date: &str) -> AppResult<usize> {
     if !root.exists() { return Ok(1); }
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        if let Some((record_date, number)) = parse_record_id(&entry.file_name().to_string_lossy()) {
-            if record_date == date { max = max.max(number); }
+        if let Some((record_date, number, is_full)) = parse_record_id(&entry.file_name().to_string_lossy()) {
+            if record_date == date && !is_full { max = max.max(number); }
         }
     }
     Ok(max + 1)
+}
+
+fn next_full_number(root: &Path, date: &str) -> AppResult<usize> {
+    let mut max = None;
+    if !root.exists() { return Ok(0); }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if let Some((record_date, number, is_full)) = parse_record_id(&entry.file_name().to_string_lossy()) {
+            if record_date == date && is_full { max = Some(max.unwrap_or(0usize).max(number)); }
+        }
+    }
+    Ok(max.map_or(0, |number| number + 1))
 }
 
 fn read_summary(path: &Path) -> HashMap<String, String> {
@@ -1164,7 +1208,7 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
                 fs::remove_dir_all(&record.path)?;
                 removed += 1;
             }
-        } else {
+        } else if !record.is_full {
             by_date.entry(record.date.clone()).or_default().push(record);
         }
     }
@@ -1226,7 +1270,7 @@ fn run_date(format: &str) -> AppResult<String> {
 }
 
 fn date_from_id(id: &str) -> Option<i64> {
-    let (date, _) = parse_record_id(id)?;
+    let (date, _, _) = parse_record_id(id)?;
     let mut parts = date.split('-');
     let day = parts.next()?.parse::<i64>().ok()?;
     let month = parts.next()?.parse::<i64>().ok()?;
@@ -1254,9 +1298,12 @@ mod tests {
 
     #[test]
     fn parses_daily_backup_ids() {
-        assert_eq!(parse_record_id("14-11-2026--backup3"), Some(("14-11-2026".to_owned(), 3)));
-        assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4)));
+        assert_eq!(parse_record_id("14-11-2026--backup3"), Some(("14-11-2026".to_owned(), 3, false)));
+        assert_eq!(parse_record_id("14-11-2026--backup-full"), Some(("14-11-2026".to_owned(), 0, true)));
+        assert_eq!(parse_record_id("14-11-2026--backup-full1"), Some(("14-11-2026".to_owned(), 1, true)));
+        assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4, true)));
         assert_eq!(parse_record_id("14-11-2026--backup0"), None);
+        assert_eq!(parse_record_id("14-11-2026--backup-full0"), Some(("14-11-2026".to_owned(), 0, true)));
         assert_eq!(parse_record_id("../backup1"), None);
     }
 

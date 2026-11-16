@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::process::{Command, Output};
-use url::Url;
 
+use crate::subscription_url::parse_subscription_url;
 use crate::subscriptions::Subscription;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -19,7 +19,7 @@ const MAX_REDIRECTS: &str = "5";
 /// responses are reported to the caller. The response is deliberately not
 /// parsed here.
 pub fn download_subscription(subscription: &Subscription) -> AppResult<Vec<u8>> {
-    validate_url(&subscription.url).map_err(|error| {
+    parse_subscription_url(&subscription.url).map_err(|error| {
         format!("Некорректный URL подписки {}: {error}", subscription.id)
     })?;
 
@@ -51,17 +51,6 @@ pub fn download_subscription(subscription: &Subscription) -> AppResult<Vec<u8>> 
     }
 
     Ok(output.stdout)
-}
-
-fn validate_url(value: &str) -> Result<(), String> {
-    let parsed = Url::parse(value).map_err(|error| error.to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("разрешены только схемы HTTP и HTTPS".to_owned());
-    }
-    if parsed.host_str().is_none() {
-        return Err("в URL отсутствует host".to_owned());
-    }
-    Ok(())
 }
 
 fn run_curl(url: &str) -> std::io::Result<Output> {
@@ -102,27 +91,3 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::validate_url;
-
-    #[test]
-    fn only_http_and_https_urls_are_allowed() {
-        assert!(validate_url("https://example.com/sub").is_ok());
-        assert!(validate_url("http://example.com/sub").is_ok());
-        assert!(validate_url("ftp://example.com/sub").is_err());
-        assert!(validate_url("not a url").is_err());
-    }
-
-    #[test]
-    fn empty_response_is_detected() {
-        let response: Vec<u8> = Vec::new();
-        assert!(response.is_empty());
-    }
-
-    #[test]
-    fn non_empty_response_is_preserved_as_raw_bytes() {
-        let response = b"{\"outbounds\":[]}".to_vec();
-        assert_eq!(response, b"{\"outbounds\":[]}");
-    }
-}

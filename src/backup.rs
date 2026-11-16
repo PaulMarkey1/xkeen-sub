@@ -77,6 +77,14 @@ pub(crate) struct BackupSession {
 
 impl BackupSession {
     pub(crate) fn start(reason: &str) -> AppResult<Self> {
+        Self::start_with_suffix(reason, "")
+    }
+
+    fn start_full(reason: &str) -> AppResult<Self> {
+        Self::start_with_suffix(reason, "-full")
+    }
+
+    fn start_with_suffix(reason: &str, suffix: &str) -> AppResult<Self> {
         let root = Path::new(BACKUP_DIR);
         fs::create_dir_all(root)
             .map_err(|e| format!("Не удалось создать каталог резервных копий {}: {e}", root.display()))?;
@@ -84,7 +92,7 @@ impl BackupSession {
         let date = current_date()?;
         let mut number = next_number(root, &date)?;
         let (id, path) = loop {
-            let id = format!("{date}--backup{number}");
+            let id = format!("{date}--backup{number}{suffix}");
             let path = root.join(&id);
             match fs::create_dir(&path) {
                 Ok(()) => break (id, path),
@@ -537,7 +545,7 @@ fn create_full_backup() -> AppResult<()> {
     }
     sources.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let mut backup = BackupSession::start("Полный бэкап конфигураций Xray и xkeen-sub")?;
+    let mut backup = BackupSession::start_full("Полный бэкап конфигураций Xray и xkeen-sub")?;
     backup.set_plan_count(sources.len());
     let saved = match backup.backup_files(&sources) {
         Ok(saved) if saved == sources.len() => saved,
@@ -948,7 +956,7 @@ fn parse_record_id(value: &str) -> Option<(String, usize)> {
         || !month.chars().all(|c| c.is_ascii_digit())
         || !year.chars().all(|c| c.is_ascii_digit())
     { return None; }
-    let number = number.parse::<usize>().ok()?;
+    let number = number.strip_suffix("-full").unwrap_or(number).parse::<usize>().ok()?;
     if number == 0 { return None; }
     Some((date.to_owned(), number))
 }
@@ -1247,6 +1255,7 @@ mod tests {
     #[test]
     fn parses_daily_backup_ids() {
         assert_eq!(parse_record_id("14-11-2026--backup3"), Some(("14-11-2026".to_owned(), 3)));
+        assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4)));
         assert_eq!(parse_record_id("14-11-2026--backup0"), None);
         assert_eq!(parse_record_id("../backup1"), None);
     }

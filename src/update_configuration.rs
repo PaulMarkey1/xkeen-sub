@@ -102,8 +102,8 @@ fn prepare_configuration(
         docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
     let obs_updates = prepare_observatory(&mut obs_docs, &tags)?;
     for (name, value) in obs_docs {
-        if let Some(doc) = docs.iter_mut().find(|doc| doc.file_name == name) {
-            doc.value = value;
+        if let Some(index) = docs.iter().position(|doc| doc.file_name == name) {
+            docs[index].value = value;
         } else {
             docs.push(ConfigDocument {
                 file_name: name.clone(),

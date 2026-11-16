@@ -261,6 +261,32 @@ pub(crate) fn prepare_subscription(
     Ok(())
 }
 
+/// Prepares the selected subscriptions in order and records the resulting run state.
+pub(crate) fn prepare_subscriptions(
+    selected: &[&Subscription],
+    backup: &mut BackupSession,
+) -> AppResult<RunState> {
+    let mut state = RunState::default();
+
+    for subscription in selected {
+        backup.event("SUBSCRIPTION", &format!("Начата обработка {}.", subscription.id))?;
+        prepare_subscription(subscription, &mut state, backup)?;
+        backup.event(
+            "SUBSCRIPTION",
+            &format!(
+                "Обработка {} завершена. Загружено: {}, подготовлено изменений: {}, ошибок: {}.",
+                subscription.id,
+                state.downloaded,
+                state.prepared.len(),
+                state.failed.len()
+            ),
+        )?;
+    }
+
+    backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());
+    Ok(state)
+}
+
 fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
     let name = subscription
         .name

@@ -74,6 +74,45 @@ pub(crate) fn merge_outbounds(
     Ok((final_outbounds, replacements, conflicts))
 }
 
+/// Rebuilds all subscription-managed groups from baseline data while preserving user outbounds.
+pub(crate) fn rebuild_outbounds(
+    working: &[Value],
+    subscriptions: &[Subscription],
+    rebuilt: &BTreeMap<u64, Vec<Value>>,
+) -> AppResult<Vec<Value>> {
+    let mut user_outbounds = Vec::new();
+    for outbound in working {
+        let tag = outbound.get("tag").and_then(Value::as_str)
+            .ok_or("В Рабочем Outbound найден элемент без Tag.")?;
+        if number_from_tag(tag).is_none() {
+            user_outbounds.push(outbound.clone());
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut expected_numbers = HashSet::new();
+    for subscription in subscriptions {
+        let number = subscription_id_number(&subscription.id)
+            .ok_or_else(|| format!("Некорректный ID подписки: {}.", subscription.id))?;
+        if !expected_numbers.insert(number) {
+            return Err(format!("Повторяется номер подписки: {}.", subscription.id).into());
+        }
+        if let Some(group) = rebuilt.get(&number) {
+            result.extend(group.iter().cloned());
+        }
+    }
+
+    for number in rebuilt.keys() {
+        if !expected_numbers.contains(number) {
+            return Err(format!("Подготовлена группа для отсутствующей подписки sub{number}.").into());
+        }
+    }
+
+    result.extend(user_outbounds);
+    collect_tags(&result)?;
+    Ok(result)
+}
+
 pub(crate) fn load_archive() -> AppResult<ArchivePlan> {
     let path = Path::new(USER_ARCHIVE);
     if !path.exists() { return Ok(ArchivePlan { outbounds: Vec::new(), added: 0 }); }

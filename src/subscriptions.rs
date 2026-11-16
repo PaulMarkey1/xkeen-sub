@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-const SUBSCRIPTIONS_FILE: &str = "/opt/etc/xkeen-sub/sub.json";
+pub(crate) const SUBSCRIPTIONS_FILE: &str = "/opt/etc/xkeen-sub/sub.json";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SubscriptionStore {

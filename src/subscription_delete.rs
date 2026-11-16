@@ -120,7 +120,7 @@ fn prepare_deletion(
         state.baseline_updates.push(PreparedBaseline {
             id: subscription.id.clone(),
             original: raw_baseline,
-            path: new_path,
+            path: new_path.clone(),
         });
 
         let mut outbounds = Vec::with_capacity(parsed.outbounds.len());

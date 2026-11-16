@@ -1,12 +1,12 @@
 use std::error::Error;
-use crate::subscription_identity::SubscriptionIdentity;
-use crate::subscriptions::{load_subscriptions, save_subscriptions};
-use crate::terminal::{error, info, menu_item, read_input, success, title, separator};
+use crate::subscriptions::load_subscriptions;
+use crate::subscription_delete::delete_subscription;
+use crate::terminal::{error, info, menu_item, read_input, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 pub fn run() -> AppResult<bool> {
-    let mut store = load_subscriptions()?;
+    let store = load_subscriptions()?;
 
     if store.subscriptions.is_empty() {
         info("Подписок пока нет — удалять нечего.");
@@ -52,19 +52,7 @@ pub fn run() -> AppResult<bool> {
 
         match read_input("Введите номер: ")?.as_str() {
             "1" => {
-                store.subscriptions.remove(index);
-
-                for (number, subscription) in store.subscriptions.iter_mut().enumerate() {
-                    let identity = SubscriptionIdentity::from_number(
-                        number + 1,
-                        subscription.name.as_deref(),
-                    );
-                    subscription.id = identity.id;
-                    subscription.prefix = identity.prefix;
-                }
-
-                save_subscriptions(&store)?;
-                success("Подписка удалена. Номера оставшихся подписок обновлены.");
+                delete_subscription(store, index)?;
                 return Ok(false);
             }
             "2" => {

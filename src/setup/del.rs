@@ -1,9 +1,9 @@
 use std::error::Error;
+use crate::subscription_identity::SubscriptionIdentity;
 use crate::subscriptions::{load_subscriptions, save_subscriptions};
 use crate::terminal::{error, info, menu_item, read_input, success, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
-
 
 pub fn run() -> AppResult<bool> {
     let mut store = load_subscriptions()?;
@@ -55,12 +55,12 @@ pub fn run() -> AppResult<bool> {
                 store.subscriptions.remove(index);
 
                 for (number, subscription) in store.subscriptions.iter_mut().enumerate() {
-                    let id = format!("sub{}", number + 1);
-                    subscription.id = id.clone();
-                    subscription.prefix = match subscription.name.as_deref() {
-                        Some(name) => format!("{id}--{name}--"),
-                        None => format!("{id}--"),
-                    };
+                    let identity = SubscriptionIdentity::from_number(
+                        number + 1,
+                        subscription.name.as_deref(),
+                    );
+                    subscription.id = identity.id;
+                    subscription.prefix = identity.prefix;
                 }
 
                 save_subscriptions(&store)?;
@@ -78,4 +78,3 @@ pub fn run() -> AppResult<bool> {
         }
     }
 }
-

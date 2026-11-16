@@ -16,6 +16,7 @@ mod temp_counter;
 mod xray_test;
 mod update;
 mod update_config;
+mod update_plan;
 mod update_merge;
 mod update_apply;
 

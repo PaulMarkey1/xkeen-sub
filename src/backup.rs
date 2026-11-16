@@ -977,7 +977,7 @@ fn parse_record_id(value: &str) -> Option<(String, usize, bool)> {
         || !year.chars().all(|c| c.is_ascii_digit())
     { return None; }
 
-    if let Some(full_number) = suffix.strip_prefix("full") {
+    if let Some(full_number) = suffix.strip_prefix("-full") {
         let number = if full_number.is_empty() { 0 } else { full_number.parse::<usize>().ok()? };
         return Some((date.to_owned(), number, true));
     }

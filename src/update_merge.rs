@@ -113,6 +113,43 @@ pub(crate) fn rebuild_outbounds(
     Ok(result)
 }
 
+/// Ensures the final outbound list contains one outbound for each required service protocol.
+/// Existing service outbounds are preserved; missing ones are appended with collision-free tags.
+pub(crate) fn ensure_service_outbounds(outbounds: &mut Vec<Value>) -> AppResult<Vec<String>> {
+    let mut tags = HashSet::new();
+    for outbound in outbounds.iter() {
+        let tag = outbound.get("tag").and_then(Value::as_str)
+            .filter(|tag| !tag.is_empty())
+            .ok_or("Итоговый Outbound содержит пустой или отсутствующий Tag.")?;
+        tags.insert(tag.to_owned());
+    }
+
+    let mut added = Vec::new();
+    for (protocol, base_tag) in [("freedom", "direct"), ("blackhole", "block")] {
+        if outbounds.iter().any(|outbound| {
+            outbound.get("protocol").and_then(Value::as_str) == Some(protocol)
+        }) {
+            continue;
+        }
+
+        let mut tag = base_tag.to_owned();
+        let mut suffix = 1u64;
+        while tags.contains(&tag) {
+            tag = format!("{base_tag}{suffix}");
+            suffix += 1;
+        }
+
+        let mut outbound = serde_json::Map::new();
+        outbound.insert("protocol".to_owned(), Value::String(protocol.to_owned()));
+        outbound.insert("tag".to_owned(), Value::String(tag.clone()));
+        outbounds.push(Value::Object(outbound));
+        tags.insert(tag.clone());
+        added.push(format!("{protocol}:{tag}"));
+    }
+
+    Ok(added)
+}
+
 pub(crate) fn load_archive() -> AppResult<ArchivePlan> {
     let path = Path::new(USER_ARCHIVE);
     if !path.exists() { return Ok(ArchivePlan { outbounds: Vec::new(), added: 0 }); }
@@ -195,6 +232,52 @@ mod tests {
     use crate::subscription_identity::{number_from_id, number_from_tag};
     use crate::outbound_compare::outbound_parameters_equal;
     use serde_json::json;
+
+    #[test]
+    fn adds_missing_service_outbounds_with_base_tags() {
+        let mut outbounds = vec![json!({"tag":"node","protocol":"vless"})];
+        let added = super::ensure_service_outbounds(&mut outbounds).unwrap();
+        assert_eq!(added, vec!["freedom:direct", "blackhole:block"]);
+        assert_eq!(outbounds[1], json!({"protocol":"freedom","tag":"direct"}));
+        assert_eq!(outbounds[2], json!({"protocol":"blackhole","tag":"block"}));
+    }
+
+    #[test]
+    fn adds_suffix_when_service_tag_is_used_by_another_protocol() {
+        let mut outbounds = vec![
+            json!({"tag":"direct","protocol":"vless"}),
+            json!({"tag":"block","protocol":"socks"}),
+            json!({"tag":"direct1","protocol":"trojan"}),
+        ];
+        super::ensure_service_outbounds(&mut outbounds).unwrap();
+        assert_eq!(outbounds[3], json!({"protocol":"freedom","tag":"direct2"}));
+        assert_eq!(outbounds[4], json!({"protocol":"blackhole","tag":"block1"}));
+    }
+
+    #[test]
+    fn keeps_existing_service_protocols_even_with_custom_tags() {
+        let mut outbounds = vec![
+            json!({"tag":"my-direct","protocol":"freedom","settings":{"domainStrategy":"UseIPv4"}}),
+            json!({"tag":"my-block","protocol":"blackhole"}),
+        ];
+        let added = super::ensure_service_outbounds(&mut outbounds).unwrap();
+        assert!(added.is_empty());
+        assert_eq!(outbounds.len(), 2);
+        assert_eq!(outbounds[0]["settings"]["domainStrategy"], "UseIPv4");
+    }
+
+    #[test]
+    fn service_outbounds_are_appended_after_existing_entries() {
+        let mut outbounds = vec![
+            json!({"tag":"first","protocol":"vless"}),
+            json!({"tag":"second","protocol":"socks"}),
+        ];
+        super::ensure_service_outbounds(&mut outbounds).unwrap();
+        assert_eq!(outbounds[0]["tag"], "first");
+        assert_eq!(outbounds[1]["tag"], "second");
+        assert_eq!(outbounds[2]["tag"], "direct");
+        assert_eq!(outbounds[3]["tag"], "block");
+    }
 
     #[test]
     fn selector_tags_exclude_service_protocols_and_api_tag() {

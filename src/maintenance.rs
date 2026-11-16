@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::system::command_exists;
 use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -335,10 +336,6 @@ fn download(url: &str, destination: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn command_exists(command: &str) -> bool {
-    Command::new("sh").args(["-c", &format!("command -v {command} >/dev/null 2>&1")])
-        .status().map(|status| status.success()).unwrap_or(false)
-}
 
 fn temporary_path(executable: &Path, operation: &str) -> PathBuf {
     executable.with_file_name(format!(".xkeen-sub.{operation}.{}", std::process::id()))

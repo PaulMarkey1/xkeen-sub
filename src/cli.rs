@@ -59,6 +59,7 @@ fn print_help() -> AppResult<()> {
     command_item("setup help", "Показать справку по настройке");
     println!();
     command_item("backup", "Настроить и просмотреть резервные копии");
+    command_item("  full", "Создать полный бэкап конфигураций Xray и xkeen-sub");
     command_item("  days N", "Установить срок хранения (минимум 3 дня)");
     command_item("  limit N", "Установить дневной лимит (минимум 10 записей)");
     command_item("  mode auto|unlimited", "Выбрать режим хранения");

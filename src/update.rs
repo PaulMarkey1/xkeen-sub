@@ -4,39 +4,17 @@ use crate::subscriptions::{load_subscriptions, Subscription};
 use crate::system::command_exists;
 use crate::terminal::{error, info, success, title, warning};
 use crate::update_subscription::prepare_subscriptions;
+use crate::update_state::RunState;
 use crate::update_configuration::update_configuration;
 use crate::update_baseline::apply_baseline_only;
 use crate::update_report::{print_baseline_plan, print_subscription_summary};
 
-use serde_json::Value;
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
-
-pub(crate) struct PreparedSubscription {
-    pub(crate) id: String,
-    pub(crate) outbounds: Vec<Value>,
-}
-
-pub(crate) struct PreparedBaseline {
-    pub(crate) id: String,
-    pub(crate) original: Vec<u8>,
-    pub(crate) path: PathBuf,
-}
-
-#[derive(Default)]
-pub(crate) struct RunState {
-    pub(crate) prepared: Vec<PreparedSubscription>,
-    pub(crate) baseline_updates: Vec<PreparedBaseline>,
-    pub(crate) baseline_removals: Vec<(String, PathBuf)>,
-    pub(crate) failed: Vec<(String, String)>,
-    pub(crate) downloaded: usize,
-    pub(crate) processed: usize,
-}
 
 /// Downloads and analyses subscriptions, prepares documents, validates the
 /// complete Xray configuration, backs up originals, then applies the plan with
@@ -48,7 +26,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
 
     let result = run_inner(target_id, &mut backup);
     if let Err(ref error) = result {
-        if backup_status_is_running(&backup) {
+        if backup.is_running() {
             backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
         }
     } else if backup_status_is_running(&backup) {
@@ -67,10 +45,6 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
         return Err(format!("Не удалось завершить журнал резервной записи: {error}").into());
     }
     result
-}
-
-fn backup_status_is_running(backup: &BackupSession) -> bool {
-    backup.is_running()
 }
 
 fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<()> {

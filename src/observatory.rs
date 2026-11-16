@@ -60,7 +60,7 @@ pub fn prepare_observatory(
 
     if let Some((file_name, document)) = documents
         .iter_mut()
-        .find(|(file_name, _)| file_name == "observatory.json")
+        .find(|(file_name, _)| file_name.as_str() == "observatory.json")
     {
         let root = document.as_object_mut().ok_or_else(|| {
             "Корень файла observatory.json должен быть JSON-объектом.".to_owned()

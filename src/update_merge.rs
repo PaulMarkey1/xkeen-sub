@@ -191,7 +191,7 @@ pub(crate) fn collect_tags(outbounds: &[Value]) -> AppResult<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_outbound, collect_selector_tags, ArchivePlan};
+    use super::{archive_outbound, collect_selector_tags, rebuild_outbounds, ArchivePlan};
     use crate::subscription_identity::{number_from_id, number_from_tag};
     use crate::outbound_compare::outbound_parameters_equal;
     use serde_json::json;
@@ -277,6 +277,36 @@ mod tests {
         assert!(conflicts.is_empty());
         assert_eq!(archive.added, 1);
         assert_eq!(archive.outbounds[0]["tag"], "same-name");
+    }
+
+    #[test]
+    fn full_rebuild_drops_old_subscription_groups_and_preserves_user_outbounds() {
+        use std::collections::BTreeMap;
+        use crate::subscriptions::Subscription;
+
+        let subscriptions = vec![
+            Subscription {
+                id: "sub1".to_owned(),
+                name: Some("Japan".to_owned()),
+                url: "https://example.com/one".to_owned(),
+                prefix: "sub1--Japan--".to_owned(),
+            },
+        ];
+        let working = vec![
+            json!({"tag":"sub1--old","protocol":"vless"}),
+            json!({"tag":"sub2--removed","protocol":"vless"}),
+            json!({"tag":"custom-user","protocol":"socks"}),
+        ];
+        let rebuilt = BTreeMap::from([(
+            1,
+            vec![json!({"tag":"sub1--Japan--new","protocol":"vless"})],
+        )]);
+
+        let result = rebuild_outbounds(&working, &subscriptions, &rebuilt).unwrap();
+        let tags: Vec<&str> = result.iter()
+            .map(|item| item["tag"].as_str().unwrap()).collect();
+
+        assert_eq!(tags, vec!["sub1--Japan--new", "custom-user"]);
     }
 
     #[test]

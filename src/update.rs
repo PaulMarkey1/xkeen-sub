@@ -4,11 +4,11 @@ use crate::observatory::synchronize_subject_selectors;
 use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, subscription_id_number, ArchivePlan};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::subscriptions::{load_subscriptions, Subscription};
-use crate::terminal::{error, info, info_prefix, success, title, warning, ProgressBar};
+use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_plan::build_file_plan;
 use crate::update_subscription::prepare_subscription;
-use crate::update_report::{print_baseline_plan, print_comparison, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test, show_value};
+use crate::update_report::{print_baseline_plan, print_comparison, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
 use serde_json::Value;
 use std::collections::BTreeMap;

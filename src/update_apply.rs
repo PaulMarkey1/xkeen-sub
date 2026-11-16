@@ -307,7 +307,7 @@ fn validate_target(operation: &PlannedFileOperation) -> AppResult<()> {
         return Err(format!("Путь не соответствует категории операции: {}", path.display()).into());
     }
     match fs::symlink_metadata(path) {
-        Ok(metadata) if operation.kind == PlannedOperationKind::Create => {
+        Ok(_metadata) if operation.kind == PlannedOperationKind::Create => {
             return Err(format!("Файл для операции Create уже существует: {}", path.display()).into());
         }
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {

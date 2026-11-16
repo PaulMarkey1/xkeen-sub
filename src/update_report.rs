@@ -7,7 +7,7 @@ use crate::update_state::RunState;
 use crate::update_apply::{PlannedFileOperation, PlannedOperationKind};
 use crate::update_config::ConfigDocument;
 use crate::update_merge::ArchivePlan;
-use crate::update::PreparedSubscription;
+use crate::update_state::PreparedSubscription;
 
 use crate::terminal::{error, info, info_prefix, success, title, warning};
 

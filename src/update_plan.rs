@@ -222,6 +222,7 @@ mod file_plan_tests {
             original: original.to_owned(),
             original_value: value.clone(),
             value,
+            is_new: false,
         };
         let state = RunState::default();
         let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
@@ -253,6 +254,41 @@ mod file_plan_tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].kind, PlannedOperationKind::Replace);
         assert_eq!(plan[0].path, root.join("01_log.json"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_config_document_is_planned_as_create() {
+        let root = temporary_path("plan-new-config");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("observatory.json");
+        let value = json!({
+            "observatory": {
+                "subjectSelector": ["sub1--node"],
+                "probeUrl": "https://www.google.com/generate_204",
+                "probeInterval": "60s",
+                "enableConcurrency": true
+            }
+        });
+        let doc = ConfigDocument {
+            file_name: "observatory.json".to_owned(),
+            path: path.clone(),
+            original: String::new(),
+            original_value: serde_json::Value::Null,
+            value: value.clone(),
+            is_new: true,
+        };
+        let state = RunState::default();
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+
+        let plan = build_file_plan(&[doc], &state, &archive).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, PlannedOperationKind::Create);
+        assert_eq!(plan[0].path, path);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(plan[0].content.as_ref().unwrap()).unwrap(),
+            value
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

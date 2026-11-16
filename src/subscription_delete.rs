@@ -7,7 +7,7 @@ use crate::backup::BackupSession;
 use crate::subscription_identity::SubscriptionIdentity;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::SubscriptionStore;
-use crate::terminal::{error, success, warning};
+use crate::terminal::{error, success};
 use crate::update_configuration::rebuild_configuration;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;

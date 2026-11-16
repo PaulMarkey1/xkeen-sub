@@ -287,23 +287,27 @@ pub(crate) fn prepare_subscriptions(
     Ok(state)
 }
 
-fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
-    let name = subscription
-        .name
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("У подписки {} не задано имя для baseline.", subscription.id))?;
+pub(crate) fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
+    let name = subscription.name.as_deref()
+        .filter(|value| !value.trim().is_empty());
 
-    for component in [&subscription.id, name] {
-        if component == "." || component == ".."
-            || component.contains('/')
-            || component.contains('\\')
-        {
+    if subscription.id == "." || subscription.id == ".."
+        || subscription.id.contains('/')
+        || subscription.id.contains('\\')
+    {
+        return Err(format!("Недопустимый ID для baseline: {}.", subscription.id).into());
+    }
+    if let Some(name) = name {
+        if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
             return Err(format!("Недопустимое имя baseline для {}.", subscription.id).into());
         }
     }
 
-    Ok(Path::new(BASELINE_DIR).join(format!("{}--{}.json", subscription.id, name)))
+    let file_name = match name {
+        Some(name) => format!("{}--{}.json", subscription.id, name),
+        None => format!("{}.json", subscription.id),
+    };
+    Ok(Path::new(BASELINE_DIR).join(file_name))
 }
 
 fn byte_contents_equal(previous: Option<&[u8]>, current: &[u8]) -> bool {

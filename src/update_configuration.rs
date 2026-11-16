@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::backup::{BackupSession, BackupSource};
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
-use crate::observatory::{prepare_observatory, ObservatoryUpdate};
+use crate::observatory::prepare_observatory;
 use crate::subscriptions::{Subscription, SubscriptionStore};
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_state::{PreparedSubscription, RunState};

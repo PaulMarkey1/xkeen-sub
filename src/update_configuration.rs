@@ -6,13 +6,13 @@ use serde_json::Value;
 use crate::backup::{BackupSession, BackupSource};
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
 use crate::observatory::{synchronize_subject_selectors, ObservatoryUpdate};
-use crate::subscriptions::Subscription;
+use crate::subscriptions::{Subscription, SubscriptionStore};
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_merge::{collect_selector_tags, collect_tags, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
-use crate::update_plan::build_file_plan;
+use crate::update_plan::{build_file_plan, build_file_plan_with_registry};
 use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -34,7 +34,7 @@ pub(crate) fn update_configuration(
     state: &RunState,
     backup: &mut BackupSession,
 ) -> AppResult<()> {
-    update_configuration_with_mode(subscriptions, state, backup, false)
+    update_configuration_with_mode(subscriptions, state, backup, false, None)
 }
 
 /// Rebuilds every subscription-managed outbound group from baseline snapshots.
@@ -42,8 +42,9 @@ pub(crate) fn rebuild_configuration(
     subscriptions: &[Subscription],
     state: &RunState,
     backup: &mut BackupSession,
+    store: &SubscriptionStore,
 ) -> AppResult<()> {
-    update_configuration_with_mode(subscriptions, state, backup, true)
+    update_configuration_with_mode(subscriptions, state, backup, true, Some(store))
 }
 
 fn update_configuration_with_mode(
@@ -51,9 +52,10 @@ fn update_configuration_with_mode(
     state: &RunState,
     backup: &mut BackupSession,
     rebuild_all: bool,
+    registry: Option<&SubscriptionStore>,
 ) -> AppResult<()> {
     let prepared = prepare_configuration(subscriptions, state, backup, rebuild_all)?;
-    apply_configuration(prepared, state, backup)
+    apply_configuration(prepared, state, backup, registry)
 }
 
 fn prepare_configuration(
@@ -154,6 +156,7 @@ fn apply_configuration(
     prepared: PreparedConfiguration,
     state: &RunState,
     backup: &mut BackupSession,
+    registry: Option<&SubscriptionStore>,
 ) -> AppResult<()> {
     let PreparedConfiguration {
         docs,
@@ -173,7 +176,10 @@ fn apply_configuration(
         backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", false);
     } else {
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
-        let plan = build_file_plan(&docs, state, &archive)?;
+        let plan = match registry {
+            Some(store) => build_file_plan_with_registry(&docs, state, &archive, store)?,
+            None => build_file_plan(&docs, state, &archive)?,
+        };
         no_file_changes = plan.is_empty();
         print_file_plan(&plan);
         backup.set_plan_count(plan.len());

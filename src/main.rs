@@ -17,6 +17,7 @@ mod temp_counter;
 mod xray_test;
 mod update;
 mod update_baseline;
+mod update_configuration;
 mod update_config;
 mod update_plan;
 mod update_report;

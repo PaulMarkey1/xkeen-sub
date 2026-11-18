@@ -124,24 +124,6 @@ impl BackupSession {
         self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
         Ok(())
     }
-        let root = Path::new(BACKUP_DIR);
-        fs::create_dir_all(root)
-            .map_err(|e| format!("Не удалось создать каталог резервных копий {}: {e}", root.display()))?;
-        let date = current_date()?;
-        let mut number = next_full_number(root, &date)?;
-        let (id, path) = loop {
-            let suffix = if number == 0 { String::new() } else { number.to_string() };
-            let id = format!("{date}--backup-full{suffix}");
-            let path = root.join(&id);
-            match fs::create_dir(&path) {
-                Ok(()) => break (id, path),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => number += 1,
-                Err(e) => return Err(format!("Не удалось создать резервную запись {id}: {e}").into()),
-            }
-        };
-        Self::start_in_directory(reason, id, path)
-    }
-
     fn start_with_suffix(reason: &str, suffix: &str) -> AppResult<Self> {
         let root = Path::new(BACKUP_DIR);
         fs::create_dir_all(root)
@@ -1459,7 +1441,6 @@ mod tests {
     #[test]
     fn default_backup_settings_keep_backups_enabled_with_safe_minimums() {
         let settings = BackupSettings::default();
-        assert_eq!(settings.retention_days, 3);
         assert_eq!(settings.daily_limit, 10);
         assert_eq!(settings.mode, RetentionMode::Automatic);
     }

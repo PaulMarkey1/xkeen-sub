@@ -837,68 +837,46 @@ fn restore_legacy_record(record: &BackupRecord) -> AppResult<()> {
     }
     let status = read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
     if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "ПОЛНЫЙ БЭКАП СОЗДАН" && status != "УСПЕШНО" {
-        warning("Эта запись не содержит подтверждённую полную резервную копию. Восстановление запрещено.");
+        warning("Эта старая запись не содержит подтверждённую резервную копию. Восстановление запрещено.");
         return Ok(());
     }
     let log_path = record.path.join("log.txt");
     let mappings = read_file_mappings(&log_path)?;
     let created_paths = read_created_paths(&log_path)?;
     if mappings.is_empty() && created_paths.is_empty() {
-        warning("В резервной записи нет файловых операций для восстановления.");
+        warning("В старой резервной записи нет файловых операций для восстановления.");
         return Ok(());
     }
 
     let mut targets = BTreeSet::new();
-    for (source, _) in &mappings {
-        targets.insert(source.clone());
-    }
-    for path in &created_paths {
-        targets.insert(path.clone());
-    }
+    for (source, _) in &mappings { targets.insert(source.clone()); }
+    for path in &created_paths { targets.insert(path.clone()); }
     if !confirm(&format!(
-        "Восстановить резервную запись {}? Будут возвращены {} сохранённых файлов и удалены {} файлов, созданных обновлением.",
+        "Восстановить старую резервную запись {}? Будут возвращены {} сохранённых файлов и удалены {} файлов, созданных обновлением.",
         record.id, mappings.len(), created_paths.len()
     ))? {
         warning("Восстановление отменено.");
         return Ok(());
     }
 
-    let mut existing = Vec::new();
-    let mut missing_before = Vec::new();
-    for source in &targets {
-        if source.exists() {
-            existing.push(BackupSource { path: source.clone(), category: "Перед восстановлением".to_owned() });
-        } else {
-            missing_before.push(source.clone());
-        }
-    }
-
-    let mut safety = BackupSession::start("Резервная копия перед ручным восстановлением")?;
-    safety.set_plan_count(existing.len());
-    let safety_saved = match safety.backup_files(&existing) {
-        Ok(count) => count,
-        Err(error) => {
-            safety.set_outcome("ОШИБКА", &format!("Не удалось создать защитную копию перед восстановлением: {error}"), false);
-            let _ = safety.finish();
-            return Err(error);
-        }
-    };
-    safety.set_outcome("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", false);
+    // The rollback point is a full snapshot, even when the selected legacy
+    // record contains only a subset of the configuration files.
+    let mut safety = BackupSession::start("Полный защитный снимок перед восстановлением старой точки")?;
+    safety.set_outcome("УСПЕШНО", "Создан полный защитный снимок текущего состояния перед восстановлением старой точки.", false);
     safety.finish()?;
+    let safety_record = find_record(safety.id())?;
 
     let restore_result: AppResult<()> = (|| {
         for (source, stored) in &mappings {
             validate_relative_path(stored)?;
             let saved = record.path.join(stored);
-            if !saved.is_file() {
-                return Err(format!("Файл резервной копии отсутствует: {}", saved.display()).into());
+            let metadata_file = fs::symlink_metadata(&saved)
+                .map_err(|e| format!("Не удалось проверить резервный файл {}: {e}", saved.display()))?;
+            if metadata_file.file_type().is_symlink() || !metadata_file.is_file() {
+                return Err(format!("Резервный объект не является обычным файлом: {}", saved.display()).into());
             }
-            if let Some(parent) = source.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let bytes = fs::read(&saved)
-                .map_err(|e| format!("Не удалось прочитать резервный файл {}: {e}", saved.display()))?;
-            let metadata = read_file_metadata(&record.path.join("log.txt"), source)?
+            let bytes = fs::read(&saved)?;
+            let metadata = read_file_metadata(&log_path, source)?
                 .ok_or_else(|| format!("В журнале отсутствуют метаданные файла: {}", source.display()))?;
             if file_checksum(&bytes) != metadata.checksum {
                 return Err(format!("Контрольная сумма резервного файла не совпадает: {}", saved.display()).into());
@@ -921,35 +899,14 @@ fn restore_legacy_record(record: &BackupRecord) -> AppResult<()> {
     })();
 
     if let Err(error) = restore_result {
-        for source in &missing_before {
-            let _ = fs::remove_file(source);
-        }
-        if safety_saved > 0 {
-            if let Ok(safety_record) = find_record(safety.id()) {
-                if let Ok(safety_mappings) = read_file_mappings(&safety_record.path.join("log.txt")) {
-                    for (source, stored) in safety_mappings {
-                        let saved = safety_record.path.join(stored);
-                        if saved.is_file() {
-                            if fs::copy(&saved, &source).is_ok() {
-                                if fs::read(&saved).ok() != fs::read(&source).ok() {
-                                    let _ = safety.event("ROLLBACK", &format!("Побайтовая проверка отката не пройдена: {}", source.display()));
-                                } else {
-                                    let _ = safety.event("ROLLBACK", &format!("Исходное состояние восстановлено: {}", source.display()));
-                                }
-                            } else {
-                                let _ = safety.event("ROLLBACK", &format!("Не удалось восстановить исходное состояние: {}", source.display()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let rollback = apply_full_snapshot(&safety_record);
         let service_restart = crate::update_apply::start_xkeen_after_restore_rollback(&mut safety);
-        safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}; запуск XKeen после отката: {service_restart}"))?;
-        return Err(error);
+        let rollback_text = rollback.as_ref().map(|_| "успешно".to_owned()).unwrap_or_else(|failure| format!("ошибка: {failure}"));
+        safety.event("RESTORE", &format!("Восстановление старой точки не удалось: {error}; откат полного состояния: {rollback_text}; запуск XKeen после отката: {service_restart}"))?;
+        return Err(format!("Восстановление старой точки не удалось: {error}; откат полного состояния: {rollback_text}").into());
     }
 
-    safety.event("RESTORE", &format!("Резервная запись {} восстановлена; все файлы прошли побайтовую проверку.", record.id))?;
+    safety.event("RESTORE", &format!("Старая резервная запись {} восстановлена; текущая конфигурация проверена.", record.id))?;
     match load_settings().and_then(|settings| prune_records(&settings, safety.id())) {
         Ok(removed) if removed > 0 => safety.event("RETENTION", &format!("После восстановления удалено старых записей: {removed}."))?,
         Ok(_) => {}
@@ -958,7 +915,7 @@ fn restore_legacy_record(record: &BackupRecord) -> AppResult<()> {
             warning("Восстановление завершено, но автоматическая очистка резервных копий не выполнена.");
         }
     }
-    success("Резервная копия восстановлена. Побайтовая проверка пройдена.");
+    success("Старая резервная запись восстановлена.");
     Ok(())
 }
 

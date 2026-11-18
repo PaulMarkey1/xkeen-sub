@@ -32,7 +32,11 @@ pub fn run() -> AppResult<bool> {
     };
 
     let url = loop {
-        let value = read_input("Введите URL подписки: ")?;
+        let value = read_input("Введите URL подписки (0 — отмена): ")?;
+        if value.trim() == "0" {
+            info("Добавление подписки отменено.");
+            return Ok(false);
+        }
         match normalize_subscription_url(value.trim()) {
             Ok(valid_url) => break valid_url,
             Err(reason) => error(&format!(

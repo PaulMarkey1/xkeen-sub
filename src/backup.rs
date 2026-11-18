@@ -1437,7 +1437,7 @@ fn is_active_or_incomplete_record(record: &BackupRecord) -> bool {
 fn is_active_record(record: &BackupRecord) -> bool {
     let summary = read_summary(&record.path.join("log.txt"));
     let Some(pid) = summary.get("pid").and_then(|value| value.parse::<u32>().ok()) else {
-        return summary.get("status").map(String::as_str) == Some("ВЫПОЛНЯЕТСЯ");
+        return false;
     };
     if Path::new("/proc").is_dir() {
         Path::new(&format!("/proc/{pid}")).exists()

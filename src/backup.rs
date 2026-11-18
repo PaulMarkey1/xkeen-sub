@@ -12,6 +12,10 @@ use crate::terminal::{error, info, info_prefix, menu_item, menu_item_prefix, rea
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 pub(crate) const BACKUP_DIR: &str = "/opt/etc/xkeen-sub/backup";
+const XRAY_BACKUP_DIR: &str = "/opt/etc/xray/configs/backups";
+const SUBSCRIPTIONS_FILE: &str = "/opt/etc/xkeen-sub/sub.json";
+const BASELINE_DIR: &str = "/opt/etc/xkeen-sub/baseline";
+const USER_ARCHIVE_FILE: &str = "/opt/etc/xkeen-sub/old-user-outbound.json";
 const SETTINGS_FILE: &str = "/opt/etc/xkeen-sub/backup-settings.json";
 const AUTOMATIC_RETENTION_DAYS: i64 = 3;
 const MIN_DAILY_LIMIT: usize = 5;
@@ -113,9 +117,7 @@ impl BackupSession {
 
     fn capture_full_snapshot(&mut self) -> AppResult<()> {
         let mut sources = Vec::new();
-        collect_backup_files(Path::new("/opt/etc/xray/configs"), "Конфигурация Xray", &mut sources)?;
-        collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "Конфигурация xkeen-sub", &mut sources)?;
-        sources.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+        collect_snapshot_files(&mut sources, true)?;
         sources.sort_by(|a, b| a.path.cmp(&b.path));
         if sources.is_empty() { return Err("Полный снимок не создан: не найдены файлы конфигурации.".into()); }
         self.planned_files = sources.len();
@@ -128,7 +130,7 @@ impl BackupSession {
         }
         self.snapshot_complete = true;
         self.event("SNAPSHOT", &format!("FULL_V1 files={saved}"))?;
-        self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
+        self.event("SNAPSHOT", "Полный снимок рабочих конфигураций Xray и данных подписок создан и проверен.")?;
         Ok(())
     }
     fn start_with_suffix(reason: &str, suffix: &str) -> AppResult<Self> {
@@ -573,8 +575,8 @@ fn change_mode() -> AppResult<()> {
 
 fn create_full_backup() -> AppResult<()> {
     title("СОЗДАНИЕ USER-BACKUP");
-    info("Будет сохранён полный снимок всех файлов конфигурации Xray и xkeen-sub.");
-    info("Включая подписки, baseline, архив пользовательских подключений и настройки резервирования.");
+    info("Будет сохранён снимок рабочих конфигураций Xray, подписок, baseline и пользовательских подключений.");
+    info("Служебные файлы программы, настройки хранения и каталоги резервных копий в снимок не входят.");
     if !confirm("Создать полную резервную копию текущего состояния?")? {
         warning("Создание user-backup отменено.");
         return Ok(());
@@ -582,7 +584,7 @@ fn create_full_backup() -> AppResult<()> {
 
     let mut backup = BackupSession::start_user_backup("Ручная точка восстановления user-backup")?;
     let saved = backup.saved_files;
-    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Полный снимок создан и проверен: {saved} файлов конфигурации Xray и xkeen-sub."), true);
+    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Полный снимок создан и проверен: {saved} файлов рабочих конфигураций Xray и данных подписок."), true);
     backup.finish()?;
     success(&format!("user-backup создан. Сохранено и проверено файлов: {saved}. ID: {}", backup.id()));
     Ok(())
@@ -621,7 +623,7 @@ fn collect_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSour
             return Err(format!("Полный бэкап прерван: обнаружена символическая ссылка {}.", path.display()).into());
         }
         if metadata.is_dir() {
-            if path == Path::new(BACKUP_DIR) {
+            if path == Path::new(BACKUP_DIR) || path == Path::new(XRAY_BACKUP_DIR) {
                 continue;
             }
             collect_backup_files(&path, category, output)?;
@@ -632,6 +634,46 @@ fn collect_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSour
         }
     }
     Ok(())
+}
+
+/// Collect only the restorable Xray and subscription configuration files.
+fn collect_snapshot_files(output: &mut Vec<BackupSource>, require_xray_root: bool) -> AppResult<()> {
+    validate_optional_directory(Path::new("/opt/etc/xkeen-sub"))?;
+    let xray_root = Path::new("/opt/etc/xray/configs");
+    if require_xray_root {
+        collect_backup_files(xray_root, "Конфигурация Xray", output)?;
+    } else {
+        collect_existing_backup_files(xray_root, "Конфигурация Xray", output)?;
+    }
+    collect_optional_backup_file(Path::new(SUBSCRIPTIONS_FILE), "Реестр подписок", output)?;
+    collect_optional_backup_file(Path::new(USER_ARCHIVE_FILE), "Архив пользовательских подключений", output)?;
+    collect_existing_backup_files(Path::new(BASELINE_DIR), "Baseline подписок", output)?;
+    Ok(())
+}
+
+fn validate_optional_directory(path: &Path) -> AppResult<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Не удалось проверить каталог {}: {error}", path.display()).into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(format!("Каталог конфигурации не является обычным каталогом: {}", path.display()).into())
+        }
+        Ok(_) => Ok(()),
+    }
+}
+
+fn collect_optional_backup_file(path: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Не удалось проверить файл {}: {error}", path.display()).into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(format!("Путь конфигурации не является обычным файлом: {}", path.display()).into())
+        }
+        Ok(_) => {
+            output.push(BackupSource { path: path.to_path_buf(), category: category.to_owned() });
+            Ok(())
+        }
+    }
 }
 
 fn list_interactive() -> AppResult<bool> {
@@ -763,9 +805,13 @@ fn read_full_snapshot_file_count(log_path: &Path) -> Option<usize> {
 }
 
 fn is_full_snapshot_path(path: &Path) -> bool {
-    if path.components().any(|c| matches!(c, Component::ParentDir)) { return false; }
-    let xr=Path::new("/opt/etc/xray/configs"); let xk=Path::new("/opt/etc/xkeen-sub"); let bd=Path::new(BACKUP_DIR);
-    path.starts_with(xr) || (path.starts_with(xk) && !path.starts_with(bd))
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) { return false; }
+    let xray_root = Path::new("/opt/etc/xray/configs");
+    let xray_backups = Path::new(XRAY_BACKUP_DIR);
+    path.starts_with(xray_root) && !path.starts_with(xray_backups)
+        || path == Path::new(SUBSCRIPTIONS_FILE)
+        || path == Path::new(USER_ARCHIVE_FILE)
+        || path.starts_with(Path::new(BASELINE_DIR))
 }
 
 fn validate_full_snapshot(record: &BackupRecord) -> AppResult<Vec<(PathBuf, PathBuf)>> {
@@ -821,9 +867,7 @@ fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
     let snapshot_paths: BTreeSet<PathBuf> = mappings.iter().map(|(path, _)| path.clone()).collect();
 
     let mut current = Vec::new();
-    collect_existing_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut current)?;
-    collect_existing_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut current)?;
-    current.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+    collect_snapshot_files(&mut current, false)?;
     let current_paths: BTreeSet<PathBuf> = current.iter()
         .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось определить {}: {error}", source.path.display())))
         .collect::<Result<_, _>>()?;
@@ -859,9 +903,7 @@ fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
     }
 
     let mut check = Vec::new();
-    collect_existing_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut check)?;
-    collect_existing_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut check)?;
-    check.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+    collect_snapshot_files(&mut check, false)?;
     let actual: BTreeSet<PathBuf> = check.iter()
         .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось проверить {}: {error}", source.path.display())))
         .collect::<Result<_, _>>()?;
@@ -1553,8 +1595,14 @@ mod tests {
     #[test]
     fn full_snapshot_paths_are_limited_to_managed_configuration_roots() {
         assert!(is_full_snapshot_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xray/configs/manager/state.json")));
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/sub.json")));
         assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1.json")));
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/old-user-outbound.json")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xray/configs/backups/04_outbounds.json.auto-backup")));
         assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup/record/file.json")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup-settings.json")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/config.json")));
         assert!(!is_full_snapshot_path(Path::new("/etc/passwd")));
         assert!(!is_full_snapshot_path(Path::new("/opt/etc/xray/configs/../passwd")));
     }

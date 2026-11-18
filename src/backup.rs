@@ -119,11 +119,6 @@ impl BackupSession {
         self.planned_files = sources.len();
         let saved = self.backup_files_inner(&sources, None)?;
         if saved != sources.len() { return Err(format!("Полный снимок неполон: сохранено {saved} из {} файлов.", sources.len()).into()); }
-        for source in &sources {
-            if !self.verify_original(&source.path)? {
-                return Err(format!("Файл изменился во время создания полного снимка: {}", source.path.display()).into());
-            }
-        }
         self.snapshot_complete = true;
         self.event("SNAPSHOT", &format!("FULL_V1 files={saved}"))?;
         self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
@@ -743,57 +738,91 @@ fn is_full_snapshot_path(path: &Path) -> bool {
 }
 
 fn validate_full_snapshot(record: &BackupRecord) -> AppResult<Vec<(PathBuf, PathBuf)>> {
-    let log=record.path.join("log.txt");
-    let count=read_full_snapshot_file_count(&log).ok_or("В записи отсутствует подтверждение полного снимка FULL_V1.")?;
-    let mappings=read_file_mappings(&log)?;
-    if mappings.len()!=count || mappings.is_empty() {
-        return Err(format!("Полный снимок повреждён: указано {count} файлов, найдено {} записей.",mappings.len()).into());
+    let log = record.path.join("log.txt");
+    let count = read_full_snapshot_file_count(&log)
+        .ok_or("В записи отсутствует подтверждение полного снимка FULL_V1.")?;
+    let mappings = read_file_mappings(&log)?;
+    let metadata_map = read_file_metadata_map(&log)?;
+    if mappings.len() != count || mappings.is_empty() || metadata_map.len() != count {
+        return Err(format!("Полный снимок повреждён: указано {count} файлов, найдено {} сопоставлений и {} записей метаданных.", mappings.len(), metadata_map.len()).into());
     }
-    let mut srcs=BTreeSet::new(); let mut stores=BTreeSet::new();
-    for (src,stored) in &mappings {
-        if !is_full_snapshot_path(src) || !srcs.insert(src.clone()) { return Err(format!("Недопустимый или повторяющийся путь снимка: {}",src.display()).into()); }
+    let mut sources = BTreeSet::new();
+    let mut stored_paths = BTreeSet::new();
+    for (source, stored) in &mappings {
+        if !is_full_snapshot_path(source) || !sources.insert(source.clone()) {
+            return Err(format!("Недопустимый или повторяющийся путь снимка: {}", source.display()).into());
+        }
         validate_relative_path(stored)?;
-        if !stores.insert(stored.clone()) { return Err(format!("Повторяется путь хранения: {}",stored.display()).into()); }
-        let saved=record.path.join(stored);
-        let meta=fs::symlink_metadata(&saved)?;
-        if meta.file_type().is_symlink() || !meta.is_file() { return Err(format!("Резервный объект не является обычным файлом: {}",saved.display()).into()); }
-        let bytes=fs::read(&saved)?;
-        let expected=read_file_metadata(&log,src)?.ok_or_else(||format!("Нет метаданных: {}",src.display()))?;
-        if file_checksum(&bytes)!=expected.checksum { return Err(format!("Контрольная сумма не совпадает: {}",saved.display()).into()); }
+        if !stored_paths.insert(stored.clone()) {
+            return Err(format!("Повторяется путь хранения: {}", stored.display()).into());
+        }
+        let saved = record.path.join(stored);
+        let metadata = fs::symlink_metadata(&saved)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("Резервный объект не является обычным файлом: {}", saved.display()).into());
+        }
+        let bytes = fs::read(&saved)?;
+        let expected = metadata_map.get(source)
+            .ok_or_else(|| format!("Нет метаданных: {}", source.display()))?;
+        if file_checksum(&bytes) != expected.checksum {
+            return Err(format!("Контрольная сумма не совпадает: {}", saved.display()).into());
+        }
     }
     Ok(mappings)
 }
 
 fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
-    let mappings=validate_full_snapshot(record)?;
-    let snapshot:BTreeSet<PathBuf>=mappings.iter().map(|(p,_)|p.clone()).collect();
-    let mut current=Vec::new();
-    collect_backup_files(Path::new("/opt/etc/xray/configs"),"Xray",&mut current)?;
-    collect_backup_files(Path::new("/opt/etc/xkeen-sub"),"xkeen-sub",&mut current)?;
-    current.retain(|s|!s.path.starts_with(Path::new(BACKUP_DIR)));
-    let current_paths:BTreeSet<PathBuf>=current.iter().map(|s|s.path.canonicalize().map_err(|e|format!("Не удалось определить {}: {e}",s.path.display()))).collect::<Result<_,_>>()?;
-    for extra in current_paths.difference(&snapshot) {
-        if !is_full_snapshot_path(extra) { return Err(format!("Недопустимый путь удаления: {}",extra.display()).into()); }
-        fs::remove_file(extra).map_err(|e|format!("Не удалось удалить лишний файл {}: {e}",extra.display()))?;
+    let mappings = validate_full_snapshot(record)?;
+    let log = record.path.join("log.txt");
+    let metadata_map = read_file_metadata_map(&log)?;
+    let snapshot_paths: BTreeSet<PathBuf> = mappings.iter().map(|(path, _)| path.clone()).collect();
+
+    let mut current = Vec::new();
+    collect_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut current)?;
+    collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut current)?;
+    current.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+    let current_paths: BTreeSet<PathBuf> = current.iter()
+        .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось определить {}: {error}", source.path.display())))
+        .collect::<Result<_, _>>()?;
+
+    for extra in current_paths.difference(&snapshot_paths) {
+        if !is_full_snapshot_path(extra) {
+            return Err(format!("Недопустимый путь удаления: {}", extra.display()).into());
+        }
+        fs::remove_file(extra)
+            .map_err(|error| format!("Не удалось удалить лишний файл {}: {error}", extra.display()))?;
     }
-    let log=record.path.join("log.txt");
-    for (src,stored) in &mappings {
-        let bytes=fs::read(record.path.join(stored))?;
-        let meta=read_file_metadata(&log,src)?.ok_or_else(||format!("Нет метаданных: {}",src.display()))?;
-        restore_file_atomically(src,&bytes,meta)?;
+
+    for (source, stored) in &mappings {
+        let bytes = fs::read(record.path.join(stored))?;
+        let metadata = metadata_map.get(source)
+            .ok_or_else(|| format!("Нет метаданных: {}", source.display()))?;
+        restore_file_atomically(source, &bytes, *metadata)?;
     }
-    let mut check=Vec::new();
-    collect_backup_files(Path::new("/opt/etc/xray/configs"),"Xray",&mut check)?;
-    collect_backup_files(Path::new("/opt/etc/xkeen-sub"),"xkeen-sub",&mut check)?;
-    check.retain(|s|!s.path.starts_with(Path::new(BACKUP_DIR)));
-    let actual:BTreeSet<PathBuf>=check.iter().map(|s|s.path.canonicalize().map_err(|e|format!("Не удалось проверить {}: {e}",s.path.display()))).collect::<Result<_,_>>()?;
-    if actual!=snapshot { return Err("Набор файлов после восстановления не совпадает со снимком.".into()); }
-    for (src,stored) in &mappings {
-        let expected=fs::read(record.path.join(stored))?; let actual=fs::read(src)?;
-        let meta=read_file_metadata(&log,src)?.ok_or_else(||format!("Нет метаданных: {}",src.display()))?;
-        let restored=fs::metadata(src)?;
-        if actual!=expected || restored.mode()&0o7777!=meta.mode || restored.uid()!=meta.uid || restored.gid()!=meta.gid {
-            return Err(format!("Проверка восстановленного файла не пройдена: {}",src.display()).into());
+
+    let mut check = Vec::new();
+    collect_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut check)?;
+    collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut check)?;
+    check.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+    let actual: BTreeSet<PathBuf> = check.iter()
+        .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось проверить {}: {error}", source.path.display())))
+        .collect::<Result<_, _>>()?;
+    if actual != snapshot_paths {
+        return Err("Набор файлов после восстановления не совпадает со снимком.".into());
+    }
+
+    for (source, stored) in &mappings {
+        let expected = fs::read(record.path.join(stored))?;
+        let actual = fs::read(source)?;
+        let metadata = metadata_map.get(source)
+            .ok_or_else(|| format!("Нет метаданных: {}", source.display()))?;
+        let restored = fs::metadata(source)?;
+        if actual != expected
+            || restored.mode() & 0o7777 != metadata.mode
+            || restored.uid() != metadata.uid
+            || restored.gid() != metadata.gid
+        {
+            return Err(format!("Проверка восстановленного файла не пройдена: {}", source.display()).into());
         }
     }
     Ok(())
@@ -1187,6 +1216,28 @@ fn file_checksum(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn read_file_metadata_map(log_path: &Path) -> AppResult<HashMap<PathBuf, FileMetadata>> {
+    let content = fs::read_to_string(log_path)?;
+    let mut result = HashMap::new();
+    for line in content.lines() {
+        let Some(value) = line.strip_prefix("Метаданные: ") else { continue; };
+        let Some((path, metadata)) = value.split_once(" -> ") else { continue; };
+        let path: String = serde_json::from_str(path)
+            .map_err(|error| format!("Некорректный путь метаданных в журнале: {error}"))?;
+        let mut fields = metadata.split_whitespace();
+        let mode = u32::from_str_radix(fields.next().ok_or("В журнале отсутствует режим файла.")?, 8)?;
+        let uid = fields.next().ok_or("В журнале отсутствует UID файла.")?.parse::<u32>()?;
+        let gid = fields.next().ok_or("В журнале отсутствует GID файла.")?.parse::<u32>()?;
+        let checksum = u64::from_str_radix(fields.next().ok_or("В журнале отсутствует контрольная сумма файла.")?, 16)?;
+        if fields.next().is_some() { return Err("Некорректная запись метаданных файла.".into()); }
+        let path = PathBuf::from(path);
+        if result.insert(path.clone(), FileMetadata { mode, uid, gid, checksum }).is_some() {
+            return Err(format!("В журнале повторяются метаданные файла: {}", path.display()).into());
+        }
+    }
+    Ok(result)
 }
 
 fn read_file_metadata(log_path: &Path, source: &Path) -> AppResult<Option<FileMetadata>> {

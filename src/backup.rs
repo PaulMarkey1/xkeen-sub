@@ -848,9 +848,6 @@ fn restore_legacy_record(record: &BackupRecord) -> AppResult<()> {
         return Ok(());
     }
 
-    let mut targets = BTreeSet::new();
-    for (source, _) in &mappings { targets.insert(source.clone()); }
-    for path in &created_paths { targets.insert(path.clone()); }
     if !confirm(&format!(
         "Восстановить старую резервную запись {}? Будут возвращены {} сохранённых файлов и удалены {} файлов, созданных обновлением.",
         record.id, mappings.len(), created_paths.len()

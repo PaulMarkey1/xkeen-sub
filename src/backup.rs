@@ -1261,7 +1261,6 @@ fn is_allowed_restore_path(path: &Path) -> bool {
     let archive = Path::new("/opt/etc/xkeen-sub/old-user-outbound.json");
     let subscriptions = Path::new("/opt/etc/xkeen-sub/sub.json");
     let xray_root = Path::new("/opt/etc/xray/configs");
-    let baseline_root = Path::new("/opt/etc/xkeen-sub/baseline");
     if path == archive || path == subscriptions {
         return true;
     }
@@ -1387,7 +1386,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, file_checksum, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
+    use super::{days_from_civil, file_checksum, is_allowed_restore_path, is_full_snapshot_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
     use std::path::Path;
 
     #[test]

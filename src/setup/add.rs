@@ -31,6 +31,7 @@ pub fn run() -> AppResult<bool> {
         }
     };
 
+    let mut subscriptions = load_subscriptions()?;
     let url = loop {
         let value = read_input("Введите URL подписки (0 — отмена): ")?;
         if value.trim() == "0" {
@@ -38,7 +39,18 @@ pub fn run() -> AppResult<bool> {
             return Ok(false);
         }
         match normalize_subscription_url(value.trim()) {
-            Ok(valid_url) => break valid_url,
+            Ok(valid_url) => {
+                let already_exists = subscriptions.subscriptions.iter().any(|subscription| {
+                    normalize_subscription_url(subscription.url.trim())
+                        .map(|existing_url| existing_url == valid_url)
+                        .unwrap_or(false)
+                });
+                if already_exists {
+                    error("Такая подписка уже есть в списке. Введите другой URL или 0 для отмены.");
+                    continue;
+                }
+                break valid_url;
+            },
             Err(reason) => error(&format!(
                 "Ссылка не подошла: {}. Проверьте адрес и попробуйте ещё раз.",
                 reason.add_prompt_message()
@@ -46,7 +58,6 @@ pub fn run() -> AppResult<bool> {
         }
     };
 
-    let mut subscriptions = load_subscriptions()?;
     let identity = SubscriptionIdentity::from_number(
         subscriptions.subscriptions.len() + 1,
         name.as_deref(),

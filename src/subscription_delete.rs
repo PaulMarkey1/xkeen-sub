@@ -4,13 +4,15 @@ use std::fs;
 use serde_json::Value;
 
 use crate::backup::BackupSession;
-use crate::subscription_identity::SubscriptionIdentity;
+use crate::subscription_identity::{number_from_id, number_from_tag, SubscriptionIdentity};
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::SubscriptionStore;
 use crate::terminal::{error, success};
 use crate::update_configuration::rebuild_configuration;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
+use crate::update_config::{find_doc, load_config_documents, OUTBOUND_FILE};
+use crate::subscriptions::save_subscriptions;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -21,6 +23,16 @@ pub(crate) fn delete_subscription(
 ) -> AppResult<()> {
     if index >= store.subscriptions.len() {
         return Err("Выбранная подписка больше не существует.".into());
+    }
+
+    let selected_id = store.subscriptions[index].id.clone();
+    if !subscription_is_in_working_config(&selected_id)? {
+        store.subscriptions.remove(index);
+        save_subscriptions(&store)?;
+        success(&format!(
+            "Подписка {selected_id} удалена из sub.json. В рабочих конфигурациях её подключений не было; пересборка и перезапуск XKeen не требуются."
+        ));
+        return Ok(());
     }
 
     let mut backup = BackupSession::start("Удаление подписки")?;
@@ -166,4 +178,55 @@ fn prepare_deletion(
 
     // Keep the empty case valid: deleting the last subscription leaves only user outbounds.
     Ok(state)
+}
+
+
+/// Checks whether the selected subscription currently owns any outbound in Xray's
+/// working outbound document. Registry membership alone is not sufficient.
+fn subscription_is_in_working_config(subscription_id: &str) -> AppResult<bool> {
+    let number = number_from_id(subscription_id)
+        .ok_or_else(|| format!("Некорректный ID подписки: {subscription_id}."))?;
+    let docs = load_config_documents()?;
+    let outbound_doc = find_doc(&docs, OUTBOUND_FILE)
+        .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
+    let outbounds = docs[outbound_doc].value.get("outbounds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("В файле {OUTBOUND_FILE} отсутствует массив outbounds."))?;
+
+    Ok(subscription_is_in_outbounds(outbounds, number))
+}
+
+#[cfg(test)]
+mod participation_tests {
+    use super::subscription_is_in_outbounds;
+    use serde_json::json;
+
+    #[test]
+    fn detects_subscription_group_by_its_tag_number() {
+        let outbounds = vec![
+            json!({"tag":"sub2--Germany--node","protocol":"vless"}),
+            json!({"tag":"sub20--node","protocol":"trojan"}),
+        ];
+        assert!(subscription_is_in_outbounds(&outbounds, 2));
+        assert!(subscription_is_in_outbounds(&outbounds, 20));
+        assert!(!subscription_is_in_outbounds(&outbounds, 3));
+    }
+
+    #[test]
+    fn ignores_user_outbounds_and_malformed_subscription_tags() {
+        let outbounds = vec![
+            json!({"tag":"custom-sub2-node","protocol":"vless"}),
+            json!({"tag":"sub2","protocol":"vless"}),
+            json!({"tag":"sub2----","protocol":"vless"}),
+        ];
+        assert!(!subscription_is_in_outbounds(&outbounds, 2));
+    }
+}
+
+fn subscription_is_in_outbounds(outbounds: &[Value], number: u64) -> bool {
+    outbounds.iter().any(|outbound| {
+        outbound.get("tag")
+            .and_then(Value::as_str)
+            .and_then(number_from_tag) == Some(number)
+    })
 }

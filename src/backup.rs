@@ -779,11 +779,23 @@ fn validate_full_snapshot(record: &BackupRecord) -> AppResult<Vec<(PathBuf, Path
     }
     let mut sources = BTreeSet::new();
     let mut stored_paths = BTreeSet::new();
+    for (source, _) in &mappings {
+        let mut parent = source.parent();
+        while let Some(path) = parent {
+            if sources.contains(path) {
+                return Err(format!("Полный снимок содержит конфликт файла и каталога: {}", source.display()).into());
+            }
+            parent = path.parent();
+        }
+    }
     for (source, stored) in &mappings {
         if !is_full_snapshot_path(source) || !sources.insert(source.clone()) {
             return Err(format!("Недопустимый или повторяющийся путь снимка: {}", source.display()).into());
         }
         validate_relative_path(stored)?;
+        if stored == Path::new("log.txt") || stored == Path::new(".log.txt.tmp") {
+            return Err(format!("Резервный файл использует служебное имя журнала: {}", stored.display()).into());
+        }
         if !stored_paths.insert(stored.clone()) {
             return Err(format!("Повторяется путь хранения: {}", stored.display()).into());
         }
@@ -822,6 +834,21 @@ fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
         }
         fs::remove_file(extra)
             .map_err(|error| format!("Не удалось удалить лишний файл {}: {error}", extra.display()))?;
+    }
+    // A path that was a file in the snapshot may now be a directory. Its
+    // contents are outside the snapshot file set, so remove that directory
+    // before atomically restoring the original file.
+    for target in &snapshot_paths {
+        match fs::symlink_metadata(target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("Нельзя восстановить файл поверх символической ссылки: {}", target.display()).into());
+            }
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(target)
+                .map_err(|error| format!("Не удалось удалить каталог, занявший место файла {}: {error}", target.display()))?,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Не удалось проверить путь {}: {error}", target.display()).into()),
+        }
     }
 
     for (source, stored) in &mappings {

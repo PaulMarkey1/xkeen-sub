@@ -757,7 +757,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
 
 fn read_full_snapshot_file_count(log_path: &Path) -> Option<usize> {
     fs::read_to_string(log_path).ok()?.lines().find_map(|line| {
-        line.strip_prefix("Снимок: FULL_V1 files=")?.parse::<usize>().ok()
+        line.strip_prefix("SNAPSHOT: FULL_V1 files=")?.parse::<usize>().ok()
     })
 }
 

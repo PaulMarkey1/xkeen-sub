@@ -217,7 +217,7 @@ mod participation_tests {
         let outbounds = vec![
             json!({"tag":"custom-sub2-node","protocol":"vless"}),
             json!({"tag":"sub2","protocol":"vless"}),
-            json!({"tag":"sub2----","protocol":"vless"}),
+            json!({"tag":"sub2-node","protocol":"vless"}),
         ];
         assert!(!subscription_is_in_outbounds(&outbounds, 2));
     }

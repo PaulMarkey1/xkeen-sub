@@ -202,7 +202,7 @@ fn apply_configuration(
         let mut progress = ProgressBar::new(progress_total);
         match backup.backup_files_with_progress(&backup_sources, &mut progress) {
             Ok(saved) => {
-                backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
+                backup.event("BACKUP", &format!("Проверка файлов по полному снимку завершена: {saved} файлов."))?;
                 match update_apply::execute(&plan, backup, &mut progress) {
                     Ok(()) => {
                         progress.finish("Все операции завершены");

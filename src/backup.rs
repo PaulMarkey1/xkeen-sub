@@ -66,6 +66,8 @@ pub(crate) struct BackupSession {
     log_path: PathBuf,
     finished: bool,
     snapshot_complete: bool,
+    snapshot_mappings: HashMap<PathBuf, PathBuf>,
+    snapshot_metadata: HashMap<PathBuf, FileMetadata>,
     planned_files: usize,
     saved_files: usize,
     outcome_status: String,
@@ -119,6 +121,11 @@ impl BackupSession {
         self.planned_files = sources.len();
         let saved = self.backup_files_inner(&sources, None)?;
         if saved != sources.len() { return Err(format!("Полный снимок неполон: сохранено {saved} из {} файлов.", sources.len()).into()); }
+        self.snapshot_mappings = read_file_mappings(&self.log_path)?.into_iter().collect();
+        self.snapshot_metadata = read_file_metadata_map(&self.log_path)?;
+        if self.snapshot_mappings.len() != saved || self.snapshot_metadata.len() != saved {
+            return Err("Полный снимок неполон: не удалось загрузить индексы файлов и метаданных.".into());
+        }
         self.snapshot_complete = true;
         self.event("SNAPSHOT", &format!("FULL_V1 files={saved}"))?;
         self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
@@ -172,6 +179,7 @@ impl BackupSession {
 
         let mut session = Self {
             id, path, log_path, finished: false, snapshot_complete: false,
+            snapshot_mappings: HashMap::new(), snapshot_metadata: HashMap::new(),
             planned_files: 0, saved_files: 0,
             outcome_status: "ВЫПОЛНЯЕТСЯ".to_owned(),
             outcome_summary: "Обновление ещё выполняется.".to_owned(),
@@ -306,10 +314,13 @@ impl BackupSession {
 
     pub(crate) fn verify_original(&self, source: &Path) -> AppResult<bool> {
         let target = canonical_target_path(source)?;
-        let mappings = read_file_mappings(&self.log_path)?;
-        let Some(stored) = mappings.iter().find(|(original, _)| original == &target).map(|(_, stored)| stored) else {
-            return Ok(false);
+        let stored = if self.snapshot_complete {
+            self.snapshot_mappings.get(&target).cloned()
+        } else {
+            read_file_mappings(&self.log_path)?.into_iter()
+                .find(|(original, _)| original == &target).map(|(_, stored)| stored)
         };
+        let Some(stored) = stored else { return Ok(false); };
         let backup_file = self.path.join(stored);
         let backup_metadata = match fs::symlink_metadata(&backup_file) {
             Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
@@ -329,9 +340,12 @@ impl BackupSession {
             Err(_) => return Ok(false),
         };
         if actual != expected { return Ok(false); }
-        let Some(expected_metadata) = read_file_metadata(&self.log_path, &target)? else {
-            return Ok(false);
+        let expected_metadata = if self.snapshot_complete {
+            self.snapshot_metadata.get(&target).copied()
+        } else {
+            read_file_metadata(&self.log_path, &target)?
         };
+        let Some(expected_metadata) = expected_metadata else { return Ok(false); };
         if file_checksum(&expected) != expected_metadata.checksum { return Ok(false); }
         Ok(source_metadata.mode() & 0o7777 == expected_metadata.mode
             && source_metadata.uid() == expected_metadata.uid
@@ -340,10 +354,12 @@ impl BackupSession {
 
     pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {
         let target = canonical_target_path(source)?;
-        let mappings = read_file_mappings(&self.log_path)?;
-        let stored = mappings.iter().find(|(original, _)| original == &target)
-            .map(|(_, stored)| stored.clone())
-            .ok_or_else(|| format!("В резервной копии нет исходного файла: {}", target.display()))?;
+        let stored = if self.snapshot_complete {
+            self.snapshot_mappings.get(&target).cloned()
+        } else {
+            read_file_mappings(&self.log_path)?.into_iter()
+                .find(|(original, _)| original == &target).map(|(_, stored)| stored)
+        }.ok_or_else(|| format!("В резервной копии нет исходного файла: {}", target.display()))?;
         let backup_file = self.path.join(&stored);
         let backup_metadata = fs::symlink_metadata(&backup_file)
             .map_err(|error| format!("Не удалось проверить резервный файл {}: {error}", backup_file.display()))?;
@@ -352,8 +368,11 @@ impl BackupSession {
         }
         let backup_bytes = fs::read(&backup_file)
             .map_err(|error| format!("Не удалось прочитать резервный файл {}: {error}", backup_file.display()))?;
-        let metadata = read_file_metadata(&self.log_path, &target)?
-            .ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", target.display()))?;
+        let metadata = if self.snapshot_complete {
+            self.snapshot_metadata.get(&target).copied()
+        } else {
+            read_file_metadata(&self.log_path, &target)?
+        }.ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", target.display()))?;
         if file_checksum(&backup_bytes) != metadata.checksum {
             return Err(format!("Контрольная сумма резервного файла не совпадает: {}", backup_file.display()).into());
         }

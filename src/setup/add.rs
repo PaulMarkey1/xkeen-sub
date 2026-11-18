@@ -1,5 +1,5 @@
 use std::error::Error;
-use crate::subscription_identity::SubscriptionIdentity;
+use crate::subscription_identity::{number_from_id, SubscriptionIdentity};
 use crate::subscription_url::normalize_subscription_url;
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
 use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
@@ -59,8 +59,16 @@ pub fn run() -> AppResult<bool> {
         }
     };
 
+    let next_number = subscriptions.subscriptions.iter()
+        .filter_map(|subscription| number_from_id(&subscription.id))
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .and_then(|number| usize::try_from(number).ok())
+        .ok_or("Не удалось определить следующий номер подписки.")?;
+
     let identity = SubscriptionIdentity::from_number(
-        subscriptions.subscriptions.len() + 1,
+        next_number,
         name.as_deref(),
     );
 

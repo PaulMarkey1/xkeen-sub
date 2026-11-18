@@ -25,7 +25,7 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
     let result = run_inner(target_id, &mut backup);
     if let Err(ref error) = result {
         if backup.is_running() {
-            backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), false);
+            backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), true);
         }
     } else if backup.is_running() {
         backup.set_outcome(
@@ -84,7 +84,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         }
         print_subscription_summary(&state);
         backup.event("ERROR", "Не удалось загрузить ни одну подписку; применение заблокировано.")?;
-        backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", false);
+        backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", true);
         warning("Обновление остановлено. Файлы роутера не менялись.");
         return Ok(());
     }
@@ -92,7 +92,7 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         print_subscription_summary(&state);
         print_baseline_plan(&state);
         backup.event("ERROR", "Ни одна подписка не прошла обработку; дальнейшая подготовка прекращена.")?;
-        backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", false);
+        backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", true);
         warning("Не удалось обработать ни одну подписку. Конфигурация роутера осталась без изменений.");
         return Ok(());
     }

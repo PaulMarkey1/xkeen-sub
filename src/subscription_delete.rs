@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fs;
+use std::collections::HashSet;
 
 use serde_json::Value;
 
@@ -86,6 +87,7 @@ fn prepare_deletion(
     removed_index: usize,
     backup: &mut BackupSession,
 ) -> AppResult<RunState> {
+    let active_numbers = working_subscription_numbers()?;
     let original_ids: Vec<String> = store.subscriptions.iter().map(|item| item.id.clone()).collect();
     let original_paths = store.subscriptions.iter()
         .map(baseline_path)
@@ -102,21 +104,8 @@ fn prepare_deletion(
         let old_index = if new_index < removed_index { new_index } else { new_index + 1 };
         let old_path = &original_paths[old_index];
         let old_id = original_ids[old_index].clone();
-
-        let raw_baseline = fs::read(old_path).map_err(|failure| {
-            format!(
-                "Нельзя удалить подписку безопасно: отсутствует baseline оставшейся подписки {} ({}): {failure}",
-                subscription.id,
-                old_path.display()
-            )
-        })?;
-        let parsed = parse_subscription(&raw_baseline).map_err(|failure| {
-            format!(
-                "Нельзя пересобрать подписку {} из baseline {}: {failure}",
-                subscription.id,
-                old_path.display()
-            )
-        })?;
+        let old_number = number_from_id(&old_id)
+            .ok_or_else(|| format!("Некорректный ID подписки: {old_id}."))?;
 
         let identity = SubscriptionIdentity::from_number(
             new_index + 1,
@@ -124,6 +113,37 @@ fn prepare_deletion(
         );
         subscription.id = identity.id;
         subscription.prefix = identity.prefix;
+
+        // A registered subscription may never have been downloaded/applied.
+        // Keep it in the registry, but do not require a baseline or create an
+        // outbound group for it during a full rebuild.
+        if !active_numbers.contains(&old_number) {
+            if old_path.exists() {
+                state.baseline_removals.push((old_id.clone(), old_path.clone()));
+            }
+            backup.event(
+                "DELETE",
+                &format!(
+                    "Подписка {old_id} не участвует в рабочих конфигурациях. Запись сохранена в реестре как неактивная; baseline не требуется."
+                ),
+            )?;
+            continue;
+        }
+
+        let raw_baseline = fs::read(old_path).map_err(|failure| {
+            format!(
+                "Нельзя удалить подписку безопасно: отсутствует baseline активной подписки {} ({}): {failure}",
+                old_id,
+                old_path.display()
+            )
+        })?;
+        let parsed = parse_subscription(&raw_baseline).map_err(|failure| {
+            format!(
+                "Нельзя пересобрать подписку {} из baseline {}: {failure}",
+                old_id,
+                old_path.display()
+            )
+        })?;
 
         let new_path = baseline_path(subscription)?;
         if old_path != &new_path {
@@ -186,6 +206,10 @@ fn prepare_deletion(
 fn subscription_is_in_working_config(subscription_id: &str) -> AppResult<bool> {
     let number = number_from_id(subscription_id)
         .ok_or_else(|| format!("Некорректный ID подписки: {subscription_id}."))?;
+    Ok(working_subscription_numbers()?.contains(&number))
+}
+
+fn working_subscription_numbers() -> AppResult<HashSet<u64>> {
     let docs = load_config_documents()?;
     let outbound_doc = find_doc(&docs, OUTBOUND_FILE)
         .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
@@ -193,7 +217,7 @@ fn subscription_is_in_working_config(subscription_id: &str) -> AppResult<bool> {
         .and_then(Value::as_array)
         .ok_or_else(|| format!("В файле {OUTBOUND_FILE} отсутствует массив outbounds."))?;
 
-    Ok(subscription_is_in_outbounds(outbounds, number))
+    Ok(subscription_numbers_in_outbounds(outbounds))
 }
 
 #[cfg(test)]
@@ -223,10 +247,14 @@ mod participation_tests {
     }
 }
 
-fn subscription_is_in_outbounds(outbounds: &[Value], number: u64) -> bool {
-    outbounds.iter().any(|outbound| {
+fn subscription_numbers_in_outbounds(outbounds: &[Value]) -> HashSet<u64> {
+    outbounds.iter().filter_map(|outbound| {
         outbound.get("tag")
             .and_then(Value::as_str)
-            .and_then(number_from_tag) == Some(number)
-    })
+            .and_then(number_from_tag)
+    }).collect()
+}
+
+fn subscription_is_in_outbounds(outbounds: &[Value], number: u64) -> bool {
+    subscription_numbers_in_outbounds(outbounds).contains(&number)
 }

@@ -638,6 +638,7 @@ fn collect_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSour
 
 /// Collect only the restorable Xray and subscription configuration files.
 fn collect_snapshot_files(output: &mut Vec<BackupSource>, require_xray_root: bool) -> AppResult<()> {
+    validate_optional_directory(Path::new("/opt/etc/xkeen-sub"))?;
     let xray_root = Path::new("/opt/etc/xray/configs");
     if require_xray_root {
         collect_backup_files(xray_root, "Конфигурация Xray", output)?;
@@ -648,6 +649,17 @@ fn collect_snapshot_files(output: &mut Vec<BackupSource>, require_xray_root: boo
     collect_optional_backup_file(Path::new(USER_ARCHIVE_FILE), "Архив пользовательских подключений", output)?;
     collect_existing_backup_files(Path::new(BASELINE_DIR), "Baseline подписок", output)?;
     Ok(())
+}
+
+fn validate_optional_directory(path: &Path) -> AppResult<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Не удалось проверить каталог {}: {error}", path.display()).into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(format!("Каталог конфигурации не является обычным каталогом: {}", path.display()).into())
+        }
+        Ok(_) => Ok(()),
+    }
 }
 
 fn collect_optional_backup_file(path: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {

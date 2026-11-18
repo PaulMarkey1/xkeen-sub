@@ -65,7 +65,7 @@ pub(crate) fn apply_baseline_only(
         Ok(saved) => {
             backup.event(
                 "BACKUP",
-                &format!("Резервирование baseline завершено: {saved} файлов сохранено и проверено."),
+                &format!("Проверка baseline-файлов по полному снимку завершена: {saved} файлов."),
             )?;
             if let Err(error) = update_apply::execute_baseline_only(&plan, backup, &mut progress) {
                 progress.stop("Обновление baseline остановлено");

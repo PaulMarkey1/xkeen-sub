@@ -861,7 +861,7 @@ fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
 fn restore_full_snapshot_record(record: &BackupRecord) -> AppResult<()> {
     if is_active_record(record) { warning("Нельзя восстанавливать резервную запись, пока она используется работающим update."); return Ok(()); }
     let status=read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
-    if status=="ВЫПОЛНЯЕТСЯ" || status.is_empty() { warning("Полный снимок ещё не завершён. Восстановление запрещено."); return Ok(()); }
+    if status.is_empty() { warning("В журнале полного снимка отсутствует итоговый статус. Восстановление запрещено."); return Ok(()); }
     validate_full_snapshot(record)?;
     if !confirm(&format!("Восстановить полный снимок {}? Все конфигурации Xray и xkeen-sub будут возвращены к состоянию точки; более поздние файлы будут удалены.",record.id))? {
         warning("Восстановление отменено."); return Ok(());
@@ -1366,17 +1366,28 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
     let ordinal=date_from_id(&format!("{today}--backup1")).ok_or("Не удалось определить текущую календарную дату.")?;
     let mut removed=0usize; let mut grouped:BTreeMap<String,Vec<BackupRecord>>=BTreeMap::new();
     for record in records {
-        let age=ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
-        if age>=AUTOMATIC_RETENTION_DAYS {
-            if record.id!=active_id && !is_active_or_incomplete_record(&record) { fs::remove_dir_all(&record.path)?; removed+=1; }
-        } else { grouped.entry(record.date.clone()).or_default().push(record); }
+        if is_active_record(&record) {
+            grouped.entry(record.date.clone()).or_default().push(record);
+            continue;
+        }
+        if !is_complete_backup_record(&record) {
+            fs::remove_dir_all(&record.path)?;
+            removed += 1;
+            continue;
+        }
+        let age = ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
+        if age >= AUTOMATIC_RETENTION_DAYS {
+            if record.id != active_id { fs::remove_dir_all(&record.path)?; removed += 1; }
+        } else {
+            grouped.entry(record.date.clone()).or_default().push(record);
+        }
     }
     for (_,mut day) in grouped {
         day.sort_by_key(|r|(read_summary(&r.path.join("log.txt")).get("time").cloned().unwrap_or_default(),r.id.clone()));
         let limit=settings.daily_limit.max(MIN_DAILY_LIMIT);
         if day.len()<=limit { continue; }
         let mut keep=HashSet::new();
-        if let Some(first_auto)=day.iter().filter(|r| !r.is_full).min_by_key(|r| r.number) {
+        if let Some(first_auto)=day.iter().filter(|r| !r.is_full && is_complete_backup_record(r)).min_by_key(|r| r.number) {
             keep.insert(first_auto.id.clone());
         } else if let Some(first)=day.first() {
             keep.insert(first.id.clone());
@@ -1394,15 +1405,24 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
     Ok(removed)
 }
 
+fn is_complete_backup_record(record: &BackupRecord) -> bool {
+    if read_full_snapshot_file_count(&record.path.join("log.txt")).is_some() {
+        return true;
+    }
+    let status = read_summary(&record.path.join("log.txt"))
+        .get("status").cloned().unwrap_or_default();
+    matches!(status.as_str(), "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" | "ПОЛНЫЙ БЭКАП СОЗДАН" | "УСПЕШНО")
+}
+
 fn is_retention_protected(record: &BackupRecord, records: &[BackupRecord]) -> AppResult<bool> {
     let today = current_date()?;
     let today_ordinal = date_from_id(&format!("{today}--backup1"))
         .ok_or("Не удалось определить текущую календарную дату.")?;
     let age = today_ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
-    if age >= AUTOMATIC_RETENTION_DAYS { return Ok(false); }
+    if age >= AUTOMATIC_RETENTION_DAYS || !is_complete_backup_record(record) { return Ok(false); }
     if record.is_full { return Ok(true); }
     let first = records.iter()
-        .filter(|item| item.date == record.date && !item.is_full)
+        .filter(|item| item.date == record.date && !item.is_full && is_complete_backup_record(item))
         .min_by_key(|item| item.number);
     Ok(first.map(|item| item.id.as_str()) == Some(record.id.as_str()))
 }

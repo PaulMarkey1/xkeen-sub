@@ -65,7 +65,7 @@ pub fn run() -> AppResult<bool> {
     );
 
     subscriptions.subscriptions.push(Subscription {
-        id: identity.id,
+        id: identity.id.clone(),
         name,
         url,
         prefix: identity.prefix,
@@ -78,7 +78,7 @@ pub fn run() -> AppResult<bool> {
         title("ОБНОВИТЬ НОВУЮ ПОДПИСКУ?");
         menu_item("1", "Да, обновить только что добавленную подписку");
         menu_item("2", "Нет, обновить позже");
-        match read_input("Выберите пункт: ")? .as_str() {
+        match read_input("Выберите пункт: ")?.as_str() {
             "1" => break true,
             "2" => break false,
             _ => error("Неизвестный пункт. Введите 1 или 2."),

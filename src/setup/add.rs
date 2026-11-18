@@ -2,7 +2,8 @@ use std::error::Error;
 use crate::subscription_identity::SubscriptionIdentity;
 use crate::subscription_url::normalize_subscription_url;
 use crate::subscriptions::{load_subscriptions, save_subscriptions, Subscription};
-use crate::terminal::{error, info, menu_item, read_input, success, title};
+use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
+use crate::update;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -72,5 +73,26 @@ pub fn run() -> AppResult<bool> {
 
     save_subscriptions(&subscriptions)?;
     success("Готово! Подписка добавлена.");
+
+    let update_now = loop {
+        title("ОБНОВИТЬ НОВУЮ ПОДПИСКУ?");
+        menu_item("1", "Да, обновить только что добавленную подписку");
+        menu_item("2", "Нет, обновить позже");
+        match read_input("Выберите пункт: ")? .as_str() {
+            "1" => break true,
+            "2" => break false,
+            _ => error("Неизвестный пункт. Введите 1 или 2."),
+        }
+    };
+
+    if update_now {
+        update::run(Some(&identity.id))?;
+    } else {
+        warning(&format!(
+            "Подписка сохранена, но ещё не обновлена. Запустите «xkeen-sub update {}» вручную или дождитесь автоматического обновления.",
+            identity.id
+        ));
+    }
+
     Ok(false)
 }

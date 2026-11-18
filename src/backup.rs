@@ -119,6 +119,11 @@ impl BackupSession {
         self.planned_files = sources.len();
         let saved = self.backup_files_inner(&sources, None)?;
         if saved != sources.len() { return Err(format!("Полный снимок неполон: сохранено {saved} из {} файлов.", sources.len()).into()); }
+        for source in &sources {
+            if !self.verify_original(&source.path)? {
+                return Err(format!("Файл изменился во время создания полного снимка: {}", source.path.display()).into());
+            }
+        }
         self.snapshot_complete = true;
         self.event("SNAPSHOT", &format!("FULL_V1 files={saved}"))?;
         self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
@@ -1412,6 +1417,14 @@ mod tests {
     }
 
     #[test]
+    fn full_snapshot_paths_are_limited_to_managed_configuration_roots() {
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1.json")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup/record/file.json")));
+        assert!(!is_full_snapshot_path(Path::new("/etc/passwd")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xray/configs/../passwd")));
+    }
+
     fn restore_paths_are_limited_to_update_managed_locations() {
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1--Germany.json")));

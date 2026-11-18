@@ -736,7 +736,7 @@ pub(crate) fn restart_xkeen_after_restore(backup: &mut BackupSession) -> AppResu
     let result = restart_xkeen(backup, &mut progress);
     match &result {
         Ok(()) => progress.finish("XKeen перезапущен и проверен"),
-        Err(_) => progress.finish("Ошибка перезапуска XKeen"),
+        Err(_) => progress.stop("Ошибка перезапуска XKeen"),
     }
     result
 }

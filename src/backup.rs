@@ -1366,7 +1366,7 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
     let ordinal=date_from_id(&format!("{today}--backup1")).ok_or("Не удалось определить текущую календарную дату.")?;
     let mut removed=0usize; let mut grouped:BTreeMap<String,Vec<BackupRecord>>=BTreeMap::new();
     for record in records {
-        if is_active_record(&record) {
+        if record.id == active_id || is_active_record(&record) {
             grouped.entry(record.date.clone()).or_default().push(record);
             continue;
         }

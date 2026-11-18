@@ -820,7 +820,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
                 return Err(format!("Файл, созданный обновлением, остался на месте: {}", path.display()).into());
             }
         }
-        crate::update_apply::restart_xkeen_after_restore(safety)?;
+        crate::update_apply::restart_xkeen_after_restore(&mut safety)?;
         Ok(())
     })();
 

@@ -676,6 +676,11 @@ fn show_record_menu(id: &str) -> AppResult<bool> {
                     warning("Нельзя удалить резервную запись, пока она используется работающим update.");
                     continue;
                 }
+                let all_records = load_records()?;
+                if is_retention_protected(&record, &all_records)? {
+                    warning("Эта точка защищена: первую точку дня и user-backup нельзя удалять вручную в течение трёх дней. Для принудительного удаления используйте функцию удаления всех точек.");
+                    continue;
+                }
                 if confirm(&format!("Удалить резервную запись {}? Это действие нельзя отменить.", record.id))? {
                     fs::remove_dir_all(&record.path)?;
                     success("Резервная копия удалена.");
@@ -1332,9 +1337,13 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
         let limit=settings.daily_limit.max(MIN_DAILY_LIMIT);
         if day.len()<=limit { continue; }
         let mut keep=HashSet::new();
-        if let Some(first)=day.first(){keep.insert(first.id.clone());}
+        if let Some(first_auto)=day.iter().filter(|r| !r.is_full).min_by_key(|r| r.number) {
+            keep.insert(first_auto.id.clone());
+        } else if let Some(first)=day.first() {
+            keep.insert(first.id.clone());
+        }
         for r in &day {
-            if r.id.contains("--user-backup") || r.id==active_id || is_active_or_incomplete_record(r) { keep.insert(r.id.clone()); }
+            if r.is_full || r.id==active_id || is_active_or_incomplete_record(r) { keep.insert(r.id.clone()); }
         }
         for r in day.iter().rev(){if keep.len()>=limit{break;}keep.insert(r.id.clone());}
         for r in day {
@@ -1344,6 +1353,19 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
         }
     }
     Ok(removed)
+}
+
+fn is_retention_protected(record: &BackupRecord, records: &[BackupRecord]) -> AppResult<bool> {
+    let today = current_date()?;
+    let today_ordinal = date_from_id(&format!("{today}--backup1"))
+        .ok_or("Не удалось определить текущую календарную дату.")?;
+    let age = today_ordinal - date_from_id(&record.id).unwrap_or(i64::MIN);
+    if age >= AUTOMATIC_RETENTION_DAYS { return Ok(false); }
+    if record.is_full { return Ok(true); }
+    let first = records.iter()
+        .filter(|item| item.date == record.date && !item.is_full)
+        .min_by_key(|item| item.number);
+    Ok(first.map(|item| item.id.as_str()) == Some(record.id.as_str()))
 }
 
 fn is_active_or_incomplete_record(record: &BackupRecord) -> bool {

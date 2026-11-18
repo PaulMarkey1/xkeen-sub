@@ -1347,7 +1347,7 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
     let ordinal=date_from_id(&format!("{today}--backup1")).ok_or("Не удалось определить текущую календарную дату.")?;
     let mut removed=0usize; let mut grouped:BTreeMap<String,Vec<BackupRecord>>=BTreeMap::new();
     for record in records {
-        let age=ordinal-date_from_id(&record.id).unwrap_or(i64::MIN);
+        let age=ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
         if age>=AUTOMATIC_RETENTION_DAYS {
             if record.id!=active_id && !is_active_or_incomplete_record(&record) { fs::remove_dir_all(&record.path)?; removed+=1; }
         } else { grouped.entry(record.date.clone()).or_default().push(record); }
@@ -1379,7 +1379,7 @@ fn is_retention_protected(record: &BackupRecord, records: &[BackupRecord]) -> Ap
     let today = current_date()?;
     let today_ordinal = date_from_id(&format!("{today}--backup1"))
         .ok_or("Не удалось определить текущую календарную дату.")?;
-    let age = today_ordinal - date_from_id(&record.id).unwrap_or(i64::MIN);
+    let age = today_ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
     if age >= AUTOMATIC_RETENTION_DAYS { return Ok(false); }
     if record.is_full { return Ok(true); }
     let first = records.iter()

@@ -757,7 +757,8 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
 
 fn read_full_snapshot_file_count(log_path: &Path) -> Option<usize> {
     fs::read_to_string(log_path).ok()?.lines().find_map(|line| {
-        line.strip_prefix("SNAPSHOT: FULL_V1 files=")?.parse::<usize>().ok()
+        let (_, value) = line.split_once("SNAPSHOT: FULL_V1 files=")?;
+        value.trim().parse::<usize>().ok()
     })
 }
 
@@ -1487,6 +1488,14 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 mod tests {
     use super::{days_from_civil, file_checksum, is_allowed_restore_path, is_full_snapshot_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
     use std::path::Path;
+
+    #[test]
+    fn recognizes_full_snapshot_marker_in_timestamped_journal_event() {
+        let path = std::env::temp_dir().join(format!("xkeen-sub-full-snapshot-test-{}.log", std::process::id()));
+        std::fs::write(&path, "[18-11-2026 18:00:00] SNAPSHOT: FULL_V1 files=7\\n").unwrap();
+        assert_eq!(read_full_snapshot_file_count(&path), Some(7));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn parses_daily_backup_ids() {

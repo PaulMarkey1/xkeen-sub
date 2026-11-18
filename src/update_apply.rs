@@ -731,6 +731,20 @@ fn wait_for_running_status(backup: &mut BackupSession, mut progress: Option<&mut
     }
 }
 
+pub(crate) fn restart_xkeen_after_restore(backup: &mut BackupSession) -> AppResult<()> {
+    let mut progress = ProgressBar::new(2);
+    let result = restart_xkeen(backup, &mut progress);
+    match &result {
+        Ok(()) => progress.finish("XKeen перезапущен и проверен"),
+        Err(_) => progress.finish("Ошибка перезапуска XKeen"),
+    }
+    result
+}
+
+pub(crate) fn start_xkeen_after_restore_rollback(backup: &mut BackupSession) -> String {
+    start_after_rollback(backup)
+}
+
 fn restart_xkeen(backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
     let stop = run_xkeen(&["-stop"], backup, Some(&mut *progress));
     let stopped = wait_for_stopped_status(backup, Some(&mut *progress))?;

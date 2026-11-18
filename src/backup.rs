@@ -130,7 +130,7 @@ impl BackupSession {
         }
         self.snapshot_complete = true;
         self.event("SNAPSHOT", &format!("FULL_V1 files={saved}"))?;
-        self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
+        self.event("SNAPSHOT", "Полный снимок рабочих конфигураций Xray и данных подписок создан и проверен.")?;
         Ok(())
     }
     fn start_with_suffix(reason: &str, suffix: &str) -> AppResult<Self> {
@@ -584,7 +584,7 @@ fn create_full_backup() -> AppResult<()> {
 
     let mut backup = BackupSession::start_user_backup("Ручная точка восстановления user-backup")?;
     let saved = backup.saved_files;
-    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Полный снимок создан и проверен: {saved} файлов конфигурации Xray и xkeen-sub."), true);
+    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Полный снимок создан и проверен: {saved} файлов рабочих конфигураций Xray и данных подписок."), true);
     backup.finish()?;
     success(&format!("user-backup создан. Сохранено и проверено файлов: {saved}. ID: {}", backup.id()));
     Ok(())

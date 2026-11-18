@@ -72,7 +72,7 @@ pub(crate) fn apply_baseline_only(
                 backup.set_outcome(
                     "ОШИБКА BASELINE",
                     &format!("Рабочие файлы Xray не затрагивались. Ошибка обновления baseline: {error}"),
-                    false,
+                    true,
                 );
                 return Err(error);
             }
@@ -88,7 +88,7 @@ pub(crate) fn apply_baseline_only(
             backup.set_outcome(
                 "ОШИБКА РЕЗЕРВИРОВАНИЯ",
                 &format!("Обновление baseline не выполнено: {error}"),
-                false,
+                true,
             );
             return Err(error);
         }

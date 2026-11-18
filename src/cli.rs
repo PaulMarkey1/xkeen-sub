@@ -59,10 +59,10 @@ fn print_help() -> AppResult<()> {
     command_item("setup help", "Показать справку по настройке");
     println!();
     command_item("backup", "Настроить и просмотреть резервные копии");
-    command_item("  full", "Создать полный бэкап конфигураций Xray и xkeen-sub");
-    command_item("  days N", "Установить срок хранения (минимум 3 дня)");
-    command_item("  limit N", "Установить дневной лимит (минимум 10 записей)");
-    command_item("  mode auto|unlimited", "Выбрать режим хранения");
+    command_item("  user-backup", "Создать ручную полную точку восстановления");
+    command_item("  limit N", "Установить дневной лимит (минимум 5 точек)");
+    command_item("  mode auto|unlimited", "Хранить 3 дня или бессрочно");
+    command_item("  clear", "Удалить все точки восстановления после подтверждения");
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");

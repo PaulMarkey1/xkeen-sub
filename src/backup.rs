@@ -13,13 +13,12 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 pub(crate) const BACKUP_DIR: &str = "/opt/etc/xkeen-sub/backup";
 const SETTINGS_FILE: &str = "/opt/etc/xkeen-sub/backup-settings.json";
-const MIN_RETENTION_DAYS: u32 = 3;
-const MIN_DAILY_LIMIT: usize = 10;
+const AUTOMATIC_RETENTION_DAYS: i64 = 3;
+const MIN_DAILY_LIMIT: usize = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct BackupSettings {
-    pub(crate) retention_days: u32,
     pub(crate) daily_limit: usize,
     pub(crate) mode: RetentionMode,
 }
@@ -27,7 +26,6 @@ pub(crate) struct BackupSettings {
 impl Default for BackupSettings {
     fn default() -> Self {
         Self {
-            retention_days: 3,
             daily_limit: 10,
             mode: RetentionMode::Automatic,
         }
@@ -67,6 +65,9 @@ pub(crate) struct BackupSession {
     path: PathBuf,
     log_path: PathBuf,
     finished: bool,
+    snapshot_complete: bool,
+    snapshot_mappings: HashMap<PathBuf, PathBuf>,
+    snapshot_metadata: HashMap<PathBuf, FileMetadata>,
     planned_files: usize,
     saved_files: usize,
     outcome_status: String,
@@ -78,18 +79,18 @@ pub(crate) struct BackupSession {
 
 impl BackupSession {
     pub(crate) fn start(reason: &str) -> AppResult<Self> {
-        Self::start_with_suffix(reason, "")
+        let session = Self::start_with_suffix(reason, "")?;
+        Self::complete_startup_snapshot(session)
     }
 
-    fn start_full(reason: &str) -> AppResult<Self> {
+    fn start_user_backup(reason: &str) -> AppResult<Self> {
         let root = Path::new(BACKUP_DIR);
-        fs::create_dir_all(root)
-            .map_err(|e| format!("Не удалось создать каталог резервных копий {}: {e}", root.display()))?;
+        fs::create_dir_all(root)?;
         let date = current_date()?;
-        let mut number = next_full_number(root, &date)?;
+        let mut number = next_user_backup_number(root, &date)?;
         let (id, path) = loop {
             let suffix = if number == 0 { String::new() } else { number.to_string() };
-            let id = format!("{date}--backup-full{suffix}");
+            let id = format!("{date}--user-backup{suffix}");
             let path = root.join(&id);
             match fs::create_dir(&path) {
                 Ok(()) => break (id, path),
@@ -97,9 +98,39 @@ impl BackupSession {
                 Err(e) => return Err(format!("Не удалось создать резервную запись {id}: {e}").into()),
             }
         };
-        Self::start_in_directory(reason, id, path)
+        let session = Self::start_in_directory(reason, id, path)?;
+        Self::complete_startup_snapshot(session)
     }
 
+    fn complete_startup_snapshot(mut session: Self) -> AppResult<Self> {
+        if let Err(error) = session.capture_full_snapshot() {
+            let path = session.path.clone();
+            let _ = fs::remove_dir_all(path);
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    fn capture_full_snapshot(&mut self) -> AppResult<()> {
+        let mut sources = Vec::new();
+        collect_backup_files(Path::new("/opt/etc/xray/configs"), "Конфигурация Xray", &mut sources)?;
+        collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "Конфигурация xkeen-sub", &mut sources)?;
+        sources.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+        sources.sort_by(|a, b| a.path.cmp(&b.path));
+        if sources.is_empty() { return Err("Полный снимок не создан: не найдены файлы конфигурации.".into()); }
+        self.planned_files = sources.len();
+        let saved = self.backup_files_inner(&sources, None)?;
+        if saved != sources.len() { return Err(format!("Полный снимок неполон: сохранено {saved} из {} файлов.", sources.len()).into()); }
+        self.snapshot_mappings = read_file_mappings(&self.log_path)?.into_iter().collect();
+        self.snapshot_metadata = read_file_metadata_map(&self.log_path)?;
+        if self.snapshot_mappings.len() != saved || self.snapshot_metadata.len() != saved {
+            return Err("Полный снимок неполон: не удалось загрузить индексы файлов и метаданных.".into());
+        }
+        self.snapshot_complete = true;
+        self.event("SNAPSHOT", &format!("FULL_V1 files={saved}"))?;
+        self.event("SNAPSHOT", "Полный снимок конфигураций Xray и xkeen-sub создан и проверен.")?;
+        Ok(())
+    }
     fn start_with_suffix(reason: &str, suffix: &str) -> AppResult<Self> {
         let root = Path::new(BACKUP_DIR);
         fs::create_dir_all(root)
@@ -147,7 +178,8 @@ impl BackupSession {
         log.sync_all()?;
 
         let mut session = Self {
-            id, path, log_path, finished: false,
+            id, path, log_path, finished: false, snapshot_complete: false,
+            snapshot_mappings: HashMap::new(), snapshot_metadata: HashMap::new(),
             planned_files: 0, saved_files: 0,
             outcome_status: "ВЫПОЛНЯЕТСЯ".to_owned(),
             outcome_summary: "Обновление ещё выполняется.".to_owned(),
@@ -202,6 +234,16 @@ impl BackupSession {
     }
 
     fn backup_files_inner(&mut self, sources: &[BackupSource], mut progress: Option<&mut ProgressBar>) -> AppResult<usize> {
+        if self.snapshot_complete {
+            for source in sources {
+                if !self.verify_original(&source.path)? {
+                    return Err(format!("Файл не совпадает с исходным полным снимком; применение остановлено: {}", source.path.display()).into());
+                }
+                if let Some(progress) = progress.as_deref_mut() { progress.advance("Проверка полного снимка"); }
+            }
+            self.event("BACKUP", &format!("Проверено по полному снимку файлов: {}.", sources.len()))?;
+            return Ok(sources.len());
+        }
         if sources.is_empty() {
             self.event("BACKUP", "Нет существующих файлов, требующих резервного копирования.")?;
             return Ok(0);
@@ -272,10 +314,13 @@ impl BackupSession {
 
     pub(crate) fn verify_original(&self, source: &Path) -> AppResult<bool> {
         let target = canonical_target_path(source)?;
-        let mappings = read_file_mappings(&self.log_path)?;
-        let Some(stored) = mappings.iter().find(|(original, _)| original == &target).map(|(_, stored)| stored) else {
-            return Ok(false);
+        let stored = if self.snapshot_complete {
+            self.snapshot_mappings.get(&target).cloned()
+        } else {
+            read_file_mappings(&self.log_path)?.into_iter()
+                .find(|(original, _)| original == &target).map(|(_, stored)| stored)
         };
+        let Some(stored) = stored else { return Ok(false); };
         let backup_file = self.path.join(stored);
         let backup_metadata = match fs::symlink_metadata(&backup_file) {
             Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
@@ -295,9 +340,12 @@ impl BackupSession {
             Err(_) => return Ok(false),
         };
         if actual != expected { return Ok(false); }
-        let Some(expected_metadata) = read_file_metadata(&self.log_path, &target)? else {
-            return Ok(false);
+        let expected_metadata = if self.snapshot_complete {
+            self.snapshot_metadata.get(&target).copied()
+        } else {
+            read_file_metadata(&self.log_path, &target)?
         };
+        let Some(expected_metadata) = expected_metadata else { return Ok(false); };
         if file_checksum(&expected) != expected_metadata.checksum { return Ok(false); }
         Ok(source_metadata.mode() & 0o7777 == expected_metadata.mode
             && source_metadata.uid() == expected_metadata.uid
@@ -306,10 +354,12 @@ impl BackupSession {
 
     pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {
         let target = canonical_target_path(source)?;
-        let mappings = read_file_mappings(&self.log_path)?;
-        let stored = mappings.iter().find(|(original, _)| original == &target)
-            .map(|(_, stored)| stored.clone())
-            .ok_or_else(|| format!("В резервной копии нет исходного файла: {}", target.display()))?;
+        let stored = if self.snapshot_complete {
+            self.snapshot_mappings.get(&target).cloned()
+        } else {
+            read_file_mappings(&self.log_path)?.into_iter()
+                .find(|(original, _)| original == &target).map(|(_, stored)| stored)
+        }.ok_or_else(|| format!("В резервной копии нет исходного файла: {}", target.display()))?;
         let backup_file = self.path.join(&stored);
         let backup_metadata = fs::symlink_metadata(&backup_file)
             .map_err(|error| format!("Не удалось проверить резервный файл {}: {error}", backup_file.display()))?;
@@ -318,8 +368,11 @@ impl BackupSession {
         }
         let backup_bytes = fs::read(&backup_file)
             .map_err(|error| format!("Не удалось прочитать резервный файл {}: {error}", backup_file.display()))?;
-        let metadata = read_file_metadata(&self.log_path, &target)?
-            .ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", target.display()))?;
+        let metadata = if self.snapshot_complete {
+            self.snapshot_metadata.get(&target).copied()
+        } else {
+            read_file_metadata(&self.log_path, &target)?
+        }.ok_or_else(|| format!("В журнале отсутствуют метаданные исходного файла: {}", target.display()))?;
         if file_checksum(&backup_bytes) != metadata.checksum {
             return Err(format!("Контрольная сумма резервного файла не совпадает: {}", backup_file.display()).into());
         }
@@ -414,17 +467,9 @@ pub fn run_command(args: &[String]) -> AppResult<()> {
         [] => run_menu().map(|_| ()),
         [action] if action == "help" => { print_help(); Ok(()) },
         [action] if action == "list" => list_interactive().map(|_| ()),
-        [action] if action == "full" => create_full_backup(),
+        [action] if action == "user-backup" || action == "full" => create_full_backup(),
+        [action] if action == "clear" => delete_all_backups(),
         [action, id] if action == "list" => show_record_menu(id).map(|_| ()),
-        [action, value] if action == "days" => {
-            let days = u32::try_from(parse_number(value, MIN_RETENTION_DAYS as u64, "срок хранения")?)
-                .map_err(|_| "Срок хранения слишком велик.")?;
-            let mut settings = load_settings()?;
-            settings.retention_days = days;
-            save_settings(&settings)?;
-            success(&format!("Срок хранения резервных копий — {days} дней."));
-            Ok(())
-        }
         [action, value] if action == "limit" => {
             let limit = usize::try_from(parse_number(value, MIN_DAILY_LIMIT as u64, "дневной лимит")?)
                 .map_err(|_| "Дневной лимит слишком велик.")?;
@@ -455,44 +500,24 @@ fn run_menu() -> AppResult<bool> {
         title("XKEEN-SUB — НАСТРОЙКИ РЕЗЕРВИРОВАНИЯ");
         crate::terminal::separator("────────────────────────────────────────");
         info("Защита включена: перед изменением файлов сохраняется резервная копия.");
-        menu_item("1", &format!("Срок хранения: {} дней (минимум)", settings.retention_days));
-        menu_item("2", &format!("Лимит записей за день: {} (минимум)", settings.daily_limit));
-        menu_item("3", &format!("Режим хранения: {}", mode_label(&settings.mode)));
-        menu_item("4", "Просмотреть резервные копии");
-        menu_item("5", "Создать полный бэкап конфигураций");
+        info("Автоматическое хранение: 3 календарных дня. Минимум сохраняемых точек за день — 5.");
+        menu_item("1", &format!("Лимит точек за день: {} (минимум 5)", settings.daily_limit));
+        menu_item("2", &format!("Режим хранения: {}", mode_label(&settings.mode)));
+        menu_item("3", "Просмотреть резервные копии");
+        menu_item("4", "Создать user-backup");
+        menu_item("5", "Удалить все точки восстановления");
         menu_item("6", "Назад");
         menu_item("0", "Выход");
         let choice = read_input("Выберите действие: ")?;
         match choice.as_str() {
-            "1" => change_days()?,
-            "2" => change_limit()?,
-            "3" => change_mode()?,
-            "4" => { if list_interactive()? { return Ok(true); } },
-            "5" => create_full_backup()?,
+            "1" => change_limit()?,
+            "2" => change_mode()?,
+            "3" => { if list_interactive()? { return Ok(true); } },
+            "4" => create_full_backup()?,
+            "5" => delete_all_backups()?,
             "6" => return Ok(false),
             "0" => return Ok(true),
             _ => error("Выберите пункт от 1 до 6 или 0 для выхода."),
-        }
-    }
-}
-
-fn change_days() -> AppResult<()> {
-    let current = load_settings()?.retention_days;
-    title("СРОК ХРАНЕНИЯ");
-    info(&format!("Текущее значение: {current} дней"));
-    info(&format!("Минимальное значение: {MIN_RETENTION_DAYS} дня"));
-    loop {
-        let value = read_input("Введите новое количество дней (0 — отмена): ")?;
-        if value == "0" { return Ok(()); }
-        match value.parse::<u32>() {
-            Ok(days) if days >= MIN_RETENTION_DAYS => {
-                let mut settings = load_settings()?;
-                settings.retention_days = days;
-                save_settings(&settings)?;
-                success(&format!("Готово! Резервные копии будут храниться {days} дней."));
-                return Ok(());
-            }
-            _ => error(&format!("Введите целое число не меньше {MIN_RETENTION_DAYS} или 0 для отмены.")),
         }
     }
 }
@@ -510,7 +535,7 @@ fn change_limit() -> AppResult<()> {
                 let mut settings = load_settings()?;
                 settings.daily_limit = limit;
                 save_settings(&settings)?;
-                success(&format!("Готово! В день можно сохранять до {limit} резервных копий."));
+                success(&format!("Готово! Дневной лимит установлен: {limit}; сохраняется минимум {MIN_DAILY_LIMIT} точек."));
                 return Ok(());
             }
             _ => error(&format!("Введите целое число не меньше {MIN_DAILY_LIMIT} или 0 для отмены.")),
@@ -547,44 +572,31 @@ fn change_mode() -> AppResult<()> {
 }
 
 fn create_full_backup() -> AppResult<()> {
-    title("СОЗДАНИЕ ПОЛНОГО БЭКАПА");
-    info("Будут сохранены все обычные файлы конфигурации Xray и xkeen-sub.");
+    title("СОЗДАНИЕ USER-BACKUP");
+    info("Будет сохранён полный снимок всех файлов конфигурации Xray и xkeen-sub.");
     info("Включая подписки, baseline, архив пользовательских подключений и настройки резервирования.");
     if !confirm("Создать полную резервную копию текущего состояния?")? {
-        warning("Создание полного бэкапа отменено.");
+        warning("Создание user-backup отменено.");
         return Ok(());
     }
 
-    let mut sources = Vec::new();
-    collect_backup_files(Path::new("/opt/etc/xray/configs"), "Конфигурация Xray", &mut sources)?;
-    collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "Конфигурация xkeen-sub", &mut sources)?;
-    sources.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
-
-    if sources.is_empty() {
-        return Err("Не найдено файлов конфигурации для резервирования.".into());
-    }
-    sources.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut backup = BackupSession::start_full("Полный бэкап конфигураций Xray и xkeen-sub")?;
-    backup.set_plan_count(sources.len());
-    let saved = match backup.backup_files(&sources) {
-        Ok(saved) if saved == sources.len() => saved,
-        Ok(saved) => {
-            let message = format!("Сохранено {saved} из {} файлов; полный бэкап не подтверждён.", sources.len());
-            backup.set_outcome("ОШИБКА", &message, false);
-            backup.finish()?;
-            return Err(message.into());
-        }
-        Err(error) => {
-            backup.set_outcome("ОШИБКА", &format!("Полный бэкап не завершён: {error}"), false);
-            backup.finish()?;
-            return Err(error);
-        }
-    };
-    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Сохранено и проверено {saved} файлов конфигурации Xray и xkeen-sub."), true);
+    let mut backup = BackupSession::start_user_backup("Ручная точка восстановления user-backup")?;
+    let saved = backup.saved_files;
+    backup.set_outcome("ПОЛНЫЙ БЭКАП СОЗДАН", &format!("Полный снимок создан и проверен: {saved} файлов конфигурации Xray и xkeen-sub."), true);
     backup.finish()?;
-    success(&format!("Полный бэкап создан. Сохранено и проверено файлов: {saved}. ID: {}", backup.id()));
+    success(&format!("user-backup создан. Сохранено и проверено файлов: {saved}. ID: {}", backup.id()));
     Ok(())
+}
+
+fn collect_existing_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Не удалось проверить каталог {}: {error}", root.display()).into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(format!("Каталог конфигурации не является обычным каталогом: {}", root.display()).into())
+        }
+        Ok(_) => collect_backup_files(root, category, output),
+    }
 }
 
 fn collect_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {
@@ -644,16 +656,14 @@ fn list_interactive() -> AppResult<bool> {
             let time = summary.get("time").cloned().unwrap_or_else(|| "неизвестно".to_owned());
             let status = summary.get("status").cloned().unwrap_or_else(|| "неизвестно".to_owned());
             let saved = summary.get("saved").cloned().unwrap_or_else(|| "?".to_owned());
-            menu_item_prefix(&(index + 1).to_string(), &format!("backup{}", record.number), &format!("{time} · {status} · файлов сохранено: {saved}"));
+            menu_item_prefix(&(index + 1).to_string(), &record_label(record), &format!("{time} · {status} · файлов сохранено: {saved}"));
         }
         println!();
         info(&format!("Всего резервных копий: {}", records.len()));
         info(&format!("Период хранения: {}", if settings.mode == RetentionMode::Unlimited {
-            "без ограничений".to_owned()
-        } else {
-            format!("{} календарных дней", settings.retention_days)
-        }));
-        info(&format!("Дневной лимит: {}", settings.daily_limit));
+            "бессрочно (автоматическое удаление отключено)".to_owned()
+        } else { "3 календарных дня".to_owned() }));
+        info(&format!("Дневной лимит: {}; минимум сохраняемых точек: {}", settings.daily_limit, MIN_DAILY_LIMIT));
 
         let input = read_input("Введите номер записи или 0 — назад: ")?;
         if input == "0" {
@@ -696,6 +706,11 @@ fn show_record_menu(id: &str) -> AppResult<bool> {
                     warning("Нельзя удалить резервную запись, пока она используется работающим update.");
                     continue;
                 }
+                let all_records = load_records()?;
+                if is_retention_protected(&record, &all_records)? {
+                    warning("Эта точка защищена: первую точку дня и user-backup нельзя удалять вручную в течение трёх дней. Для принудительного удаления используйте функцию удаления всех точек.");
+                    continue;
+                }
                 if confirm(&format!("Удалить резервную запись {}? Это действие нельзя отменить.", record.id))? {
                     fs::remove_dir_all(&record.path)?;
                     success("Резервная копия удалена.");
@@ -735,74 +750,222 @@ fn show_files(record: &BackupRecord) -> AppResult<bool> {
 }
 
 fn restore_record(record: &BackupRecord) -> AppResult<()> {
+    let log = record.path.join("log.txt");
+    if read_full_snapshot_file_count(&log).is_some() { restore_full_snapshot_record(record) }
+    else { restore_legacy_record(record) }
+}
+
+fn read_full_snapshot_file_count(log_path: &Path) -> Option<usize> {
+    fs::read_to_string(log_path).ok()?.lines().find_map(|line| {
+        let (_, value) = line.split_once("SNAPSHOT: FULL_V1 files=")?;
+        value.trim().parse::<usize>().ok()
+    })
+}
+
+fn is_full_snapshot_path(path: &Path) -> bool {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) { return false; }
+    let xr=Path::new("/opt/etc/xray/configs"); let xk=Path::new("/opt/etc/xkeen-sub"); let bd=Path::new(BACKUP_DIR);
+    path.starts_with(xr) || (path.starts_with(xk) && !path.starts_with(bd))
+}
+
+fn validate_full_snapshot(record: &BackupRecord) -> AppResult<Vec<(PathBuf, PathBuf)>> {
+    let log = record.path.join("log.txt");
+    let count = read_full_snapshot_file_count(&log)
+        .ok_or("В записи отсутствует подтверждение полного снимка FULL_V1.")?;
+    let mappings = read_file_mappings(&log)?;
+    let metadata_map = read_file_metadata_map(&log)?;
+    if mappings.len() != count || mappings.is_empty() || metadata_map.len() != count {
+        return Err(format!("Полный снимок повреждён: указано {count} файлов, найдено {} сопоставлений и {} записей метаданных.", mappings.len(), metadata_map.len()).into());
+    }
+    let mut sources = BTreeSet::new();
+    let mut stored_paths = BTreeSet::new();
+    for (source, _) in &mappings {
+        let mut parent = source.parent();
+        while let Some(path) = parent {
+            if sources.contains(path) {
+                return Err(format!("Полный снимок содержит конфликт файла и каталога: {}", source.display()).into());
+            }
+            parent = path.parent();
+        }
+    }
+    for (source, stored) in &mappings {
+        if !is_full_snapshot_path(source) || !sources.insert(source.clone()) {
+            return Err(format!("Недопустимый или повторяющийся путь снимка: {}", source.display()).into());
+        }
+        validate_relative_path(stored)?;
+        if stored == Path::new("log.txt") || stored == Path::new(".log.txt.tmp") {
+            return Err(format!("Резервный файл использует служебное имя журнала: {}", stored.display()).into());
+        }
+        if !stored_paths.insert(stored.clone()) {
+            return Err(format!("Повторяется путь хранения: {}", stored.display()).into());
+        }
+        let saved = record.path.join(stored);
+        let metadata = fs::symlink_metadata(&saved)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("Резервный объект не является обычным файлом: {}", saved.display()).into());
+        }
+        let bytes = fs::read(&saved)?;
+        let expected = metadata_map.get(source)
+            .ok_or_else(|| format!("Нет метаданных: {}", source.display()))?;
+        if file_checksum(&bytes) != expected.checksum {
+            return Err(format!("Контрольная сумма не совпадает: {}", saved.display()).into());
+        }
+    }
+    Ok(mappings)
+}
+
+fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
+    let mappings = validate_full_snapshot(record)?;
+    let log = record.path.join("log.txt");
+    let metadata_map = read_file_metadata_map(&log)?;
+    let snapshot_paths: BTreeSet<PathBuf> = mappings.iter().map(|(path, _)| path.clone()).collect();
+
+    let mut current = Vec::new();
+    collect_existing_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut current)?;
+    collect_existing_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut current)?;
+    current.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+    let current_paths: BTreeSet<PathBuf> = current.iter()
+        .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось определить {}: {error}", source.path.display())))
+        .collect::<Result<_, _>>()?;
+
+    for extra in current_paths.difference(&snapshot_paths) {
+        if !is_full_snapshot_path(extra) {
+            return Err(format!("Недопустимый путь удаления: {}", extra.display()).into());
+        }
+        fs::remove_file(extra)
+            .map_err(|error| format!("Не удалось удалить лишний файл {}: {error}", extra.display()))?;
+    }
+    // A path that was a file in the snapshot may now be a directory. Its
+    // contents are outside the snapshot file set, so remove that directory
+    // before atomically restoring the original file.
+    for target in &snapshot_paths {
+        match fs::symlink_metadata(target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("Нельзя восстановить файл поверх символической ссылки: {}", target.display()).into());
+            }
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(target)
+                .map_err(|error| format!("Не удалось удалить каталог, занявший место файла {}: {error}", target.display()))?,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Не удалось проверить путь {}: {error}", target.display()).into()),
+        }
+    }
+
+    for (source, stored) in &mappings {
+        let bytes = fs::read(record.path.join(stored))?;
+        let metadata = metadata_map.get(source)
+            .ok_or_else(|| format!("Нет метаданных: {}", source.display()))?;
+        restore_file_atomically(source, &bytes, *metadata)?;
+    }
+
+    let mut check = Vec::new();
+    collect_existing_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut check)?;
+    collect_existing_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut check)?;
+    check.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
+    let actual: BTreeSet<PathBuf> = check.iter()
+        .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось проверить {}: {error}", source.path.display())))
+        .collect::<Result<_, _>>()?;
+    if actual != snapshot_paths {
+        return Err("Набор файлов после восстановления не совпадает со снимком.".into());
+    }
+
+    for (source, stored) in &mappings {
+        let expected = fs::read(record.path.join(stored))?;
+        let actual = fs::read(source)?;
+        let metadata = metadata_map.get(source)
+            .ok_or_else(|| format!("Нет метаданных: {}", source.display()))?;
+        let restored = fs::metadata(source)?;
+        if actual != expected
+            || restored.mode() & 0o7777 != metadata.mode
+            || restored.uid() != metadata.uid
+            || restored.gid() != metadata.gid
+        {
+            return Err(format!("Проверка восстановленного файла не пройдена: {}", source.display()).into());
+        }
+    }
+    Ok(())
+}
+
+fn restore_full_snapshot_record(record: &BackupRecord) -> AppResult<()> {
+    if is_active_record(record) { warning("Нельзя восстанавливать резервную запись, пока она используется работающим update."); return Ok(()); }
+    let status=read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
+    if status.is_empty() { warning("В журнале полного снимка отсутствует итоговый статус. Восстановление запрещено."); return Ok(()); }
+    validate_full_snapshot(record)?;
+    if !confirm(&format!("Восстановить полный снимок {}? Все конфигурации Xray и xkeen-sub будут возвращены к состоянию точки; более поздние файлы будут удалены.",record.id))? {
+        warning("Восстановление отменено."); return Ok(());
+    }
+    let mut safety=BackupSession::start("Полный защитный снимок перед восстановлением")?;
+    safety.set_outcome("УСПЕШНО","Создан полный защитный снимок текущего состояния перед восстановлением.",false);
+    safety.finish()?;
+    let safety_record=find_record(safety.id())?;
+    if let Err(error)=apply_full_snapshot(record) {
+        let rollback=apply_full_snapshot(&safety_record);
+        let restart=crate::update_apply::start_xkeen_after_restore_rollback(&mut safety);
+        let msg=rollback.as_ref().map(|_|"успешно".to_owned()).unwrap_or_else(|e|format!("ошибка: {e}"));
+        safety.event("RESTORE",&format!("Ошибка восстановления {}: {error}; откат: {msg}; запуск XKeen: {restart}",record.id))?;
+        return Err(format!("Не удалось восстановить снимок: {error}; откат: {msg}").into());
+    }
+    if let Err(error)=crate::update_apply::restart_xkeen_after_restore(&mut safety) {
+        let rollback=apply_full_snapshot(&safety_record);
+        let restart=crate::update_apply::start_xkeen_after_restore_rollback(&mut safety);
+        let msg=rollback.as_ref().map(|_|"успешно".to_owned()).unwrap_or_else(|e|format!("ошибка: {e}"));
+        safety.event("RESTORE",&format!("Ошибка запуска XKeen: {error}; откат: {msg}; запуск после отката: {restart}"))?;
+        return Err(format!("Не удалось запустить XKeen: {error}; откат: {msg}").into());
+    }
+    safety.event("RESTORE",&format!("Полный снимок {} восстановлен и проверен.",record.id))?;
+    match load_settings().and_then(|settings|prune_records(&settings,safety.id())) {
+        Ok(n) if n>0=>safety.event("RETENTION",&format!("После восстановления удалено старых записей: {n}."))?,
+        Ok(_)=>{},
+        Err(e)=>{safety.event("RETENTION",&format!("Не удалось выполнить очистку: {e}"))?;warning("Восстановление завершено, но очистка не выполнена.");}
+    }
+    success("Полный снимок восстановлен. Состав файлов, содержимое и метаданные проверены.");
+    Ok(())
+}
+
+fn restore_legacy_record(record: &BackupRecord) -> AppResult<()> {
     if is_active_record(record) {
         warning("Нельзя восстанавливать резервную запись, пока она используется работающим update.");
         return Ok(());
     }
     let status = read_summary(&record.path.join("log.txt")).get("status").cloned().unwrap_or_default();
     if status != "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" && status != "ПОЛНЫЙ БЭКАП СОЗДАН" && status != "УСПЕШНО" {
-        warning("Эта запись не содержит подтверждённую полную резервную копию. Восстановление запрещено.");
+        warning("Эта старая запись не содержит подтверждённую резервную копию. Восстановление запрещено.");
         return Ok(());
     }
     let log_path = record.path.join("log.txt");
     let mappings = read_file_mappings(&log_path)?;
     let created_paths = read_created_paths(&log_path)?;
     if mappings.is_empty() && created_paths.is_empty() {
-        warning("В резервной записи нет файловых операций для восстановления.");
+        warning("В старой резервной записи нет файловых операций для восстановления.");
         return Ok(());
     }
 
-    let mut targets = BTreeSet::new();
-    for (source, _) in &mappings {
-        targets.insert(source.clone());
-    }
-    for path in &created_paths {
-        targets.insert(path.clone());
-    }
     if !confirm(&format!(
-        "Восстановить резервную запись {}? Будут возвращены {} сохранённых файлов и удалены {} файлов, созданных обновлением.",
+        "Восстановить старую резервную запись {}? Будут возвращены {} сохранённых файлов и удалены {} файлов, созданных обновлением.",
         record.id, mappings.len(), created_paths.len()
     ))? {
         warning("Восстановление отменено.");
         return Ok(());
     }
 
-    let mut existing = Vec::new();
-    let mut missing_before = Vec::new();
-    for source in &targets {
-        if source.exists() {
-            existing.push(BackupSource { path: source.clone(), category: "Перед восстановлением".to_owned() });
-        } else {
-            missing_before.push(source.clone());
-        }
-    }
-
-    let mut safety = BackupSession::start("Резервная копия перед ручным восстановлением")?;
-    safety.set_plan_count(existing.len());
-    let safety_saved = match safety.backup_files(&existing) {
-        Ok(count) => count,
-        Err(error) => {
-            safety.set_outcome("ОШИБКА", &format!("Не удалось создать защитную копию перед восстановлением: {error}"), false);
-            let _ = safety.finish();
-            return Err(error);
-        }
-    };
-    safety.set_outcome("УСПЕШНО", "Создана защитная копия текущего состояния перед восстановлением.", false);
+    // The rollback point is a full snapshot, even when the selected legacy
+    // record contains only a subset of the configuration files.
+    let mut safety = BackupSession::start("Полный защитный снимок перед восстановлением старой точки")?;
+    safety.set_outcome("УСПЕШНО", "Создан полный защитный снимок текущего состояния перед восстановлением старой точки.", false);
     safety.finish()?;
+    let safety_record = find_record(safety.id())?;
 
     let restore_result: AppResult<()> = (|| {
         for (source, stored) in &mappings {
             validate_relative_path(stored)?;
             let saved = record.path.join(stored);
-            if !saved.is_file() {
-                return Err(format!("Файл резервной копии отсутствует: {}", saved.display()).into());
+            let metadata_file = fs::symlink_metadata(&saved)
+                .map_err(|e| format!("Не удалось проверить резервный файл {}: {e}", saved.display()))?;
+            if metadata_file.file_type().is_symlink() || !metadata_file.is_file() {
+                return Err(format!("Резервный объект не является обычным файлом: {}", saved.display()).into());
             }
-            if let Some(parent) = source.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let bytes = fs::read(&saved)
-                .map_err(|e| format!("Не удалось прочитать резервный файл {}: {e}", saved.display()))?;
-            let metadata = read_file_metadata(&record.path.join("log.txt"), source)?
+            let bytes = fs::read(&saved)?;
+            let metadata = read_file_metadata(&log_path, source)?
                 .ok_or_else(|| format!("В журнале отсутствуют метаданные файла: {}", source.display()))?;
             if file_checksum(&bytes) != metadata.checksum {
                 return Err(format!("Контрольная сумма резервного файла не совпадает: {}", saved.display()).into());
@@ -825,35 +988,14 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
     })();
 
     if let Err(error) = restore_result {
-        for source in &missing_before {
-            let _ = fs::remove_file(source);
-        }
-        if safety_saved > 0 {
-            if let Ok(safety_record) = find_record(safety.id()) {
-                if let Ok(safety_mappings) = read_file_mappings(&safety_record.path.join("log.txt")) {
-                    for (source, stored) in safety_mappings {
-                        let saved = safety_record.path.join(stored);
-                        if saved.is_file() {
-                            if fs::copy(&saved, &source).is_ok() {
-                                if fs::read(&saved).ok() != fs::read(&source).ok() {
-                                    let _ = safety.event("ROLLBACK", &format!("Побайтовая проверка отката не пройдена: {}", source.display()));
-                                } else {
-                                    let _ = safety.event("ROLLBACK", &format!("Исходное состояние восстановлено: {}", source.display()));
-                                }
-                            } else {
-                                let _ = safety.event("ROLLBACK", &format!("Не удалось восстановить исходное состояние: {}", source.display()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let rollback = apply_full_snapshot(&safety_record);
         let service_restart = crate::update_apply::start_xkeen_after_restore_rollback(&mut safety);
-        safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}; запуск XKeen после отката: {service_restart}"))?;
-        return Err(error);
+        let rollback_text = rollback.as_ref().map(|_| "успешно".to_owned()).unwrap_or_else(|failure| format!("ошибка: {failure}"));
+        safety.event("RESTORE", &format!("Восстановление старой точки не удалось: {error}; откат полного состояния: {rollback_text}; запуск XKeen после отката: {service_restart}"))?;
+        return Err(format!("Восстановление старой точки не удалось: {error}; откат полного состояния: {rollback_text}").into());
     }
 
-    safety.event("RESTORE", &format!("Резервная запись {} восстановлена; все файлы прошли побайтовую проверку.", record.id))?;
+    safety.event("RESTORE", &format!("Старая резервная запись {} восстановлена; текущая конфигурация проверена.", record.id))?;
     match load_settings().and_then(|settings| prune_records(&settings, safety.id())) {
         Ok(removed) if removed > 0 => safety.event("RETENTION", &format!("После восстановления удалено старых записей: {removed}."))?,
         Ok(_) => {}
@@ -862,8 +1004,20 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
             warning("Восстановление завершено, но автоматическая очистка резервных копий не выполнена.");
         }
     }
-    success("Резервная копия восстановлена. Побайтовая проверка пройдена.");
+    success("Старая резервная запись восстановлена.");
     Ok(())
+}
+
+fn delete_all_backups() -> AppResult<()> {
+    let records=load_records()?;
+    if records.is_empty(){info("Точек восстановления для удаления нет.");return Ok(());}
+    if records.iter().any(is_active_record){warning("Нельзя удалить все точки, пока выполняется операция, использующая резервную запись. Повторите после её завершения.");return Ok(());}
+    title("УДАЛЕНИЕ ВСЕХ ТОЧЕК ВОССТАНОВЛЕНИЯ");
+    warning("Будут удалены все копии, включая user-backup, первые точки дня и защищённые записи.");
+    if !confirm(&format!("Безвозвратно удалить все {} точек восстановления?",records.len()))?{warning("Удаление отменено. Резервные копии не затронуты.");return Ok(());}
+    let mut removed=0usize;
+    for record in records {fs::remove_dir_all(&record.path).map_err(|e|format!("Не удалось удалить {}: {e}",record.id))?;removed+=1;}
+    success(&format!("Удалены все точки восстановления: {removed}."));Ok(())
 }
 
 fn confirm(question: &str) -> AppResult<bool> {
@@ -885,7 +1039,7 @@ fn load_settings() -> AppResult<BackupSettings> {
         Ok(text) => {
             let settings: BackupSettings = serde_json::from_str(&text)
                 .map_err(|e| format!("Файл настроек резервирования повреждён: {e}"))?;
-            if settings.retention_days < MIN_RETENTION_DAYS || settings.daily_limit < MIN_DAILY_LIMIT {
+            if settings.daily_limit < MIN_DAILY_LIMIT {
                 return Err("Настройки резервирования содержат значение ниже допустимого минимума.".into());
             }
             Ok(settings)
@@ -930,10 +1084,10 @@ fn mode_label(mode: &RetentionMode) -> &'static str {
 fn print_help() {
     title("XKEEN-SUB — УПРАВЛЕНИЕ РЕЗЕРВНЫМИ КОПИЯМИ");
     command_help("backup", "Открыть меню резервирования");
-    command_help("backup days N", "Установить срок хранения в календарных днях (минимум 3)");
-    command_help("backup limit N", "Установить дневной лимит записей (минимум 10)");
-    command_help("backup mode auto|unlimited", "Выбрать автоматическое или бессрочное хранение");
-    command_help("backup full", "Создать полный бэкап конфигураций Xray и xkeen-sub");
+    command_help("backup limit N", "Установить дневной лимит записей (минимум 5)");
+    command_help("backup mode auto|unlimited", "Выбрать хранение 3 дня или бессрочное хранение");
+    command_help("backup user-backup", "Создать ручную полную точку восстановления");
+    command_help("backup clear", "Удалить все точки восстановления после подтверждения");
     command_help("backup list", "Просмотреть резервные копии");
     command_help("backup list ID", "Открыть выбранную резервную запись");
 }
@@ -969,15 +1123,45 @@ fn find_record(id: &str) -> AppResult<BackupRecord> {
     Ok(record)
 }
 
+fn valid_record_date(date: &str) -> bool {
+    let mut parts = date.split('-');
+    let day = parts.next().unwrap_or("");
+    let month = parts.next().unwrap_or("");
+    let year = parts.next().unwrap_or("");
+    parts.next().is_none() && day.len() == 2 && month.len() == 2 && year.len() == 4
+        && day.chars().all(|c| c.is_ascii_digit())
+        && month.chars().all(|c| c.is_ascii_digit())
+        && year.chars().all(|c| c.is_ascii_digit())
+}
+
+fn record_label(record: &BackupRecord) -> String {
+    if record.id.contains("--user-backup") { "user-backup".to_owned() }
+    else if record.is_full { "backup-full (старый формат)".to_owned() }
+    else { format!("backup{}", record.number) }
+}
+
+fn next_user_backup_number(root: &Path, date: &str) -> AppResult<usize> {
+    let mut max = None;
+    if !root.exists() { return Ok(0); }
+    for entry in fs::read_dir(root)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if let Some((record_date, number, _)) = parse_record_id(&name) {
+            if name.contains("--user-backup") && record_date == date {
+                max = Some(max.unwrap_or(0usize).max(number));
+            }
+        }
+    }
+    Ok(max.map_or(0, |number| number + 1))
+}
+
 fn parse_record_id(value: &str) -> Option<(String, usize, bool)> {
+    if let Some((date, suffix)) = value.split_once("--user-backup") {
+        if !valid_record_date(date) { return None; }
+        let number = if suffix.is_empty() { 0 } else { suffix.parse::<usize>().ok()? };
+        return Some((date.to_owned(), number, true));
+    }
     let (date, suffix) = value.split_once("--backup")?;
-    let (day, month_year) = date.split_once('-')?;
-    let (month, year) = month_year.split_once('-')?;
-    if day.len() != 2 || month.len() != 2 || year.len() != 4
-        || !day.chars().all(|c| c.is_ascii_digit())
-        || !month.chars().all(|c| c.is_ascii_digit())
-        || !year.chars().all(|c| c.is_ascii_digit())
-    { return None; }
+    if !valid_record_date(date) { return None; }
 
     if let Some(full_number) = suffix.strip_prefix("-full") {
         let number = if full_number.is_empty() { 0 } else { full_number.parse::<usize>().ok()? };
@@ -1006,18 +1190,6 @@ fn next_number(root: &Path, date: &str) -> AppResult<usize> {
         }
     }
     Ok(max + 1)
-}
-
-fn next_full_number(root: &Path, date: &str) -> AppResult<usize> {
-    let mut max = None;
-    if !root.exists() { return Ok(0); }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if let Some((record_date, number, is_full)) = parse_record_id(&entry.file_name().to_string_lossy()) {
-            if record_date == date && is_full { max = Some(max.unwrap_or(0usize).max(number)); }
-        }
-    }
-    Ok(max.map_or(0, |number| number + 1))
 }
 
 fn read_summary(path: &Path) -> HashMap<String, String> {
@@ -1104,6 +1276,28 @@ fn file_checksum(bytes: &[u8]) -> u64 {
     hash
 }
 
+fn read_file_metadata_map(log_path: &Path) -> AppResult<HashMap<PathBuf, FileMetadata>> {
+    let content = fs::read_to_string(log_path)?;
+    let mut result = HashMap::new();
+    for line in content.lines() {
+        let Some(value) = line.strip_prefix("Метаданные: ") else { continue; };
+        let Some((path, metadata)) = value.split_once(" -> ") else { continue; };
+        let path: String = serde_json::from_str(path)
+            .map_err(|error| format!("Некорректный путь метаданных в журнале: {error}"))?;
+        let mut fields = metadata.split_whitespace();
+        let mode = u32::from_str_radix(fields.next().ok_or("В журнале отсутствует режим файла.")?, 8)?;
+        let uid = fields.next().ok_or("В журнале отсутствует UID файла.")?.parse::<u32>()?;
+        let gid = fields.next().ok_or("В журнале отсутствует GID файла.")?.parse::<u32>()?;
+        let checksum = u64::from_str_radix(fields.next().ok_or("В журнале отсутствует контрольная сумма файла.")?, 16)?;
+        if fields.next().is_some() { return Err("Некорректная запись метаданных файла.".into()); }
+        let path = PathBuf::from(path);
+        if result.insert(path.clone(), FileMetadata { mode, uid, gid, checksum }).is_some() {
+            return Err(format!("В журнале повторяются метаданные файла: {}", path.display()).into());
+        }
+    }
+    Ok(result)
+}
+
 fn read_file_metadata(log_path: &Path, source: &Path) -> AppResult<Option<FileMetadata>> {
     let content = fs::read_to_string(log_path)?;
     for line in content.lines() {
@@ -1176,7 +1370,6 @@ fn is_allowed_restore_path(path: &Path) -> bool {
     let archive = Path::new("/opt/etc/xkeen-sub/old-user-outbound.json");
     let subscriptions = Path::new("/opt/etc/xkeen-sub/sub.json");
     let xray_root = Path::new("/opt/etc/xray/configs");
-    let baseline_root = Path::new("/opt/etc/xkeen-sub/baseline");
     if path == archive || path == subscriptions {
         return true;
     }
@@ -1196,58 +1389,82 @@ fn validate_relative_path(path: &Path) -> AppResult<()> {
 }
 
 fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize> {
-    if settings.mode == RetentionMode::Unlimited { return Ok(0); }
-    let records = load_records()?;
-    let today = current_date()?;
-    let today_ordinal = date_from_id(&format!("{today}--backup1"))
-        .ok_or("Не удалось определить текущую календарную дату.")?;
-    let mut removed = 0usize;
-    let mut by_date: BTreeMap<String, Vec<BackupRecord>> = BTreeMap::new();
-
+    if settings.mode==RetentionMode::Unlimited { return Ok(0); }
+    let records=load_records()?; let today=current_date()?;
+    let ordinal=date_from_id(&format!("{today}--backup1")).ok_or("Не удалось определить текущую календарную дату.")?;
+    let mut removed=0usize; let mut grouped:BTreeMap<String,Vec<BackupRecord>>=BTreeMap::new();
     for record in records {
-        let ordinal = date_from_id(&record.id).unwrap_or(i64::MIN);
-        if today_ordinal - ordinal >= settings.retention_days as i64 {
-            if record.id != active_id && !is_active_or_incomplete_record(&record) {
-                fs::remove_dir_all(&record.path)?;
-                removed += 1;
-            }
-        } else if !record.is_full {
-            by_date.entry(record.date.clone()).or_default().push(record);
+        if record.id == active_id || is_active_record(&record) {
+            grouped.entry(record.date.clone()).or_default().push(record);
+            continue;
+        }
+        if !is_complete_backup_record(&record) {
+            fs::remove_dir_all(&record.path)?;
+            removed += 1;
+            continue;
+        }
+        let age = ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
+        if age >= AUTOMATIC_RETENTION_DAYS {
+            if record.id != active_id { fs::remove_dir_all(&record.path)?; removed += 1; }
+        } else {
+            grouped.entry(record.date.clone()).or_default().push(record);
         }
     }
-
-    for (_, mut day_records) in by_date {
-        day_records.sort_by_key(|record| record.number);
-        if day_records.len() <= settings.daily_limit { continue; }
-        let first_id = day_records.iter().find(|record| record.number == 1).map(|record| record.id.clone());
-        let mut keep = HashSet::new();
-        if let Some(id) = first_id { keep.insert(id); }
-        for record in day_records.iter().rev() {
-            if keep.len() >= settings.daily_limit { break; }
-            keep.insert(record.id.clone());
+    for (_,mut day) in grouped {
+        day.sort_by_key(|r|(read_summary(&r.path.join("log.txt")).get("time").cloned().unwrap_or_default(),r.id.clone()));
+        let limit=settings.daily_limit.max(MIN_DAILY_LIMIT);
+        if day.len()<=limit { continue; }
+        let mut keep=HashSet::new();
+        if let Some(first_auto)=day.iter().filter(|r| !r.is_full && is_complete_backup_record(r)).min_by_key(|r| r.number) {
+            keep.insert(first_auto.id.clone());
+        } else if let Some(first)=day.first() {
+            keep.insert(first.id.clone());
         }
-        for record in day_records {
-            if record.id != active_id && !is_active_or_incomplete_record(&record) && !keep.contains(&record.id) {
-                fs::remove_dir_all(&record.path)?;
-                removed += 1;
+        for r in &day {
+            if r.is_full || r.id==active_id || is_active_or_incomplete_record(r) { keep.insert(r.id.clone()); }
+        }
+        for r in day.iter().rev(){if keep.len()>=limit{break;}keep.insert(r.id.clone());}
+        for r in day {
+            if r.id!=active_id && !is_active_or_incomplete_record(&r) && !keep.contains(&r.id) {
+                fs::remove_dir_all(&r.path)?; removed+=1;
             }
         }
     }
     Ok(removed)
 }
 
-fn is_active_or_incomplete_record(record: &BackupRecord) -> bool {
-    let summary = read_summary(&record.path.join("log.txt"));
-    if !summary.contains_key("status") {
+fn is_complete_backup_record(record: &BackupRecord) -> bool {
+    if read_full_snapshot_file_count(&record.path.join("log.txt")).is_some() {
         return true;
     }
+    let status = read_summary(&record.path.join("log.txt"))
+        .get("status").cloned().unwrap_or_default();
+    matches!(status.as_str(), "РЕЗЕРВНАЯ КОПИЯ СОЗДАНА" | "ПОЛНЫЙ БЭКАП СОЗДАН" | "УСПЕШНО")
+}
+
+fn is_retention_protected(record: &BackupRecord, records: &[BackupRecord]) -> AppResult<bool> {
+    let today = current_date()?;
+    let today_ordinal = date_from_id(&format!("{today}--backup1"))
+        .ok_or("Не удалось определить текущую календарную дату.")?;
+    let age = today_ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
+    if age >= AUTOMATIC_RETENTION_DAYS || !is_complete_backup_record(record) { return Ok(false); }
+    if record.is_full { return Ok(true); }
+    let first = records.iter()
+        .filter(|item| item.date == record.date && !item.is_full && is_complete_backup_record(item))
+        .min_by_key(|item| item.number);
+    Ok(first.map(|item| item.id.as_str()) == Some(record.id.as_str()))
+}
+
+fn is_active_or_incomplete_record(record: &BackupRecord) -> bool {
+    // Incomplete records are protected only while their creating process is
+    // still alive. A crashed, abandoned record must not bypass retention forever.
     is_active_record(record)
 }
 
 fn is_active_record(record: &BackupRecord) -> bool {
     let summary = read_summary(&record.path.join("log.txt"));
     let Some(pid) = summary.get("pid").and_then(|value| value.parse::<u32>().ok()) else {
-        return summary.get("status").map(String::as_str) == Some("ВЫПОЛНЯЕТСЯ");
+        return false;
     };
     if Path::new("/proc").is_dir() {
         Path::new(&format!("/proc/{pid}")).exists()
@@ -1296,14 +1513,24 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, file_checksum, is_allowed_restore_path, parse_mode, parse_record_id, validate_relative_path, BackupSettings, RetentionMode};
+    use super::{days_from_civil, file_checksum, is_allowed_restore_path, is_full_snapshot_path, parse_mode, parse_record_id, read_full_snapshot_file_count, validate_relative_path, BackupSettings, RetentionMode};
     use std::path::Path;
+
+    #[test]
+    fn recognizes_full_snapshot_marker_in_timestamped_journal_event() {
+        let path = std::env::temp_dir().join(format!("xkeen-sub-full-snapshot-test-{}.log", std::process::id()));
+        std::fs::write(&path, "[18-11-2026 18:00:00] SNAPSHOT: FULL_V1 files=7\n").unwrap();
+        assert_eq!(read_full_snapshot_file_count(&path), Some(7));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn parses_daily_backup_ids() {
         assert_eq!(parse_record_id("14-11-2026--backup3"), Some(("14-11-2026".to_owned(), 3, false)));
         assert_eq!(parse_record_id("14-11-2026--backup-full"), Some(("14-11-2026".to_owned(), 0, true)));
         assert_eq!(parse_record_id("14-11-2026--backup-full1"), Some(("14-11-2026".to_owned(), 1, true)));
+        assert_eq!(parse_record_id("14-11-2026--user-backup"), Some(("14-11-2026".to_owned(), 0, true)));
+        assert_eq!(parse_record_id("14-11-2026--user-backup1"), Some(("14-11-2026".to_owned(), 1, true)));
         assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4, true)));
         assert_eq!(parse_record_id("14-11-2026--backup0"), None);
         assert_eq!(parse_record_id("../backup1"), None);
@@ -1319,12 +1546,19 @@ mod tests {
     #[test]
     fn default_backup_settings_keep_backups_enabled_with_safe_minimums() {
         let settings = BackupSettings::default();
-        assert_eq!(settings.retention_days, 3);
         assert_eq!(settings.daily_limit, 10);
         assert_eq!(settings.mode, RetentionMode::Automatic);
     }
 
     #[test]
+    fn full_snapshot_paths_are_limited_to_managed_configuration_roots() {
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1.json")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup/record/file.json")));
+        assert!(!is_full_snapshot_path(Path::new("/etc/passwd")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xray/configs/../passwd")));
+    }
+
     fn restore_paths_are_limited_to_update_managed_locations() {
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xray/configs/04_outbounds.json")));
         assert!(is_allowed_restore_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1--Germany.json")));

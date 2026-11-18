@@ -172,7 +172,7 @@ fn apply_configuration(
     let mut no_file_changes = false;
     if let Err(message) = &validation {
         backup.event("XRAY", &format!("Проверка Xray не пройдена: {message}"))?;
-        backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", false);
+        backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", true);
     } else {
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
         let plan = match registry {
@@ -202,7 +202,7 @@ fn apply_configuration(
         let mut progress = ProgressBar::new(progress_total);
         match backup.backup_files_with_progress(&backup_sources, &mut progress) {
             Ok(saved) => {
-                backup.event("BACKUP", &format!("Резервирование завершено: {saved} файлов сохранено и проверено."))?;
+                backup.event("BACKUP", &format!("Проверка файлов по полному снимку завершена: {saved} файлов."))?;
                 match update_apply::execute(&plan, backup, &mut progress) {
                     Ok(()) => {
                         progress.finish("Все операции завершены");
@@ -221,7 +221,7 @@ fn apply_configuration(
                         backup.set_outcome(
                             "ОШИБКА ПРИМЕНЕНИЯ",
                             &format!("Применение не завершено. Результат отката и проверки XKeen записан в журнал: {error}"),
-                            false,
+                            true,
                         );
                         return Err(error);
                     }
@@ -230,7 +230,7 @@ fn apply_configuration(
             Err(error) => {
                 progress.stop("Резервную копию не удалось создать");
                 backup.event("ERROR", &format!("Резервирование не пройдено: {error}"))?;
-                backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), false);
+                backup.set_outcome("ОШИБКА РЕЗЕРВИРОВАНИЯ", &format!("Применение заблокировано: {error}"), true);
                 return Err(error);
             }
         }

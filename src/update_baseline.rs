@@ -65,14 +65,14 @@ pub(crate) fn apply_baseline_only(
         Ok(saved) => {
             backup.event(
                 "BACKUP",
-                &format!("Резервирование baseline завершено: {saved} файлов сохранено и проверено."),
+                &format!("Проверка baseline-файлов по полному снимку завершена: {saved} файлов."),
             )?;
             if let Err(error) = update_apply::execute_baseline_only(&plan, backup, &mut progress) {
                 progress.stop("Обновление baseline остановлено");
                 backup.set_outcome(
                     "ОШИБКА BASELINE",
                     &format!("Рабочие файлы Xray не затрагивались. Ошибка обновления baseline: {error}"),
-                    false,
+                    true,
                 );
                 return Err(error);
             }
@@ -88,7 +88,7 @@ pub(crate) fn apply_baseline_only(
             backup.set_outcome(
                 "ОШИБКА РЕЗЕРВИРОВАНИЯ",
                 &format!("Обновление baseline не выполнено: {error}"),
-                false,
+                true,
             );
             return Err(error);
         }

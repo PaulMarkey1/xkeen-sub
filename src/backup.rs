@@ -557,7 +557,7 @@ fn create_full_backup() -> AppResult<()> {
     info("Будет сохранён полный снимок всех файлов конфигурации Xray и xkeen-sub.");
     info("Включая подписки, baseline, архив пользовательских подключений и настройки резервирования.");
     if !confirm("Создать полную резервную копию текущего состояния?")? {
-        warning("Создание полного бэкапа отменено.");
+        warning("Создание user-backup отменено.");
         return Ok(());
     }
 
@@ -1141,18 +1141,6 @@ fn next_number(root: &Path, date: &str) -> AppResult<usize> {
     Ok(max + 1)
 }
 
-fn next_full_number(root: &Path, date: &str) -> AppResult<usize> {
-    let mut max = None;
-    if !root.exists() { return Ok(0); }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if let Some((record_date, number, is_full)) = parse_record_id(&entry.file_name().to_string_lossy()) {
-            if record_date == date && is_full { max = Some(max.unwrap_or(0usize).max(number)); }
-        }
-    }
-    Ok(max.map_or(0, |number| number + 1))
-}
-
 fn read_summary(path: &Path) -> HashMap<String, String> {
     let mut result = HashMap::new();
     let Ok(content) = fs::read_to_string(path) else { return result; };
@@ -1426,6 +1414,8 @@ mod tests {
         assert_eq!(parse_record_id("14-11-2026--backup3"), Some(("14-11-2026".to_owned(), 3, false)));
         assert_eq!(parse_record_id("14-11-2026--backup-full"), Some(("14-11-2026".to_owned(), 0, true)));
         assert_eq!(parse_record_id("14-11-2026--backup-full1"), Some(("14-11-2026".to_owned(), 1, true)));
+        assert_eq!(parse_record_id("14-11-2026--user-backup"), Some(("14-11-2026".to_owned(), 0, true)));
+        assert_eq!(parse_record_id("14-11-2026--user-backup1"), Some(("14-11-2026".to_owned(), 1, true)));
         assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4, true)));
         assert_eq!(parse_record_id("14-11-2026--backup0"), None);
         assert_eq!(parse_record_id("../backup1"), None);

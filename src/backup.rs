@@ -1389,10 +1389,8 @@ fn is_retention_protected(record: &BackupRecord, records: &[BackupRecord]) -> Ap
 }
 
 fn is_active_or_incomplete_record(record: &BackupRecord) -> bool {
-    let summary = read_summary(&record.path.join("log.txt"));
-    if !summary.contains_key("status") {
-        return true;
-    }
+    // Incomplete records are protected only while their creating process is
+    // still alive. A crashed, abandoned record must not bypass retention forever.
     is_active_record(record)
 }
 

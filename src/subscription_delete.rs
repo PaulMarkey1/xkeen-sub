@@ -70,7 +70,7 @@ pub(crate) fn delete_subscription(
             backup.set_outcome(
                 "ОШИБКА УДАЛЕНИЯ",
                 &format!("Удаление не завершено: {failure}"),
-                false,
+                true,
             );
         }
     }

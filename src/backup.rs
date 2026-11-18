@@ -569,6 +569,17 @@ fn create_full_backup() -> AppResult<()> {
     Ok(())
 }
 
+fn collect_existing_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Не удалось проверить каталог {}: {error}", root.display()).into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(format!("Каталог конфигурации не является обычным каталогом: {}", root.display()).into())
+        }
+        Ok(_) => collect_backup_files(root, category, output),
+    }
+}
+
 fn collect_backup_files(root: &Path, category: &str, output: &mut Vec<BackupSource>) -> AppResult<()> {
     let metadata = match fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
@@ -778,8 +789,8 @@ fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
     let snapshot_paths: BTreeSet<PathBuf> = mappings.iter().map(|(path, _)| path.clone()).collect();
 
     let mut current = Vec::new();
-    collect_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut current)?;
-    collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut current)?;
+    collect_existing_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut current)?;
+    collect_existing_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut current)?;
     current.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
     let current_paths: BTreeSet<PathBuf> = current.iter()
         .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось определить {}: {error}", source.path.display())))
@@ -801,8 +812,8 @@ fn apply_full_snapshot(record: &BackupRecord) -> AppResult<()> {
     }
 
     let mut check = Vec::new();
-    collect_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut check)?;
-    collect_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut check)?;
+    collect_existing_backup_files(Path::new("/opt/etc/xray/configs"), "Xray", &mut check)?;
+    collect_existing_backup_files(Path::new("/opt/etc/xkeen-sub"), "xkeen-sub", &mut check)?;
     check.retain(|source| !source.path.starts_with(Path::new(BACKUP_DIR)));
     let actual: BTreeSet<PathBuf> = check.iter()
         .map(|source| source.path.canonicalize().map_err(|error| format!("Не удалось проверить {}: {error}", source.path.display())))

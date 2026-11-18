@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn recognizes_full_snapshot_marker_in_timestamped_journal_event() {
         let path = std::env::temp_dir().join(format!("xkeen-sub-full-snapshot-test-{}.log", std::process::id()));
-        std::fs::write(&path, "[18-11-2026 18:00:00] SNAPSHOT: FULL_V1 files=7\\n").unwrap();
+        std::fs::write(&path, "[18-11-2026 18:00:00] SNAPSHOT: FULL_V1 files=7\n").unwrap();
         assert_eq!(read_full_snapshot_file_count(&path), Some(7));
         let _ = std::fs::remove_file(path);
     }

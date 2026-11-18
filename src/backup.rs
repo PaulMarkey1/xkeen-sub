@@ -820,6 +820,7 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
                 return Err(format!("Файл, созданный обновлением, остался на месте: {}", path.display()).into());
             }
         }
+        crate::update_apply::restart_xkeen_after_restore(safety)?;
         Ok(())
     })();
 
@@ -847,7 +848,8 @@ fn restore_record(record: &BackupRecord) -> AppResult<()> {
                 }
             }
         }
-        safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}"))?;
+        let service_restart = crate::update_apply::start_xkeen_after_restore_rollback(&mut safety);
+        safety.event("RESTORE", &format!("Восстановление не удалось; выполнена попытка отката: {error}; запуск XKeen после отката: {service_restart}"))?;
         return Err(error);
     }
 

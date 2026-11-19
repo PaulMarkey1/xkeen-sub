@@ -68,6 +68,7 @@ fn print_help() -> AppResult<()> {
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");
+    command_item("auto-update", "Настроить автоматическое обновление подписок");
     println!();
     command_item("uxs", "Обновить программу");
     command_item("reinstall", "Установить выбранную версию программы");

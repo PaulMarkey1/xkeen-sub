@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -9,7 +9,7 @@ use crate::backup::{BackupSession, BackupSource};
 use crate::subscription_identity::{number_from_id, number_from_tag, SubscriptionIdentity};
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::SubscriptionStore;
-use crate::terminal::{ProgressBar, success};
+use crate::terminal::ProgressBar;
 use crate::update_apply;
 use crate::update_configuration::rebuild_configuration;
 use crate::update_merge::{rebuild_outbounds, ArchivePlan};
@@ -259,7 +259,6 @@ pub(crate) fn rename_subscription(
 
     operation?;
     *store = proposed_store;
-    success(&format!("Подписка {target_id} переименована."));
     Ok(())
 }
 

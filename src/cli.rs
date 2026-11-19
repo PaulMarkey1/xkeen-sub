@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{backup, install, maintenance, setup, update};
+use crate::{auto_update, backup, install, maintenance, setup, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -24,6 +24,8 @@ pub fn run() -> AppResult<()> {
         [root] if root == "backup" => backup::run(),
         [root, rest @ ..] if root == "backup" => backup::run_command(rest),
         [root] if root == "setup" => setup::run_menu(),
+        [root] if root == "auto-update" => auto_update::run_menu(),
+        [root, action] if root == "auto-update" && action == "tick" => auto_update::tick(),
         [root, action] if root == "setup" && action == "add" => setup::add::run().map(|_| ()),
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run().map(|_| ()),
@@ -82,5 +84,6 @@ fn print_setup_help() -> AppResult<()> {
     command_item("xkeen-sub setup list", "Просмотреть подписки");
     command_item("xkeen-sub setup del", "Удалить подписку");
     command_item("xkeen-sub setup edit", "Редактировать подписку");
+    command_item("xkeen-sub setup", "Автоматическое обновление подписок — пункт меню 5");
     Ok(())
 }

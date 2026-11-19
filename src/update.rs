@@ -18,6 +18,13 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 /// complete Xray configuration, backs up originals, then applies the plan with
 /// automatic rollback and XKeen state verification.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
+    let _lock = crate::update_lock::FileLock::acquire("/opt/var/run/xkeen-sub-update.lock")?
+        .ok_or("Обновление уже выполняется. Дождитесь его завершения и повторите попытку.")?;
+    run_locked(target_id)
+}
+
+/// Executes the existing update pipeline while the caller holds the shared update lock.
+pub(crate) fn run_locked(target_id: Option<&str>) -> AppResult<()> {
     let started_at = Instant::now();
     let mut backup = BackupSession::start("Обновление подписок")?;
     backup.event("UPDATE", "Загрузка и анализ подписок.")?;

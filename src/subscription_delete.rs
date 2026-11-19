@@ -30,6 +30,7 @@ pub(crate) fn delete_subscription(
     if !subscription_is_in_working_config(&selected_id)? {
         store.subscriptions.remove(index);
         save_subscriptions(&store)?;
+        crate::auto_update::remap_subscription_ids(&selected_id, &[])?;
         success(&format!(
             "Подписка {selected_id} удалена из sub.json. В рабочих конфигурациях её подключений не было; пересборка и перезапуск XKeen не требуются."
         ));
@@ -38,6 +39,11 @@ pub(crate) fn delete_subscription(
 
     let mut backup = BackupSession::start("Удаление подписки")?;
     let original_ids: Vec<String> = store.subscriptions.iter().map(|item| item.id.clone()).collect();
+    let id_mapping: Vec<(String, String)> = original_ids.iter().enumerate()
+        .filter(|(old_index, _)| *old_index != index)
+        .enumerate()
+        .map(|(new_index, (_, old_id))| (old_id.clone(), format!("sub{}", new_index + 1)))
+        .collect();
     backup.set_subscriptions(original_ids.clone());
 
     let result = (|| -> AppResult<()> {

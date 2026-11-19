@@ -92,6 +92,14 @@ pub fn tick() -> AppResult<()> {
         if let Err(failure) = crate::update::run_locked(target) {
             eprintln!("xkeen-sub auto-update: {failure}");
         }
+
+        // If this update itself ran across one or more scheduled slots, skip
+        // those missed occurrences while preserving the original schedule phase.
+        let finished_at = Local::now().timestamp();
+        if config.jobs[index].next_run <= finished_at {
+            config.jobs[index].next_run = next_occurrence(&config.jobs[index], finished_at)?;
+            save(&config)?;
+        }
     }
     Ok(())
 }
@@ -114,7 +122,8 @@ fn save(config: &Config) -> AppResult<()> {
 
 fn sync_cron(enabled: bool) -> AppResult<()> {
     if !crate::system::command_exists("crontab") {
-        return Err("Не найдена команда crontab. Установите cron в Entware.".into());
+        if enabled { return Err("Не найдена команда crontab. Установите cron в Entware.".into()); }
+        return Ok(());
     }
     let output = Command::new("crontab").arg("-l").output()?;
     let current = if output.status.success() {
@@ -268,25 +277,30 @@ fn read_schedule() -> AppResult<(Schedule, i64)> {
                 }
                 "2" => {
                     let days = read_number("Интервал — дней: ")?;
-                    let hours = read_number("Интервал — часов: ")?;
-                    let minutes = read_number("Интервал — минут: ")?;
+                    let hours = read_number("Интервал — часов (0–23): ")?;
+                    let minutes = read_number("Интервал — минут (0–59): ")?;
+                    if hours >= 24 || minutes >= 60 { return Err("Часы должны быть от 0 до 23, минуты — от 0 до 59.".into()); }
                     let seconds = days.checked_mul(86400).and_then(|v| hours.checked_mul(3600).and_then(|h| v.checked_add(h)))
                         .and_then(|v| minutes.checked_mul(60).and_then(|m| v.checked_add(m)))
                         .ok_or("Слишком большой интервал.")?;
                     if seconds == 0 { return Err("Интервал должен быть больше нуля.".into()); }
+                    if seconds > i64::MAX as u64 { return Err("Интервал слишком велик.".into()); }
                     let first = read_datetime("Дата и время следующего запуска (ГГГГ-ММ-ДД ЧЧ:ММ): ")?;
+                    if first <= Local::now().timestamp() { return Err("Время следующего запуска должно быть в будущем.".into()); }
                     Ok((Schedule::Interval { seconds }, first))
                 }
                 "3" => {
                     let days = u32::try_from(read_number("Интервал — календарных дней: ")?).ok().filter(|v| *v > 0)
                         .ok_or("Количество дней должно быть не меньше 1.")?;
-                    let hours = read_number("Дополнительно часов: ")?;
-                    let minutes = read_number("Дополнительно минут: ")?;
+                    let hours = read_number("Дополнительно часов (0–23): ")?;
+                    let minutes = read_number("Дополнительно минут (0–59): ")?;
+                    if hours >= 24 || minutes >= 60 { return Err("Часы должны быть от 0 до 23, минуты — от 0 до 59.".into()); }
                     let time = read_time("Время запуска (ЧЧ:ММ): ")?;
                     let date = read_date("Дата первого запуска (ГГГГ-ММ-ДД): ")?;
                     let offset = hours.checked_mul(60).and_then(|v| v.checked_add(minutes)).ok_or("Слишком большое смещение.")?;
                     let offset = i64::try_from(offset).map_err(|_| "Слишком большое смещение.")?;
                     let first = resolve_local(date.and_time(NaiveTime::parse_from_str(&time, "%H:%M")?) + chrono::Duration::minutes(offset))?.timestamp();
+                    if first <= Local::now().timestamp() { return Err("Дата первого запуска должна быть в будущем.".into()); }
                     Ok((Schedule::Calendar { days, hours, minutes, time }, first))
                 }
                 _ => Err("Выберите один из трёх вариантов.".into()),
@@ -325,6 +339,7 @@ fn next_occurrence(job: &Job, now: i64) -> AppResult<i64> {
     }
 }
 fn advance_calendar(previous: i64, days: u32, hours: u64, minutes: u64, time: &str, now: i64) -> AppResult<i64> {
+    if days == 0 { return Err("Календарный интервал должен быть не меньше одного дня.".into()); }
     let clock = NaiveTime::parse_from_str(time, "%H:%M")?;
     let offset = hours.checked_mul(60).and_then(|v| v.checked_add(minutes)).ok_or("Смещение слишком велико.")?;
     let offset = i64::try_from(offset).map_err(|_| "Смещение слишком велико.")?;
@@ -407,5 +422,10 @@ mod tests {
     #[test]
     fn daily_uses_next_local_day_when_time_has_passed() {
         assert_eq!(show_time(next_daily("17:00", ts("2026-11-19 18:00")).unwrap()).unwrap(), "2026-11-20 17:00");
+    }
+    #[test]
+    fn missed_interval_slots_are_skipped_without_shifting_the_anchor() {
+        let job = Job { id: 1, enabled: true, target: Target::All, schedule: Schedule::Interval { seconds: 21600 }, next_run: ts("2026-11-19 06:00") };
+        assert_eq!(show_time(next_occurrence(&job, ts("2026-11-19 13:00")).unwrap()).unwrap(), "2026-11-19 18:00");
     }
 }

@@ -130,7 +130,9 @@ fn sync_cron(enabled: bool) -> AppResult<()> {
         String::from_utf8(output.stdout)?
     } else {
         let message = String::from_utf8_lossy(&output.stderr).to_lowercase();
-        if message.contains("no crontab") || message.contains("нет crontab") { String::new() }
+        if message.contains("no crontab") || message.contains("нет crontab")
+            || (message.contains("can't open") && message.contains("root"))
+            || message.contains("no such file or directory") { String::new() }
         else { return Err(format!("Не удалось прочитать crontab: {}", message.trim()).into()); }
     };
     let mut lines: Vec<String> = current.lines().filter(|line| !line.contains(MARKER)).map(str::to_owned).collect();
@@ -138,11 +140,13 @@ fn sync_cron(enabled: bool) -> AppResult<()> {
         ensure_crond()?;
         lines.push(CRON.to_owned());
     }
-    let mut child = Command::new("crontab").arg("-").stdin(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        if !lines.is_empty() { stdin.write_all(lines.join("\n").as_bytes())?; stdin.write_all(b"\n")?; }
-    }
-    let result = child.wait_with_output()?;
+    let temp = format!("/opt/etc/xkeen-sub/crontab.tmp.{}", std::process::id());
+    let mut content = lines.join("\n");
+    if !content.is_empty() { content.push('\n'); }
+    fs::write(&temp, content)?;
+    let result = Command::new("crontab").arg(&temp).output();
+    let _ = fs::remove_file(&temp);
+    let result = result?;
     if !result.status.success() {
         return Err(format!("Не удалось записать crontab: {}", String::from_utf8_lossy(&result.stderr).trim()).into());
     }

@@ -79,11 +79,10 @@ fn print_setup_help() -> AppResult<()> {
     title("XKEEN-SUB — настройка подписок");
     println!();
     separator("Использование:");
-    command_item("xkeen-sub setup", "Открыть меню настройки");
+    command_item("xkeen-sub setup", "Открыть меню настройки (автообновление — пункт 5)");
     command_item("xkeen-sub setup add", "Добавить подписку");
     command_item("xkeen-sub setup list", "Просмотреть подписки");
     command_item("xkeen-sub setup del", "Удалить подписку");
     command_item("xkeen-sub setup edit", "Редактировать подписку");
-    command_item("xkeen-sub setup", "Автоматическое обновление — пункт 5 меню настройки");
     Ok(())
 }

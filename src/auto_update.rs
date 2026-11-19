@@ -106,7 +106,7 @@ pub fn tick() -> AppResult<()> {
             Target::Subscription(id) => Some(id.as_str()),
         };
         // The existing update pipeline owns all subscription processing and logging.
-        if let Err(failure) = crate::update::run_locked(target) {
+        if let Err(failure) = crate::update::run_auto_locked(target) {
             eprintln!("xkeen-sub auto-update: {failure}");
         }
 

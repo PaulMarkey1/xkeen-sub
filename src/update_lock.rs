@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::Duration;
 
 pub(crate) struct FileLock { path: String, pid: u32 }
 
@@ -21,7 +22,17 @@ impl FileLock {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let mut text = String::new();
                     if let Ok(mut file) = fs::File::open(path_ref) { let _ = file.read_to_string(&mut text); }
-                    let Some(pid) = text.trim().parse::<u32>().ok() else { return Ok(None) };
+                    let Some(pid) = text.trim().parse::<u32>().ok() else {
+                        let recent = fs::metadata(path_ref).and_then(|m| m.modified())
+                            .ok().and_then(|t| t.elapsed().ok())
+                            .map(|age| age < Duration::from_secs(30)).unwrap_or(false);
+                        if recent { return Ok(None); }
+                        match fs::remove_file(path_ref) {
+                            Ok(()) => continue,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(e) => return Err(e),
+                        }
+                    };
                     if is_xkeen_sub(pid) { return Ok(None); }
                     match fs::remove_file(path_ref) {
                         Ok(()) => continue,

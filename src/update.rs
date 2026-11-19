@@ -25,8 +25,24 @@ pub fn run(target_id: Option<&str>) -> AppResult<()> {
 
 /// Executes the existing update pipeline while the caller holds the shared update lock.
 pub(crate) fn run_locked(target_id: Option<&str>) -> AppResult<()> {
+    run_with_origin(target_id, false)
+}
+
+/// Executes the existing update pipeline for an automatic-update schedule.
+pub(crate) fn run_auto_locked(target_id: Option<&str>) -> AppResult<()> {
+    run_with_origin(target_id, true)
+}
+
+fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
     let started_at = Instant::now();
-    let mut backup = BackupSession::start("Обновление подписок")?;
+    let mut backup = if automatic {
+        BackupSession::start_auto_update("Автоматическое обновление подписок")?
+    } else {
+        BackupSession::start("Обновление подписок")?
+    };
+    if automatic {
+        backup.event("UPDATE", "Обновление вызвано автоматическим обновлением по расписанию.")?;
+    }
     backup.event("UPDATE", "Загрузка и анализ подписок.")?;
 
     let result = run_inner(target_id, &mut backup);

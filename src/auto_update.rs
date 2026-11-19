@@ -69,10 +69,9 @@ pub fn tick() -> AppResult<()> {
         Some(lock) => lock,
         None => return Ok(()),
     };
-    let mut config = load()?;
-    let now = Local::now().timestamp();
-    let due: Vec<u64> = config.jobs.iter()
-        .filter(|job| job.enabled && job.next_run <= now)
+    let initial = load()?;
+    let due: Vec<u64> = initial.jobs.iter()
+        .filter(|job| job.enabled && job.next_run <= Local::now().timestamp())
         .map(|job| job.id).collect();
 
     for id in due {
@@ -81,19 +80,28 @@ pub fn tick() -> AppResult<()> {
             Some(lock) => lock,
             None => return Ok(()),
         };
-        let Some(index) = config.jobs.iter().position(|job| job.id == id && job.enabled) else { continue };
+        // Reload before each change so a concurrent setup-menu edit is not
+        // overwritten by a stale configuration snapshot.
+        let mut current = load()?;
+        let Some(index) = current.jobs.iter().position(|job| job.id == id && job.enabled) else { continue };
         let current_now = Local::now().timestamp();
-        if current_now.saturating_sub(config.jobs[index].next_run) > MAX_LATE_SECONDS {
+        if current.jobs[index].next_run > current_now { continue; }
+
+        if current_now.saturating_sub(current.jobs[index].next_run) > MAX_LATE_SECONDS {
             // The router was offline or the scheduler was blocked past this slot.
             // Skip the missed occurrence and retain the original interval/calendar phase.
-            config.jobs[index].next_run = next_occurrence(&config.jobs[index], current_now)?;
-            save(&config)?;
+            current.jobs[index].next_run = next_occurrence(&current.jobs[index], current_now)?;
+            save(&current)?;
             continue;
         }
-        config.jobs[index].next_run = next_occurrence(&config.jobs[index], current_now)?;
-        save(&config)?;
 
-        let target = match &config.jobs[index].target {
+        let schedule_snapshot = current.jobs[index].schedule.clone();
+        let target_snapshot = current.jobs[index].target.clone();
+        let next_run_snapshot = next_occurrence(&current.jobs[index], current_now)?;
+        current.jobs[index].next_run = next_run_snapshot;
+        save(&current)?;
+
+        let target = match &target_snapshot {
             Target::All => None,
             Target::Subscription(id) => Some(id.as_str()),
         };
@@ -102,12 +110,18 @@ pub fn tick() -> AppResult<()> {
             eprintln!("xkeen-sub auto-update: {failure}");
         }
 
-        // If this update itself ran across one or more scheduled slots, skip
-        // those missed occurrences while preserving the original schedule phase.
+        // If the update itself ran across one or more scheduled slots, skip
+        // those missed occurrences. Do not overwrite a schedule edited meanwhile.
         let finished_at = Local::now().timestamp();
-        if config.jobs[index].next_run <= finished_at {
-            config.jobs[index].next_run = next_occurrence(&config.jobs[index], finished_at)?;
-            save(&config)?;
+        let mut latest = load()?;
+        if let Some(job) = latest.jobs.iter_mut().find(|job| {
+            job.id == id && job.enabled && job.schedule == schedule_snapshot
+                && job.target == target_snapshot && job.next_run == next_run_snapshot
+        }) {
+            if job.next_run <= finished_at {
+                job.next_run = next_occurrence(job, finished_at)?;
+                save(&latest)?;
+            }
         }
     }
     Ok(())

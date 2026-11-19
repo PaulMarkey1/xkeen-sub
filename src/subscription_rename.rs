@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -63,7 +63,7 @@ pub(crate) fn rename_subscription(
         ).into());
     }
 
-    let active_numbers = working_subscription_numbers()?;
+    let (active_numbers, outbound_path) = working_subscription_numbers()?;
     let registered_numbers: HashSet<u64> = proposed_store.subscriptions.iter()
         .filter_map(|subscription| number_from_id(&subscription.id))
         .collect();
@@ -86,6 +86,17 @@ pub(crate) fn rename_subscription(
     backup.set_subscriptions(vec![target_id.clone()]);
 
     let operation = (|| -> AppResult<()> {
+        if !backup.verify_original(&outbound_path)? {
+            return Err(format!(
+                "Рабочий Outbound {} изменился после создания защитного снимка. Переименование остановлено.",
+                outbound_path.display()
+            ).into());
+        }
+        let (snapshot_active_numbers, snapshot_outbound_path) = working_subscription_numbers()?;
+        if snapshot_active_numbers != active_numbers || snapshot_outbound_path != outbound_path {
+            return Err("Состав рабочих подписок изменился во время подготовки переименования. Повторите операцию.".into());
+        }
+
         let mut state = RunState::default();
 
         if target_is_active {
@@ -331,7 +342,7 @@ fn regular_file_exists(path: &Path) -> AppResult<bool> {
     }
 }
 
-fn working_subscription_numbers() -> AppResult<HashSet<u64>> {
+fn working_subscription_numbers() -> AppResult<(HashSet<u64>, PathBuf)> {
     let docs = load_config_documents()?;
     let outbound_index = find_doc(&docs, OUTBOUND_FILE)
         .ok_or_else(|| format!("Не найден файл {OUTBOUND_FILE}."))?;
@@ -339,11 +350,12 @@ fn working_subscription_numbers() -> AppResult<HashSet<u64>> {
         .and_then(Value::as_array)
         .ok_or_else(|| format!("В файле {OUTBOUND_FILE} отсутствует массив outbounds."))?;
 
-    Ok(outbounds.iter().filter_map(|outbound| {
+    let numbers = outbounds.iter().filter_map(|outbound| {
         outbound.get("tag")
             .and_then(Value::as_str)
             .and_then(number_from_tag)
-    }).collect())
+    }).collect();
+    Ok((numbers, docs[outbound_index].path.clone()))
 }
 
 fn build_prefixed_outbounds(
@@ -372,7 +384,7 @@ fn build_prefixed_outbounds(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_prefixed_outbounds, normalize_name};
+    use super::{build_prefixed_outbounds, normalize_name, rebuild_outbounds};
     use crate::subscriptions::Subscription;
     use serde_json::json;
 

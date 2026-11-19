@@ -5,13 +5,13 @@ use std::path::Path;
 
 pub(crate) const SUBSCRIPTIONS_FILE: &str = "/opt/etc/xkeen-sub/sub.json";
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SubscriptionStore {
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Subscription {
     pub id: String,
     pub name: Option<String>,

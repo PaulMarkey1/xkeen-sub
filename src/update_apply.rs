@@ -118,8 +118,8 @@ pub(crate) fn execute(plan: &[PlannedFileOperation], backup: &mut BackupSession,
 }
 
 pub(crate) fn execute_baseline_only(plan: &[PlannedFileOperation], backup: &mut BackupSession, progress: &mut ProgressBar) -> AppResult<()> {
-    if plan.iter().any(|operation| operation.category != "Baseline" && operation.category != "Повреждённый baseline") {
-        return Err("В режиме обновления только baseline обнаружена посторонняя файловая операция.".into());
+    if plan.iter().any(|operation| operation.category != "Baseline" && operation.category != "Повреждённый baseline" && operation.category != "Реестр подписок") {
+        return Err("В режиме обновления только baseline и реестра обнаружена посторонняя файловая операция.".into());
     }
     execute_internal(plan, backup, progress, false)
 }

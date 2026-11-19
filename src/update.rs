@@ -18,8 +18,31 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 /// complete Xray configuration, backs up originals, then applies the plan with
 /// automatic rollback and XKeen state verification.
 pub fn run(target_id: Option<&str>) -> AppResult<()> {
+    let _lock = crate::update_lock::FileLock::acquire("/opt/var/run/xkeen-sub-update.lock")?
+        .ok_or("Обновление уже выполняется. Дождитесь его завершения и повторите попытку.")?;
+    run_locked(target_id)
+}
+
+/// Executes the existing update pipeline while the caller holds the shared update lock.
+pub(crate) fn run_locked(target_id: Option<&str>) -> AppResult<()> {
+    run_with_origin(target_id, false)
+}
+
+/// Executes the existing update pipeline for an automatic-update schedule.
+pub(crate) fn run_auto_locked(target_id: Option<&str>) -> AppResult<()> {
+    run_with_origin(target_id, true)
+}
+
+fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
     let started_at = Instant::now();
-    let mut backup = BackupSession::start("Обновление подписок")?;
+    let mut backup = if automatic {
+        BackupSession::start_auto_update("Автоматическое обновление подписок")?
+    } else {
+        BackupSession::start("Обновление подписок")?
+    };
+    if automatic {
+        backup.event("UPDATE", "Обновление вызвано автоматическим обновлением по расписанию.")?;
+    }
     backup.event("UPDATE", "Загрузка и анализ подписок.")?;
 
     let result = run_inner(target_id, &mut backup);

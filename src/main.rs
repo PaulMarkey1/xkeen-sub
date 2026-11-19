@@ -1,3 +1,5 @@
+mod auto_update;
+mod update_lock;
 mod backup;
 mod balancer;
 mod cli;

@@ -87,6 +87,11 @@ impl BackupSession {
         Self::complete_startup_snapshot(session)
     }
 
+    pub(crate) fn start_auto_update(reason: &str) -> AppResult<Self> {
+        let session = Self::start_with_suffix(reason, "--auto-update")?;
+        Self::complete_startup_snapshot(session)
+    }
+
     fn start_user_backup(reason: &str) -> AppResult<Self> {
         let root = Path::new(BACKUP_DIR);
         fs::create_dir_all(root)?;
@@ -1205,6 +1210,10 @@ fn parse_record_id(value: &str) -> Option<(String, usize, bool)> {
     let (date, suffix) = value.split_once("--backup")?;
     if !valid_record_date(date) { return None; }
 
+    // Automatic-update records retain the ordinary backup number and add
+    // an origin marker after it: backupN--auto-update.
+    let suffix = suffix.strip_suffix("--auto-update").unwrap_or(suffix);
+
     if let Some(full_number) = suffix.strip_prefix("-full") {
         let number = if full_number.is_empty() { 0 } else { full_number.parse::<usize>().ok()? };
         return Some((date.to_owned(), number, true));
@@ -1569,6 +1578,7 @@ mod tests {
     #[test]
     fn parses_daily_backup_ids() {
         assert_eq!(parse_record_id("14-11-2026--backup3"), Some(("14-11-2026".to_owned(), 3, false)));
+        assert_eq!(parse_record_id("14-11-2026--backup3--auto-update"), Some(("14-11-2026".to_owned(), 3, false)));
         assert_eq!(parse_record_id("14-11-2026--backup-full"), Some(("14-11-2026".to_owned(), 0, true)));
         assert_eq!(parse_record_id("14-11-2026--backup-full1"), Some(("14-11-2026".to_owned(), 1, true)));
         assert_eq!(parse_record_id("14-11-2026--user-backup"), Some(("14-11-2026".to_owned(), 0, true)));

@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
 

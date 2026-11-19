@@ -12,6 +12,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const CONFIG: &str = "/opt/etc/xkeen-sub/auto-update.json";
 const MARKER: &str = "# xkeen-sub-auto-update";
 const CRON: &str = "* * * * * /opt/sbin/xkeen-sub auto-update tick # xkeen-sub-auto-update";
+const MAX_LATE_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -81,7 +82,15 @@ pub fn tick() -> AppResult<()> {
             None => return Ok(()),
         };
         let Some(index) = config.jobs.iter().position(|job| job.id == id && job.enabled) else { continue };
-        config.jobs[index].next_run = next_occurrence(&config.jobs[index], now)?;
+        let current_now = Local::now().timestamp();
+        if current_now.saturating_sub(config.jobs[index].next_run) > MAX_LATE_SECONDS {
+            // The router was offline or the scheduler was blocked past this slot.
+            // Skip the missed occurrence and retain the original interval/calendar phase.
+            config.jobs[index].next_run = next_occurrence(&config.jobs[index], current_now)?;
+            save(&config)?;
+            continue;
+        }
+        config.jobs[index].next_run = next_occurrence(&config.jobs[index], current_now)?;
         save(&config)?;
 
         let target = match &config.jobs[index].target {

@@ -12,7 +12,7 @@ use crate::subscriptions::SubscriptionStore;
 use crate::terminal::ProgressBar;
 use crate::update_apply;
 use crate::update_configuration::rebuild_configuration;
-use crate::update_merge::{rebuild_outbounds, ArchivePlan};
+use crate::update_merge::ArchivePlan;
 use crate::update_plan::build_file_plan_with_registry;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
@@ -384,7 +384,8 @@ fn build_prefixed_outbounds(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_prefixed_outbounds, normalize_name, rebuild_outbounds};
+    use super::{build_prefixed_outbounds, normalize_name};
+    use crate::update_merge::rebuild_outbounds;
     use crate::subscriptions::Subscription;
     use serde_json::json;
 
@@ -417,8 +418,6 @@ mod tests {
     #[test]
     fn full_rebuild_preserves_other_active_subscriptions_and_user_outbounds() {
         use std::collections::BTreeMap;
-        use crate::subscriptions::Subscription;
-
         let subscriptions = vec![
             Subscription {
                 id: "sub1".to_owned(),

@@ -12,7 +12,7 @@ use crate::subscriptions::SubscriptionStore;
 use crate::terminal::{ProgressBar, success};
 use crate::update_apply;
 use crate::update_configuration::rebuild_configuration;
-use crate::update_merge::ArchivePlan;
+use crate::update_merge::{rebuild_outbounds, ArchivePlan};
 use crate::update_plan::build_file_plan_with_registry;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
@@ -102,7 +102,13 @@ pub(crate) fn rename_subscription(
                 }
                 prepared_numbers.insert(number);
 
-                let path = baseline_path(subscription)?;
+                // The renamed subscription still has its baseline under the old
+                // filename until the transaction applies the planned move.
+                let path = if number == target_number {
+                    old_path.clone()
+                } else {
+                    baseline_path(subscription)?
+                };
                 if !regular_file_exists(&path)? {
                     return Err(format!(
                         "Нельзя пересобрать активную подписку {}: отсутствует baseline {}.",
@@ -393,6 +399,51 @@ mod tests {
                 "protocol":"vless",
                 "settings":{"id":"secret"}
             })]
+        );
+    }
+
+
+    #[test]
+    fn full_rebuild_preserves_other_active_subscriptions_and_user_outbounds() {
+        use std::collections::BTreeMap;
+        use crate::subscriptions::Subscription;
+
+        let subscriptions = vec![
+            Subscription {
+                id: "sub1".to_owned(),
+                name: Some("NewName".to_owned()),
+                url: "https://example.test/one".to_owned(),
+                prefix: "sub1--NewName--".to_owned(),
+            },
+            Subscription {
+                id: "sub2".to_owned(),
+                name: Some("Japan".to_owned()),
+                url: "https://example.test/two".to_owned(),
+                prefix: "sub2--Japan--".to_owned(),
+            },
+        ];
+        let working = vec![
+            json!({"tag":"sub1--OldName--node","protocol":"vless"}),
+            json!({"tag":"sub2--Japan--keep","protocol":"trojan"}),
+            json!({"tag":"my-user-node","protocol":"socks"}),
+        ];
+        let rebuilt = BTreeMap::from([
+            (1, vec![json!({"tag":"sub1--NewName--node","protocol":"vless"})]),
+            (2, vec![json!({"tag":"sub2--Japan--keep","protocol":"trojan"})]),
+        ]);
+
+        let result = rebuild_outbounds(&working, &subscriptions, &rebuilt).unwrap();
+        let tags: Vec<&str> = result.iter()
+            .map(|outbound| outbound["tag"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(
+            tags,
+            vec![
+                "sub1--NewName--node",
+                "sub2--Japan--keep",
+                "my-user-node",
+            ]
         );
     }
 

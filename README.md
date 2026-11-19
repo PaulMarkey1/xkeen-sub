@@ -42,6 +42,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/PaulMarkey1/xkeen-sub/main
 | `xkeen-sub setup del` | Удалить подписку и пересобрать конфигурации |
 | `xkeen-sub update` | Обновить все подписки |
 | `xkeen-sub update subN` | Обновить одну подписку |
+| `xkeen-sub auto-update` | Управлять расписаниями автообновления |
 | `xkeen-sub backup` | Настройки и просмотр резервных копий |
 | `xkeen-sub uxs` | Обновить программу |
 | `xkeen-sub reinstall` | Выбрать и установить другую версию |

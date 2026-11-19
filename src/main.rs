@@ -10,6 +10,7 @@ mod subscriptions;
 mod system;
 mod subscription_download;
 mod subscription_delete;
+mod subscription_rename;
 mod subscription_identity;
 mod subscription_parser;
 mod subscription_url;

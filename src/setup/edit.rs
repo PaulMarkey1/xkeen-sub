@@ -61,12 +61,33 @@ pub fn run() -> AppResult<bool> {
                     } else {
                         Some(value.trim().to_owned())
                     };
+                    let new_prefix = make_prefix(
+                        &store.subscriptions[index].id,
+                        name.as_deref(),
+                    );
 
-                    let subscription = &mut store.subscriptions[index];
-                    subscription.name = name;
-                    subscription.prefix = make_prefix(&subscription.id, subscription.name.as_deref());
-                    save_subscriptions(&store)?;
-                    success("Имя подписки сохранено.");
+                    println!();
+                    title("ПОДТВЕРДИТЬ ПЕРЕИМЕНОВАНИЕ?");
+                    info(&format!("Текущее имя: {}", store.subscriptions[index].prefix));
+                    info(&format!("Новое имя: {new_prefix}"));
+                    menu_item("1", "Да, переименовать");
+                    menu_item("2", "Нет, отменить");
+                    menu_item("3", "Вернуться");
+
+                    match read_input("Выберите действие: ")?.as_str() {
+                        "1" => {
+                            crate::subscription_rename::rename_subscription(
+                                &mut store,
+                                index,
+                                name,
+                            )?;
+                            success("Подписка переименована, конфигурация проверена и применена.");
+                        }
+                        "2" => info("Переименование отменено."),
+                        "3" => break,
+                        "0" => return Ok(true),
+                        _ => error("Неизвестный пункт. Переименование отменено."),
+                    }
                 }
                 "2" => {
                     let url = loop {

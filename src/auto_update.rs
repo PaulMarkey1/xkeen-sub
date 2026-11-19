@@ -318,8 +318,10 @@ fn read_schedule() -> AppResult<(Schedule, i64)> {
                         .ok_or("Слишком большой интервал.")?;
                     if seconds == 0 { return Err("Интервал должен быть больше нуля.".into()); }
                     if seconds > i64::MAX as u64 { return Err("Интервал слишком велик.".into()); }
-                    let first = read_datetime("Дата и время следующего запуска (ГГГГ-ММ-ДД ЧЧ:ММ): ")?;
-                    if first <= Local::now().timestamp() { return Err("Время следующего запуска должно быть в будущем.".into()); }
+                    let first_time = read_time("Время первого запуска (ЧЧ:ММ): ")?;
+                    // The first occurrence is the next local time matching the input.
+                    // If today's time has already passed, it naturally falls on tomorrow.
+                    let first = next_daily(&first_time, Local::now().timestamp())?;
                     Ok((Schedule::Interval { seconds }, first))
                 }
                 "3" => {
@@ -349,11 +351,6 @@ fn read_time(prompt: &str) -> AppResult<String> {
     let value = read_input(prompt)?;
     NaiveTime::parse_from_str(&value, "%H:%M").map_err(|_| "Используйте формат ЧЧ:ММ, например 17:30.")?;
     Ok(value)
-}
-fn read_datetime(prompt: &str) -> AppResult<i64> {
-    let value = read_input(prompt)?;
-    let dt = NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M").map_err(|_| "Используйте формат ГГГГ-ММ-ДД ЧЧ:ММ.")?;
-    Ok(resolve_local(dt)?.timestamp())
 }
 fn read_date(prompt: &str) -> AppResult<NaiveDate> {
     NaiveDate::parse_from_str(&read_input(prompt)?, "%Y-%m-%d").map_err(|_| "Используйте формат ГГГГ-ММ-ДД.".into())
@@ -455,6 +452,14 @@ mod tests {
     #[test]
     fn daily_uses_next_local_day_when_time_has_passed() {
         assert_eq!(show_time(next_daily("17:00", ts("2026-11-19 18:00")).unwrap()).unwrap(), "2026-11-20 17:00");
+    }
+    #[test]
+    fn interval_first_run_uses_tomorrow_when_input_time_has_passed() {
+        assert_eq!(show_time(next_daily("03:00", ts("2026-11-19 22:00")).unwrap()).unwrap(), "2026-11-20 03:00");
+    }
+    #[test]
+    fn interval_first_run_uses_today_when_input_time_is_upcoming() {
+        assert_eq!(show_time(next_daily("23:00", ts("2026-11-19 22:00")).unwrap()).unwrap(), "2026-11-19 23:00");
     }
     #[test]
     fn missed_interval_slots_are_skipped_without_shifting_the_anchor() {

@@ -232,16 +232,19 @@ fn delete_job() -> AppResult<()> {
 }
 fn choose_job(config: &Config) -> AppResult<Option<usize>> {
     if config.jobs.is_empty() { info("Расписаний пока нет."); return Ok(None); }
-    for (i, job) in config.jobs.iter().enumerate() {
-        let target = match &job.target { Target::All => "все подписки".to_owned(), Target::Subscription(id) => id.clone() };
-        menu_item(&(i + 1).to_string(), &format!("№{} — {}", job.id, target));
+    loop {
+        for (i, job) in config.jobs.iter().enumerate() {
+            let target = match &job.target { Target::All => "все подписки".to_owned(), Target::Subscription(id) => id.clone() };
+            menu_item(&(i + 1).to_string(), &format!("№{} — {}", job.id, target));
+        }
+        menu_item("0", "Назад");
+        let value = read_input("Выберите расписание: ")?;
+        if value == "0" { return Ok(None); }
+        match value.parse::<usize>() {
+            Ok(n) if n > 0 && n <= config.jobs.len() => return Ok(Some(n - 1)),
+            _ => error("Расписания с таким номером нет. Попробуйте ещё раз."),
+        }
     }
-    menu_item("0", "Назад");
-    let value = read_input("Выберите расписание: ")?;
-    if value == "0" { return Ok(None); }
-    let n = value.parse::<usize>().map_err(|_| "Введите номер расписания.")?;
-    if n == 0 || n > config.jobs.len() { return Err("Расписание не найдено.".into()); }
-    Ok(Some(n - 1))
 }
 fn choose_target() -> AppResult<Target> {
     loop {
@@ -252,14 +255,17 @@ fn choose_target() -> AppResult<Target> {
             "1" => return Ok(Target::All),
             "2" => {
                 let store = crate::subscriptions::load_subscriptions()?;
-                if store.subscriptions.is_empty() { warning("Подписок пока нет."); return Err("Сначала добавьте подписку.".into()); }
+                if store.subscriptions.is_empty() { warning("Подписок пока нет. Сначала добавьте подписку."); continue; }
                 for (i, sub) in store.subscriptions.iter().enumerate() {
                     menu_item(&(i + 1).to_string(), &format!("{} — {}", sub.id, sub.name.as_deref().unwrap_or("без имени")));
                 }
-                let n = read_input("Номер подписки: ")?.parse::<usize>().map_err(|_| "Введите номер из списка.")?;
-                return store.subscriptions.get(n.saturating_sub(1)).filter(|_| n > 0)
-                    .map(|sub| Target::Subscription(sub.id.clone()))
-                    .ok_or_else(|| "Подписка не найдена.".into());
+                let value = read_input("Номер подписки: ")?;
+                match value.parse::<usize>() {
+                    Ok(n) if n > 0 && n <= store.subscriptions.len() => {
+                        return Ok(Target::Subscription(store.subscriptions[n - 1].id.clone()));
+                    }
+                    _ => error("Подписки с таким номером нет. Попробуйте ещё раз."),
+                }
             }
             _ => error("Введите 1 или 2."),
         }

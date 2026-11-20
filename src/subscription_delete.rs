@@ -203,14 +203,6 @@ fn prepare_deletion(
 }
 
 
-/// Checks whether the selected subscription currently owns any outbound in Xray's
-/// working outbound document. Registry membership alone is not sufficient.
-fn subscription_is_in_working_config(subscription_id: &str) -> AppResult<bool> {
-    let number = number_from_id(subscription_id)
-        .ok_or_else(|| format!("Некорректный ID подписки: {subscription_id}."))?;
-    Ok(working_subscription_numbers()?.contains(&number))
-}
-
 fn working_subscription_numbers() -> AppResult<HashSet<u64>> {
     let docs = load_config_documents()?;
     let outbound_doc = find_doc(&docs, OUTBOUND_FILE)

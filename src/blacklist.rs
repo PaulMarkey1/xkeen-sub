@@ -183,7 +183,7 @@ fn run_blocked_entries_menu(store: &SubscriptionStore) -> AppResult<()> {
         }
         let back = blacklist.entries.len() + 1;
         menu_item(&back.to_string(), "Назад");
-        menu_item("0", "Выход");
+        menu_item("0", "Назад");
 
         let choice = read_input("Выберите запись для снятия блокировки: ")?;
         if choice == "0" || choice == back.to_string() {

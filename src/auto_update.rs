@@ -70,7 +70,8 @@ pub fn run_menu() -> AppResult<()> {
 
 pub(crate) fn log_event(message: &str) -> AppResult<()> {
     fs::create_dir_all("/opt/etc/xkeen-sub")?;
-    let line = format!("[{}] {}\n", Local::now().format("%Y-%m-%d %H:%M:%S"), message);
+    let message = message.replace('\r', " ").replace('\n', " ");
+    let line = format!("[{}] {}\n", Local::now().format("%Y-%m-%d %H:%M:%S"), message.trim());
     let mut lines: Vec<String> = match fs::read_to_string(LOG) {
         Ok(content) => content.lines().map(str::to_owned).collect(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),

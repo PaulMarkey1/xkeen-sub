@@ -359,6 +359,41 @@ impl BackupSession {
             && source_metadata.gid() == expected_metadata.gid)
     }
 
+    /// Removes this snapshot only when every tracked file is still byte- and
+    /// metadata-identical and the set of tracked files has not changed.
+    pub(crate) fn discard_if_unchanged(&mut self) -> AppResult<bool> {
+        if !self.snapshot_complete {
+            return Ok(false);
+        }
+
+        let mut current_sources = Vec::new();
+        collect_snapshot_files(&mut current_sources, true)?;
+        let current_paths: HashSet<PathBuf> = current_sources.iter()
+            .map(|source| canonical_target_path(&source.path))
+            .collect::<AppResult<HashSet<_>>>()?;
+        let snapshot_paths: HashSet<PathBuf> = self.snapshot_mappings.keys().cloned().collect();
+
+        if current_paths != snapshot_paths {
+            return Ok(false);
+        }
+        for source in &current_sources {
+            if !self.verify_original(&source.path)? {
+                return Ok(false);
+            }
+        }
+
+        fs::remove_dir_all(&self.path)?;
+        Ok(true)
+    }
+
+    pub(crate) fn outcome_status(&self) -> &str {
+        &self.outcome_status
+    }
+
+    pub(crate) fn outcome_summary(&self) -> &str {
+        &self.outcome_summary
+    }
+
     pub(crate) fn restore_original(&mut self, source: &Path) -> AppResult<()> {
         let target = canonical_target_path(source)?;
         let stored = if self.snapshot_complete {

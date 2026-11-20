@@ -9,7 +9,6 @@ use crate::subscription_identity::{number_from_id, number_from_tag, Subscription
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::SubscriptionStore;
 use crate::terminal::{error, success};
-use crate::update_configuration::rebuild_configuration;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
 use crate::update_config::{find_doc, load_config_documents, OUTBOUND_FILE};
@@ -47,7 +46,11 @@ pub(crate) fn delete_subscription(
             ),
         )?;
 
-        let applied = rebuild_configuration(&store.subscriptions, &state, &mut backup, &store)?;
+        let mut blacklist = crate::blacklist::load()?;
+        blacklist.remap_after_deletion(&selected_id, &id_mapping);
+        let applied = crate::update_configuration::rebuild_configuration_with_blacklist(
+            &store.subscriptions, &state, &mut backup, &store, &blacklist
+        )?;
         if !applied {
             error("Удаление отменено: итоговая конфигурация не прошла проверку Xray. Исходные файлы сохранены.");
             return Err("Удаление отменено: проверка итоговой конфигурации Xray не пройдена.".into());

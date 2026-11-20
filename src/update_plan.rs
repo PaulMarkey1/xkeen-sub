@@ -8,6 +8,7 @@ use crate::update_config::ConfigDocument;
 use crate::update_apply::{PlannedFileOperation, PlannedOperationKind};
 use crate::update_merge::{ArchivePlan, USER_ARCHIVE};
 use crate::subscriptions::{SubscriptionStore, SUBSCRIPTIONS_FILE};
+use crate::blacklist::{BlacklistStore, BLACKLIST_FILE};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -157,6 +158,28 @@ pub(crate) fn build_file_plan_with_registry(
         Err(error) => return Err(format!("Не удалось прочитать реестр подписок: {error}").into()),
     }
 
+    plan.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(plan)
+}
+
+/// Extends the update plan with atomic subscription registry and blacklist replacements.
+pub(crate) fn build_file_plan_with_registry_and_blacklist(
+    docs: &[ConfigDocument],
+    state: &RunState,
+    archive: &ArchivePlan,
+    store: &SubscriptionStore,
+    blacklist: &BlacklistStore,
+) -> AppResult<Vec<PlannedFileOperation>> {
+    let mut plan = build_file_plan_with_registry(docs, state, archive, store)?;
+    let path = PathBuf::from(BLACKLIST_FILE);
+    let mut content = serde_json::to_vec_pretty(blacklist)?;
+    content.push(b'\n');
+    match fs::read(&path) {
+        Ok(original) if original == content => {}
+        Ok(_) => plan.push(PlannedFileOperation { path, category: "Чёрный список подключений", kind: PlannedOperationKind::Replace, content: Some(content) }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => plan.push(PlannedFileOperation { path, category: "Чёрный список подключений", kind: PlannedOperationKind::Create, content: Some(content) }),
+        Err(error) => return Err(format!("Не удалось прочитать чёрный список: {error}").into()),
+    }
     plan.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(plan)
 }

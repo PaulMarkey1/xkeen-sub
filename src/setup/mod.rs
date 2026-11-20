@@ -18,6 +18,7 @@ pub fn run_menu() -> AppResult<()> {
         menu_item("3", "Удалить подписку");
         menu_item("4", "Редактировать подписку");
         menu_item("5", "Автоматическое обновление подписок");
+        menu_item("6", "Чёрный список подключений");
         menu_item("0", "Выход");
 
         let choice = read_input("Выберите пункт: ")?;
@@ -32,8 +33,9 @@ pub fn run_menu() -> AppResult<()> {
                 }
             }
             "5" => crate::auto_update::run_menu()?,
+            "6" => crate::blacklist::run_menu()?,
             "0" => return Ok(()),
-            _ => error("Неизвестный пункт меню. Введите цифру от 0 до 5."),
+            _ => error("Неизвестный пункт меню. Введите цифру от 0 до 6."),
         }
     }
 }

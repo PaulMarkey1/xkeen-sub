@@ -5,6 +5,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::backup::{BackupSession, BackupSource};
+use crate::blacklist::BlacklistStore;
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
 use crate::observatory::prepare_observatory;
 use crate::subscriptions::{Subscription, SubscriptionStore};
@@ -13,7 +14,7 @@ use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, CONFIG_DIR, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_merge::{collect_selector_tags, collect_tags, ensure_service_outbounds, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
-use crate::update_plan::{build_file_plan, build_file_plan_with_registry};
+use crate::update_plan::{build_file_plan, build_file_plan_with_registry, build_file_plan_with_registry_and_blacklist};
 use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -30,7 +31,7 @@ pub(crate) fn update_configuration(
     state: &RunState,
     backup: &mut BackupSession,
 ) -> AppResult<()> {
-    update_configuration_with_mode(subscriptions, state, backup, false, None).map(|_| ())
+    update_configuration_with_mode(subscriptions, state, backup, false, None, None).map(|_| ())
 }
 
 /// Rebuilds every subscription-managed outbound group from baseline snapshots.
@@ -40,7 +41,18 @@ pub(crate) fn rebuild_configuration(
     backup: &mut BackupSession,
     store: &SubscriptionStore,
 ) -> AppResult<bool> {
-    update_configuration_with_mode(subscriptions, state, backup, true, Some(store))
+    update_configuration_with_mode(subscriptions, state, backup, true, Some(store), None)
+}
+
+/// Rebuilds subscription groups and atomically persists a proposed blacklist.
+pub(crate) fn rebuild_configuration_with_blacklist(
+    subscriptions: &[Subscription],
+    state: &RunState,
+    backup: &mut BackupSession,
+    store: &SubscriptionStore,
+    blacklist: &BlacklistStore,
+) -> AppResult<bool> {
+    update_configuration_with_mode(subscriptions, state, backup, true, Some(store), Some(blacklist))
 }
 
 fn update_configuration_with_mode(
@@ -49,9 +61,10 @@ fn update_configuration_with_mode(
     backup: &mut BackupSession,
     rebuild_all: bool,
     registry: Option<&SubscriptionStore>,
+    blacklist_override: Option<&BlacklistStore>,
 ) -> AppResult<bool> {
-    let prepared = prepare_configuration(subscriptions, state, backup, rebuild_all)?;
-    apply_configuration(prepared, state, backup, registry)
+    let prepared = prepare_configuration(subscriptions, state, backup, rebuild_all, blacklist_override)?;
+    apply_configuration(prepared, state, backup, registry, blacklist_override)
 }
 
 fn prepare_configuration(
@@ -59,6 +72,7 @@ fn prepare_configuration(
     state: &RunState,
     backup: &mut BackupSession,
     rebuild_all: bool,
+    blacklist_override: Option<&BlacklistStore>,
 ) -> AppResult<PreparedConfiguration> {
     let mut docs = load_config_documents()?;
     backup.event("CONFIG", &format!("Загружено конфигурационных файлов Xray: {}.", docs.len()))?;
@@ -84,6 +98,14 @@ fn prepare_configuration(
     } else {
         merge_outbounds(&working, subscriptions, &updated_groups, &mut archive)?
     };
+    let blacklist = match blacklist_override {
+        Some(store) => store.clone(),
+        None => crate::blacklist::load()?,
+    };
+    let filtered = blacklist.filter_outbounds(subscriptions, &mut final_outbounds)?;
+    if filtered > 0 {
+        backup.event("BLACKLIST", &format!("Исключено из итогового Outbound подключений по чёрному списку: {filtered}."))?;
+    }
     let added_services = ensure_service_outbounds(&mut final_outbounds)?;
     for item in &added_services {
         backup.event("OUTBOUND", &format!("Добавлено обязательное системное подключение {item}."))?;
@@ -161,6 +183,7 @@ fn apply_configuration(
     state: &RunState,
     backup: &mut BackupSession,
     registry: Option<&SubscriptionStore>,
+    blacklist_override: Option<&BlacklistStore>,
 ) -> AppResult<bool> {
     let PreparedConfiguration {
         docs,
@@ -175,9 +198,10 @@ fn apply_configuration(
         backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", true);
     } else {
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
-        let plan = match registry {
-            Some(store) => build_file_plan_with_registry(&docs, state, &archive, store)?,
-            None => build_file_plan(&docs, state, &archive)?,
+        let plan = match (registry, blacklist_override) {
+            (Some(store), Some(blacklist)) => build_file_plan_with_registry_and_blacklist(&docs, state, &archive, store, blacklist)?,
+            (Some(store), None) => build_file_plan_with_registry(&docs, state, &archive, store)?,
+            (None, _) => build_file_plan(&docs, state, &archive)?,
         };
         no_file_changes = plan.is_empty();
         print_file_plan(&plan);

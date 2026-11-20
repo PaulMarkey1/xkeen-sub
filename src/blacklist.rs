@@ -99,6 +99,17 @@ pub(crate) fn run_for_subscription(store: &SubscriptionStore, index: usize) -> A
         if choice=="0" || choice==back.to_string() { return Ok(()); }
         let i = match choice.parse::<usize>() { Ok(n) if n>0 && n<=parsed.outbounds.len()=>n-1, _=>{error("Некорректный номер.");continue;} };
         let tag = parsed.outbounds[i]["tag"].as_str().ok_or("Подключение без Tag.")?.to_owned();
+        if !blacklist.is_blocked(&sub.id, &tag) && store.subscriptions.len() == 1 {
+            let available = parsed.outbounds.iter().filter(|outbound| {
+                outbound.get("tag").and_then(Value::as_str)
+                    .map(|raw_tag| !blacklist.is_blocked(&sub.id, raw_tag))
+                    .unwrap_or(false)
+            }).count();
+            if available <= 1 {
+                error("Нельзя заблокировать последнее подключение единственной подписки. Хотя бы одно подключение должно оставаться доступным.");
+                continue;
+            }
+        }
         let blocked = blacklist.toggle(&sub.id,&tag);
         apply_change(store, blacklist.clone())?;
         success(if blocked {"Подключение добавлено в чёрный список."} else {"Блокировка снята."});

@@ -94,7 +94,7 @@ pub(crate) fn run_for_subscription(store: &SubscriptionStore, index: usize) -> A
             menu_item(&(i+1).to_string(), &format!("{tag} {status}"));
         }
         let back = parsed.outbounds.len()+1;
-        menu_item(&back.to_string(), "Назад"); menu_item("0","Выход");
+        menu_item(&back.to_string(), "Назад"); menu_item("0","Назад");
         let choice = read_input("Выберите подключение: ")?;
         if choice=="0" || choice==back.to_string() { return Ok(()); }
         let i = match choice.parse::<usize>() { Ok(n) if n>0 && n<=parsed.outbounds.len()=>n-1, _=>{error("Некорректный номер.");continue;} };

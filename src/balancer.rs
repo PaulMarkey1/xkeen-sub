@@ -547,4 +547,15 @@ mod tests {
         assert_eq!(config["routing"]["balancers"][1], before[1]);
         assert_eq!(config["routing"]["rules"][0]["outboundTag"], "direct");
     }
+    #[test]
+    fn blacklist_removes_exact_tags_and_expands_prefix_selectors() {
+        use super::filter_blacklisted_selectors;
+        let mut config = json!({"routing":{"balancers":[{"selector":["sub1--node","sub1--","custom"]}]}});
+        let blocked: HashSet<String> = ["sub1--node".to_owned(), "sub1--node2".to_owned()].into_iter().collect();
+        let final_tags = vec!["sub1--keep".to_owned(), "custom".to_owned()];
+        let removed = filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--keep", "custom"]));
+    }
+
 }

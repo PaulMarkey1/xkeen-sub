@@ -13,6 +13,8 @@ const CONFIG: &str = "/opt/etc/xkeen-sub/auto-update.json";
 const MARKER: &str = "# xkeen-sub-auto-update";
 const CRON: &str = "* * * * * /opt/sbin/xkeen-sub auto-update tick # xkeen-sub-auto-update";
 const MAX_LATE_SECONDS: i64 = 3600;
+const LOG: &str = "/opt/etc/xkeen-sub/auto-update.log";
+const MAX_LOG_LINES: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +53,7 @@ pub fn run_menu() -> AppResult<()> {
         menu_item("3", "Изменить расписание");
         menu_item("4", "Включить или выключить расписание");
         menu_item("5", "Удалить расписание");
+        menu_item("6", "Журнал автообновления");
         menu_item("0", "Назад");
         match read_input("Выберите пункт: ")?.as_str() {
             "1" => list_jobs()?,
@@ -58,10 +61,53 @@ pub fn run_menu() -> AppResult<()> {
             "3" => edit_job()?,
             "4" => toggle_job()?,
             "5" => delete_job()?,
+            "6" => view_log()?,
             "0" => return Ok(()),
-            _ => error("Введите цифру от 0 до 5."),
+            _ => error("Введите цифру от 0 до 6."),
         }
     }
+}
+
+pub(crate) fn log_event(message: &str) -> AppResult<()> {
+    fs::create_dir_all("/opt/etc/xkeen-sub")?;
+    let message = message.replace('\r', " ").replace('\n', " ");
+    let line = format!("[{}] {}\n", Local::now().format("%Y-%m-%d %H:%M:%S"), message.trim());
+    let mut lines: Vec<String> = match fs::read_to_string(LOG) {
+        Ok(content) => content.lines().map(str::to_owned).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    lines.push(line.trim_end().to_owned());
+    trim_log_lines(&mut lines);
+    let temp = format!("{LOG}.tmp.{}", std::process::id());
+    let mut content = lines.join("\n");
+    content.push('\n');
+    fs::write(&temp, content)?;
+    fs::rename(temp, LOG)?;
+    Ok(())
+}
+
+fn trim_log_lines(lines: &mut Vec<String>) {
+    if lines.len() > MAX_LOG_LINES {
+        let excess = lines.len() - MAX_LOG_LINES;
+        lines.drain(0..excess);
+    }
+}
+
+fn view_log() -> AppResult<()> {
+    title("ЖУРНАЛ АВТООБНОВЛЕНИЯ");
+    match fs::read_to_string(LOG) {
+        Ok(content) if content.trim().is_empty() => info("Журнал пока пуст."),
+        Ok(content) => {
+            for line in content.lines() {
+                println!("{line}");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => info("Журнал пока пуст."),
+        Err(error) => return Err(format!("Не удалось прочитать журнал автообновления: {error}").into()),
+    }
+    let _ = read_input("Нажмите Enter, чтобы вернуться...");
+    Ok(())
 }
 
 pub fn tick() -> AppResult<()> {
@@ -92,6 +138,7 @@ pub fn tick() -> AppResult<()> {
             // Skip the missed occurrence and retain the original interval/calendar phase.
             current.jobs[index].next_run = next_occurrence(&current.jobs[index], current_now)?;
             save(&current)?;
+            let _ = log_event(&format!("Расписание №{id}: пропущен запуск, опоздание превысило допустимый час."));
             continue;
         }
 
@@ -438,6 +485,22 @@ mod tests {
         let dt = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
         resolve_local(dt).unwrap().timestamp()
     }
+    #[test]
+    fn auto_update_log_keeps_only_the_latest_100_lines() {
+        let mut lines: Vec<String> = (1..=101).map(|n| n.to_string()).collect();
+        trim_log_lines(&mut lines);
+        assert_eq!(lines.len(), 100);
+        assert_eq!(lines.first().map(String::as_str), Some("2"));
+        assert_eq!(lines.last().map(String::as_str), Some("101"));
+    }
+
+    #[test]
+    fn auto_update_log_does_not_change_short_logs() {
+        let mut lines = vec!["first".to_owned(), "second".to_owned()];
+        trim_log_lines(&mut lines);
+        assert_eq!(lines, vec!["first", "second"]);
+    }
+
     #[test]
     fn interval_keeps_anchor_after_late_execution() {
         let job = Job { id: 1, enabled: true, target: Target::All, schedule: Schedule::Interval { seconds: 21600 }, next_run: ts("2026-11-19 00:00") };

@@ -4,15 +4,12 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::backup::{BackupSession, BackupSource};
+use crate::backup::BackupSession;
 use crate::subscription_identity::{number_from_id, number_from_tag, SubscriptionIdentity};
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::SubscriptionStore;
-use crate::terminal::{error, success, ProgressBar};
+use crate::terminal::{error, success};
 use crate::update_configuration::rebuild_configuration;
-use crate::update_apply::{self, PlannedOperationKind};
-use crate::update_merge::ArchivePlan;
-use crate::update_plan::build_file_plan_with_registry;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
 use crate::update_config::{find_doc, load_config_documents, OUTBOUND_FILE};

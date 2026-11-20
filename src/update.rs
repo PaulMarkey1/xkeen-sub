@@ -41,10 +41,21 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
             eprintln!("xkeen-sub auto-update: не удалось записать журнал: {error}");
         }
     }
-    let mut backup = if automatic {
-        BackupSession::start_auto_update("Автоматическое обновление подписок")?
+    let backup_result = if automatic {
+        BackupSession::start_auto_update("Автоматическое обновление подписок")
     } else {
-        BackupSession::start("Обновление подписок")?
+        BackupSession::start("Обновление подписок")
+    };
+    let mut backup = match backup_result {
+        Ok(backup) => backup,
+        Err(error) => {
+            if automatic {
+                if let Err(log_error) = crate::auto_update::log_event(&format!("Ошибка создания резервной копии: {error}")) {
+                    eprintln!("xkeen-sub auto-update: не удалось записать журнал: {log_error}");
+                }
+            }
+            return Err(error);
+        }
     };
     if automatic {
         backup.event("UPDATE", "Обновление вызвано автоматическим обновлением по расписанию.")?;

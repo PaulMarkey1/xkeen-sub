@@ -259,6 +259,39 @@ fn redirect_rules_to_program_balancer(
     Ok(changed)
 }
 
+/// Removes blacklisted outbound tags from every balancer selector. Prefix selectors
+/// covering blocked tags are expanded to the currently available matching tags.
+pub(crate) fn filter_blacklisted_selectors(document: &mut Value, final_tags: &[String], blocked_tags: &HashSet<String>) -> AppResult<usize> {
+    if blocked_tags.is_empty() { return Ok(0); }
+    let balancers = document.as_object_mut().and_then(|root| root.get_mut("routing"))
+        .and_then(Value::as_object_mut).and_then(|routing| routing.get_mut("balancers"))
+        .and_then(Value::as_array_mut);
+    let Some(balancers) = balancers else { return Ok(0); };
+    let mut removed = 0;
+    for balancer in balancers {
+        let balancer_tag = balancer.get("tag").and_then(Value::as_str)
+            .unwrap_or("<без Tag>").to_owned();
+        let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else { continue; };
+        let mut filtered = Vec::new();
+        for value in selector.iter() {
+            let Some(prefix) = value.as_str() else { filtered.push(value.clone()); continue; };
+            if blocked_tags.contains(prefix) { removed += 1; continue; }
+            if blocked_tags.iter().any(|blocked| blocked.starts_with(prefix)) {
+                let matches: Vec<&String> = final_tags.iter().filter(|tag| tag.starts_with(prefix) && !blocked_tags.contains(*tag)).collect();
+                if matches.is_empty() { removed += 1; }
+                else { removed += 1; for tag in matches { let item=Value::String(tag.clone()); if !filtered.contains(&item) { filtered.push(item); } } }
+            } else { filtered.push(value.clone()); }
+        }
+        if filtered.is_empty() {
+            return Err(format!(
+                "Нельзя применить чёрный список: селектор балансировщика {balancer_tag} останется пустым. Оставьте хотя бы одно подходящее подключение."
+            ).into());
+        }
+        *selector = filtered;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{prepare_balancers, BalancerCase, PROGRAM_BALANCER_TAG};
@@ -275,6 +308,42 @@ mod tests {
 
     fn tags() -> Vec<String> {
         vec!["sub1--node".to_owned(), "custom".to_owned()]
+    }
+
+    #[test]
+    fn blacklist_rejects_emptying_a_balancer_selector() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [{
+                    "tag": "user-balancer",
+                    "selector": ["sub1--"]
+                }]
+            }
+        });
+        let blocked = HashSet::from(["sub1--node".to_owned()]);
+        let result = super::filter_blacklisted_selectors(
+            &mut config,
+            &[],
+            &blocked,
+        );
+        assert!(result.is_err());
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--"]));
+    }
+
+    #[test]
+    fn blacklist_keeps_remaining_matches_in_prefix_selector() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [{
+                    "tag": "user-balancer",
+                    "selector": ["sub1--"]
+                }]
+            }
+        });
+        let blocked = HashSet::from(["sub1--blocked".to_owned()]);
+        let final_tags = vec!["sub1--allowed".to_owned()];
+        super::filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--allowed"]));
     }
 
     #[test]
@@ -521,4 +590,15 @@ mod tests {
         assert_eq!(config["routing"]["balancers"][1], before[1]);
         assert_eq!(config["routing"]["rules"][0]["outboundTag"], "direct");
     }
+    #[test]
+    fn blacklist_removes_exact_tags_and_expands_prefix_selectors() {
+        use super::filter_blacklisted_selectors;
+        let mut config = json!({"routing":{"balancers":[{"selector":["sub1--node","sub1--","custom"]}]}});
+        let blocked: HashSet<String> = ["sub1--node".to_owned(), "sub1--node2".to_owned()].into_iter().collect();
+        let final_tags = vec!["sub1--keep".to_owned(), "custom".to_owned()];
+        let removed = filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--keep", "custom"]));
+    }
+
 }

@@ -1,6 +1,7 @@
 mod auto_update;
 mod update_lock;
 mod backup;
+mod blacklist;
 mod balancer;
 mod cli;
 mod install;

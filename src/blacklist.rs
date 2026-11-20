@@ -5,11 +5,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::backup::BackupSession;
-use crate::subscription_identity::{number_from_id, number_from_tag};
+use crate::subscription_identity::number_from_id;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::{Subscription, SubscriptionStore};
 use crate::terminal::{error, info, menu_item, read_input, success, title};
-use crate::update_config::{find_doc, load_config_documents, OUTBOUND_FILE};
 use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
 
@@ -132,15 +131,14 @@ fn apply_change(store: &SubscriptionStore, blacklist: BlacklistStore) -> AppResu
     let mut backup=BackupSession::start("Изменение чёрного списка")?;
     backup.set_subscriptions(store.subscriptions.iter().map(|s|s.id.clone()).collect());
     let result=(|| -> AppResult<()> {
-        let docs=load_config_documents()?;
-        let oi=find_doc(&docs,OUTBOUND_FILE).ok_or("Не найден рабочий Outbound.")?;
-        let outbounds=docs[oi].value["outbounds"].as_array().ok_or("Нет массива outbounds.")?;
-        let active:HashSet<u64>=outbounds.iter().filter_map(|o|o["tag"].as_str().and_then(number_from_tag)).collect();
         let mut state=RunState::default();
         for sub in &store.subscriptions {
-            let n=number_from_id(&sub.id).ok_or("Некорректный ID подписки.")?;
-            if !active.contains(&n) {continue;}
+            let _number=number_from_id(&sub.id).ok_or("Некорректный ID подписки.")?;
             let path=baseline_path(sub)?;
+            // A saved baseline marks a subscription that has been applied before.
+            // Rebuild it even when every current outbound is blacklisted and therefore
+            // no longer appears in 04_outbound; otherwise unblocking could not restore it.
+            if !path.is_file() { continue; }
             let parsed=parse_subscription(&fs::read(&path).map_err(|e|format!("Не удалось прочитать baseline {}: {e}",path.display()))?)?;
             let group=parsed.outbounds.into_iter().map(|mut o| { let raw=o["tag"].as_str().unwrap_or("").to_owned(); o["tag"]=Value::String(format!("{}{}",sub.prefix,raw)); o }).collect();
             state.prepared.push(PreparedSubscription{id:sub.id.clone(),outbounds:group});

@@ -57,7 +57,7 @@ fn print_help() -> AppResult<()> {
     command_item("setup add", "Добавить подписку");
     command_item("setup list", "Просмотреть подписки");
     command_item("setup del", "Удалить подписку");
-    command_item("setup edit", "Редактировать подписку и управлять её чёрным списком");
+    command_item("setup edit", "Изменить имя или URL подписки");
     command_item("setup help", "Показать справку по настройке");
     println!();
     command_item("backup", "Настроить и просмотреть резервные копии");
@@ -80,7 +80,7 @@ fn print_setup_help() -> AppResult<()> {
     title("XKEEN-SUB — настройка подписок");
     println!();
     separator("Использование:");
-    command_item("xkeen-sub setup", "Открыть меню настройки (автообновление — пункт 5, чёрный список — пункт 6)");
+    command_item("xkeen-sub setup", "Открыть меню настройки (чёрный список — отдельный пункт 6)");
     command_item("xkeen-sub setup add", "Добавить подписку");
     command_item("xkeen-sub setup list", "Просмотреть подписки");
     command_item("xkeen-sub setup del", "Удалить подписку");

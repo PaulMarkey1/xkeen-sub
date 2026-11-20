@@ -94,7 +94,7 @@ pub(crate) fn run_for_subscription(store: &SubscriptionStore, index: usize) -> A
             menu_item(&(i+1).to_string(), &format!("{tag} {status}"));
         }
         let back = parsed.outbounds.len()+1;
-        menu_item(&back.to_string(), "Назад"); menu_item("0","Выход");
+        menu_item(&back.to_string(), "Назад"); menu_item("0","Назад");
         let choice = read_input("Выберите подключение: ")?;
         if choice=="0" || choice==back.to_string() { return Ok(()); }
         let i = match choice.parse::<usize>() { Ok(n) if n>0 && n<=parsed.outbounds.len()=>n-1, _=>{error("Некорректный номер.");continue;} };
@@ -120,20 +120,84 @@ pub(crate) fn run_for_subscription(store: &SubscriptionStore, index: usize) -> A
 pub(crate) fn run_menu() -> AppResult<()> {
     loop {
         let store = crate::subscriptions::load_subscriptions()?;
-        let mut blacklist = load()?;
-        println!(); title("XKEEN-SUB — ЧЁРНЫЙ СПИСОК");
-        if blacklist.entries.is_empty() { info("Чёрный список пуст."); return Ok(()); }
-        for (i,e) in blacklist.entries.iter().enumerate() {
-            let prefix = store.subscriptions.iter().find(|s| s.id==e.subscription_id)
-                .map(|s|s.prefix.as_str()).unwrap_or(e.subscription_id.as_str());
-            menu_item(&(i+1).to_string(), &format!("{prefix}{}",e.tag));
+        if store.subscriptions.is_empty() {
+            println!();
+            title("XKEEN-SUB — ЧЁРНЫЙ СПИСОК");
+            info("Подписок пока нет. Сначала добавьте подписку.");
+            return Ok(());
         }
-        let back=blacklist.entries.len()+1; menu_item(&back.to_string(),"Назад"); menu_item("0","Выход");
-        let choice=read_input("Выберите запись для снятия блокировки: ")?;
-        if choice=="0" || choice==back.to_string() { return Ok(()); }
-        let i=match choice.parse::<usize>() {Ok(n) if n>0 && n<=blacklist.entries.len()=>n-1,_=>{error("Некорректный номер.");continue;}};
-        blacklist.entries.remove(i);
-        apply_change(&store,blacklist)?;
+
+        let blacklist = load()?;
+        println!();
+        title("XKEEN-SUB — ЧЁРНЫЙ СПИСОК");
+        for (index, subscription) in store.subscriptions.iter().enumerate() {
+            menu_item(&(index + 1).to_string(), &subscription.prefix);
+        }
+
+        let mut next = store.subscriptions.len() + 1;
+        let blocked_menu_number = if blacklist.entries.is_empty() {
+            None
+        } else {
+            menu_item(&next.to_string(), "Просмотреть все заблокированные подключения");
+            let number = next;
+            next += 1;
+            Some(number)
+        };
+        menu_item(&next.to_string(), "Назад");
+        menu_item("0", "Выход");
+
+        let choice = read_input("Выберите подписку: ")?;
+        if choice == "0" || choice == next.to_string() {
+            return Ok(());
+        }
+        if blocked_menu_number.map(|number| choice == number.to_string()).unwrap_or(false) {
+            run_blocked_entries_menu(&store)?;
+            continue;
+        }
+
+        let index = match choice.parse::<usize>() {
+            Ok(number) if number > 0 && number <= store.subscriptions.len() => number - 1,
+            _ => {
+                error("Некорректный номер подписки.");
+                continue;
+            }
+        };
+        run_for_subscription(&store, index)?;
+    }
+}
+
+fn run_blocked_entries_menu(store: &SubscriptionStore) -> AppResult<()> {
+    loop {
+        let mut blacklist = load()?;
+        println!();
+        title("XKEEN-SUB — ЗАБЛОКИРОВАННЫЕ ПОДКЛЮЧЕНИЯ");
+        if blacklist.entries.is_empty() {
+            info("Заблокированных подключений нет.");
+            return Ok(());
+        }
+        for (index, entry) in blacklist.entries.iter().enumerate() {
+            let prefix = store.subscriptions.iter().find(|subscription| subscription.id == entry.subscription_id)
+                .map(|subscription| subscription.prefix.as_str())
+                .unwrap_or(entry.subscription_id.as_str());
+            menu_item(&(index + 1).to_string(), &format!("{prefix}{}", entry.tag));
+        }
+        let back = blacklist.entries.len() + 1;
+        menu_item(&back.to_string(), "Назад");
+        menu_item("0", "Назад");
+
+        let choice = read_input("Выберите запись для снятия блокировки: ")?;
+        if choice == "0" || choice == back.to_string() {
+            return Ok(());
+        }
+        let index = match choice.parse::<usize>() {
+            Ok(number) if number > 0 && number <= blacklist.entries.len() => number - 1,
+            _ => {
+                error("Некорректный номер.");
+                continue;
+            }
+        };
+        blacklist.entries.remove(index);
+        apply_change(store, blacklist)?;
         success("Блокировка снята.");
     }
 }

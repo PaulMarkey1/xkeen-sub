@@ -48,8 +48,7 @@ pub fn run() -> AppResult<bool> {
             info(&subscription.prefix);
             menu_item("1", "Изменить название");
             menu_item("2", "Изменить ссылку");
-            menu_item("3", "Чёрный список подключений");
-            menu_item("4", "Вернуться");
+            menu_item("3", "Вернуться");
             menu_item("0", "Выход");
 
             match read_input("Выберите пункт: ")?.as_str() {
@@ -103,10 +102,9 @@ pub fn run() -> AppResult<bool> {
                     save_subscriptions(&store)?;
                     success("Новая ссылка сохранена.");
                 }
-                "3" => crate::blacklist::run_for_subscription(&store, index)?,
-                "4" => break,
+                "3" => break,
                 "0" => return Ok(true),
-                _ => error("Неизвестный пункт. Введите 1, 2, 3, 4 или 0."),
+                _ => error("Неизвестный пункт. Введите 1, 2, 3 или 0."),
             }
         }
     }

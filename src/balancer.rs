@@ -280,6 +280,12 @@ pub(crate) fn filter_blacklisted_selectors(document: &mut Value, final_tags: &[S
                 else { removed += 1; for tag in matches { let item=Value::String(tag.clone()); if !filtered.contains(&item) { filtered.push(item); } } }
             } else { filtered.push(value.clone()); }
         }
+        if filtered.is_empty() {
+            let tag = balancer.get("tag").and_then(Value::as_str).unwrap_or("<без Tag>");
+            return Err(format!(
+                "Нельзя применить чёрный список: селектор балансировщика {tag} останется пустым. Оставьте хотя бы одно подходящее подключение."
+            ).into());
+        }
         *selector = filtered;
     }
     Ok(removed)
@@ -301,6 +307,42 @@ mod tests {
 
     fn tags() -> Vec<String> {
         vec!["sub1--node".to_owned(), "custom".to_owned()]
+    }
+
+    #[test]
+    fn blacklist_rejects_emptying_a_balancer_selector() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [{
+                    "tag": "user-balancer",
+                    "selector": ["sub1--"]
+                }]
+            }
+        });
+        let blocked = HashSet::from(["sub1--node".to_owned()]);
+        let result = super::filter_blacklisted_selectors(
+            &mut config,
+            &[],
+            &blocked,
+        );
+        assert!(result.is_err());
+        assert!(config["routing"]["balancers"][0]["selector"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn blacklist_keeps_remaining_matches_in_prefix_selector() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [{
+                    "tag": "user-balancer",
+                    "selector": ["sub1--"]
+                }]
+            }
+        });
+        let blocked = HashSet::from(["sub1--blocked".to_owned()]);
+        let final_tags = vec!["sub1--allowed".to_owned()];
+        super::filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--allowed"]));
     }
 
     #[test]

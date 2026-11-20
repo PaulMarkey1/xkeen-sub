@@ -269,6 +269,8 @@ pub(crate) fn filter_blacklisted_selectors(document: &mut Value, final_tags: &[S
     let Some(balancers) = balancers else { return Ok(0); };
     let mut removed = 0;
     for balancer in balancers {
+        let balancer_tag = balancer.get("tag").and_then(Value::as_str)
+            .unwrap_or("<без Tag>").to_owned();
         let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else { continue; };
         let mut filtered = Vec::new();
         for value in selector.iter() {
@@ -281,9 +283,8 @@ pub(crate) fn filter_blacklisted_selectors(document: &mut Value, final_tags: &[S
             } else { filtered.push(value.clone()); }
         }
         if filtered.is_empty() {
-            let tag = balancer.get("tag").and_then(Value::as_str).unwrap_or("<без Tag>");
             return Err(format!(
-                "Нельзя применить чёрный список: селектор балансировщика {tag} останется пустым. Оставьте хотя бы одно подходящее подключение."
+                "Нельзя применить чёрный список: селектор балансировщика {balancer_tag} останется пустым. Оставьте хотя бы одно подходящее подключение."
             ).into());
         }
         *selector = filtered;
@@ -326,7 +327,7 @@ mod tests {
             &blocked,
         );
         assert!(result.is_err());
-        assert!(config["routing"]["balancers"][0]["selector"].as_array().unwrap().is_empty());
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--"]));
     }
 
     #[test]

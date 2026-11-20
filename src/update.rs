@@ -35,6 +35,12 @@ pub(crate) fn run_auto_locked(target_id: Option<&str>) -> AppResult<()> {
 
 fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
     let started_at = Instant::now();
+    if automatic {
+        let target = target_id.map(|id| format!("подписка {id}")).unwrap_or_else(|| "все подписки".to_owned());
+        if let Err(error) = crate::auto_update::log_event(&format!("Запуск: {target}.")) {
+            eprintln!("xkeen-sub auto-update: не удалось записать журнал: {error}");
+        }
+    }
     let mut backup = if automatic {
         BackupSession::start_auto_update("Автоматическое обновление подписок")?
     } else {
@@ -58,9 +64,45 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
         );
     }
 
+    let status = backup.outcome_status().to_owned();
+    let summary = backup.outcome_summary().to_owned();
+    let backup_id = backup.id().to_owned();
     let log_result = backup.finish();
+
+    let mut discarded = false;
+    let mut verification_error = None;
+    if automatic && log_result.is_ok() {
+        match backup.discard_if_unchanged() {
+            Ok(unchanged) => discarded = unchanged,
+            Err(error) => verification_error = Some(error.to_string()),
+        }
+    }
+
+    if automatic {
+        let backup_state = if discarded {
+            "не требовалась: файлы не изменились, копия удалена".to_owned()
+        } else if let Some(error) = verification_error.as_deref() {
+            format!("сохранена: не удалось проверить отсутствие изменений ({error})")
+        } else {
+            format!("сохранена: {backup_id}")
+        };
+        let outcome = if result.is_err() { format!("ОШИБКА ({status})") } else { status };
+        if let Err(error) = crate::auto_update::log_event(&format!(
+            "Завершено: {outcome}. {summary} Резервная копия {backup_state}."
+        )) {
+            eprintln!("xkeen-sub auto-update: не удалось записать журнал: {error}");
+        }
+    }
+
     println!();
-    info(&format!("Резервная запись: {}.", backup.id()));
+    if discarded {
+        info("Резервная копия удалена: проверено, что файлы не изменились.");
+    } else {
+        info(&format!("Резервная запись: {backup_id}."));
+    }
+    if let Some(error) = verification_error {
+        warning(&format!("Не удалось проверить неизменность файлов. Резервная копия сохранена: {error}"));
+    }
     info(&format!("Время выполнения: {}.", format_elapsed(started_at.elapsed())));
     if let Err(error) = log_result {
         return Err(format!("Не удалось завершить журнал резервной записи: {error}").into());

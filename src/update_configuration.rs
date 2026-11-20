@@ -125,7 +125,7 @@ fn prepare_configuration(
     )?;
     let blocked_tags = blacklist.blocked_full_tags(subscriptions);
     let filtered_selectors = crate::balancer::filter_blacklisted_selectors(
-        &mut docs[routing_index].value, &all_tags, &blocked_tags
+        &mut docs[routing_index].value, &tags, &blocked_tags
     )?;
     if filtered_selectors > 0 {
         backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из пользовательских балансировщиков: {filtered_selectors}."))?;

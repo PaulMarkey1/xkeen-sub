@@ -30,7 +30,28 @@ mod update_state;
 mod update_merge;
 mod update_apply;
 
+fn configure_timezone() {
+    // Keenetic stores its active POSIX timezone in /etc/TZ (also exposed as
+    // /tmp/TZ). Entware's libc/chrono must receive it explicitly: /etc/localtime
+    // on Keenetic may point to this text file rather than a TZif database.
+    for path in ["/etc/TZ", "/tmp/TZ"] {
+        if let Ok(value) = std::fs::read_to_string(path) {
+            let value = value.trim();
+            if !value.is_empty() {
+                std::env::set_var("TZ", value);
+                return;
+            }
+        }
+    }
+
+    // Fallback for systems where Keenetic's POSIX timezone file is unavailable.
+    if std::path::Path::new("/opt/etc/localtime").exists() {
+        std::env::set_var("TZ", ":/opt/etc/localtime");
+    }
+}
+
 fn main() {
+    configure_timezone();
     if let Err(error) = cli::run() {
         terminal::error(&format!("Ошибка: {error}"));
         std::process::exit(1);

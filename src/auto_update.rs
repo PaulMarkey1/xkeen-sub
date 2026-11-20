@@ -12,7 +12,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const CONFIG: &str = "/opt/etc/xkeen-sub/auto-update.json";
 const MARKER: &str = "# xkeen-sub-auto-update";
 const CRON: &str = "* * * * * /opt/sbin/xkeen-sub auto-update tick # xkeen-sub-auto-update";
-const MAX_LATE_SECONDS: i64 = 60;
+const MAX_LATE_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

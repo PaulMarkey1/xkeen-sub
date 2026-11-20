@@ -13,6 +13,8 @@ const CONFIG: &str = "/opt/etc/xkeen-sub/auto-update.json";
 const MARKER: &str = "# xkeen-sub-auto-update";
 const CRON: &str = "* * * * * /opt/sbin/xkeen-sub auto-update tick # xkeen-sub-auto-update";
 const MAX_LATE_SECONDS: i64 = 3600;
+const LOG: &str = "/opt/etc/xkeen-sub/auto-update.log";
+const MAX_LOG_LINES: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +53,7 @@ pub fn run_menu() -> AppResult<()> {
         menu_item("3", "Изменить расписание");
         menu_item("4", "Включить или выключить расписание");
         menu_item("5", "Удалить расписание");
+        menu_item("6", "Журнал автообновления");
         menu_item("0", "Назад");
         match read_input("Выберите пункт: ")?.as_str() {
             "1" => list_jobs()?,
@@ -58,10 +61,48 @@ pub fn run_menu() -> AppResult<()> {
             "3" => edit_job()?,
             "4" => toggle_job()?,
             "5" => delete_job()?,
+            "6" => view_log()?,
             "0" => return Ok(()),
-            _ => error("Введите цифру от 0 до 5."),
+            _ => error("Введите цифру от 0 до 6."),
         }
     }
+}
+
+pub(crate) fn log_event(message: &str) -> AppResult<()> {
+    fs::create_dir_all("/opt/etc/xkeen-sub")?;
+    let line = format!("[{}] {}\\n", Local::now().format("%Y-%m-%d %H:%M:%S"), message);
+    let mut lines: Vec<String> = match fs::read_to_string(LOG) {
+        Ok(content) => content.lines().map(str::to_owned).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    lines.push(line.trim_end().to_owned());
+    if lines.len() > MAX_LOG_LINES {
+        let excess = lines.len() - MAX_LOG_LINES;
+        lines.drain(0..excess);
+    }
+    let temp = format!("{LOG}.tmp.{}", std::process::id());
+    let mut content = lines.join("\\n");
+    content.push('\\n');
+    fs::write(&temp, content)?;
+    fs::rename(temp, LOG)?;
+    Ok(())
+}
+
+fn view_log() -> AppResult<()> {
+    title("ЖУРНАЛ АВТООБНОВЛЕНИЯ");
+    match fs::read_to_string(LOG) {
+        Ok(content) if content.trim().is_empty() => info("Журнал пока пуст."),
+        Ok(content) => {
+            for line in content.lines() {
+                println!("{line}");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => info("Журнал пока пуст."),
+        Err(error) => return Err(format!("Не удалось прочитать журнал автообновления: {error}").into()),
+    }
+    let _ = read_input("Нажмите Enter, чтобы вернуться...");
+    Ok(())
 }
 
 pub fn tick() -> AppResult<()> {
@@ -92,6 +133,7 @@ pub fn tick() -> AppResult<()> {
             // Skip the missed occurrence and retain the original interval/calendar phase.
             current.jobs[index].next_run = next_occurrence(&current.jobs[index], current_now)?;
             save(&current)?;
+            let _ = log_event(&format!("Расписание №{id}: пропущен запуск, опоздание превысило допустимый час."));
             continue;
         }
 

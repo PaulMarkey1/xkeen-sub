@@ -119,7 +119,7 @@ fn prepare_deletion(
         // A registered subscription may never have been downloaded/applied.
         // Keep it in the registry, but do not require a baseline or create an
         // outbound group for it during a full rebuild.
-        if !active_numbers.contains(&old_number) {
+        if !subscription_is_active(&active_numbers, old_number, old_path.is_file()) {
             if old_path.exists() {
                 state.baseline_removals.push((old_id.clone(), old_path.clone()));
             }
@@ -216,7 +216,7 @@ fn working_subscription_numbers() -> AppResult<HashSet<u64>> {
 
 #[cfg(test)]
 mod participation_tests {
-    use super::subscription_is_in_outbounds;
+    use super::{subscription_is_active, subscription_is_in_outbounds};
     use serde_json::json;
 
     #[test]
@@ -228,6 +228,14 @@ mod participation_tests {
         assert!(subscription_is_in_outbounds(&outbounds, 2));
         assert!(subscription_is_in_outbounds(&outbounds, 20));
         assert!(!subscription_is_in_outbounds(&outbounds, 3));
+    }
+
+    #[test]
+    fn baseline_keeps_fully_blacklisted_subscription_active() {
+        let outbounds = vec![json!({"tag":"sub2--another-subscription--node","protocol":"vless"})];
+        let active_numbers = super::subscription_numbers_in_outbounds(&outbounds);
+        assert!(subscription_is_active(&active_numbers, 1, true));
+        assert!(!subscription_is_active(&active_numbers, 1, false));
     }
 
     #[test]
@@ -247,6 +255,10 @@ fn subscription_numbers_in_outbounds(outbounds: &[Value]) -> HashSet<u64> {
             .and_then(Value::as_str)
             .and_then(number_from_tag)
     }).collect()
+}
+
+fn subscription_is_active(active_numbers: &HashSet<u64>, number: u64, baseline_exists: bool) -> bool {
+    baseline_exists || active_numbers.contains(&number)
 }
 
 fn subscription_is_in_outbounds(outbounds: &[Value], number: u64) -> bool {

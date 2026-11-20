@@ -225,6 +225,11 @@ impl BackupSession {
         file.write_all(line.as_bytes())?;
         file.flush()?;
         file.sync_all()?;
+        if self.id.ends_with("--auto-update") {
+            if let Err(error) = crate::auto_update::log_event(&format!("{level}: {message}")) {
+                eprintln!("xkeen-sub auto-update: не удалось записать журнал: {error}");
+            }
+        }
         Ok(())
     }
 

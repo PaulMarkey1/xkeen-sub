@@ -16,6 +16,7 @@ const XRAY_BACKUP_DIR: &str = "/opt/etc/xray/configs/backups";
 const SUBSCRIPTIONS_FILE: &str = "/opt/etc/xkeen-sub/sub.json";
 const BASELINE_DIR: &str = "/opt/etc/xkeen-sub/baseline";
 const USER_ARCHIVE_FILE: &str = "/opt/etc/xkeen-sub/old-user-outbound.json";
+const BLACKLIST_FILE: &str = "/opt/etc/xkeen-sub/blacklist.json";
 const SETTINGS_FILE: &str = "/opt/etc/xkeen-sub/backup-settings.json";
 const AUTOMATIC_RETENTION_DAYS: i64 = 3;
 const MIN_DAILY_LIMIT: usize = 5;
@@ -692,6 +693,7 @@ fn collect_snapshot_files(output: &mut Vec<BackupSource>, require_xray_root: boo
     }
     collect_optional_backup_file(Path::new(SUBSCRIPTIONS_FILE), "Реестр подписок", output)?;
     collect_optional_backup_file(Path::new(USER_ARCHIVE_FILE), "Архив пользовательских подключений", output)?;
+    collect_optional_backup_file(Path::new(BLACKLIST_FILE), "Чёрный список подключений", output)?;
     collect_existing_backup_files(Path::new(BASELINE_DIR), "Baseline подписок", output)?;
     Ok(())
 }
@@ -856,6 +858,7 @@ fn is_full_snapshot_path(path: &Path) -> bool {
     path.starts_with(xray_root) && !path.starts_with(xray_backups)
         || path == Path::new(SUBSCRIPTIONS_FILE)
         || path == Path::new(USER_ARCHIVE_FILE)
+        || path == Path::new(BLACKLIST_FILE)
         || path.starts_with(Path::new(BASELINE_DIR))
 }
 
@@ -1676,6 +1679,8 @@ mod tests {
         assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/sub.json")));
         assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/baseline/sub1.json")));
         assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/old-user-outbound.json")));
+        assert!(is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/blacklist.json")));
+        assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup/record/blacklist.json")));
         assert!(!is_full_snapshot_path(Path::new("/opt/etc/xray/configs/backups/04_outbounds.json.auto-backup")));
         assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup/record/file.json")));
         assert!(!is_full_snapshot_path(Path::new("/opt/etc/xkeen-sub/backup-settings.json")));

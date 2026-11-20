@@ -15,6 +15,7 @@ const STAGING_ROOT: &str = "/tmp/xkeen-sub-update";
 const CONFIG_ROOT: &str = "/opt/etc/xray/configs";
 const BASELINE_ROOT: &str = "/opt/etc/xkeen-sub/baseline";
 const ARCHIVE_PATH: &str = "/opt/etc/xkeen-sub/old-user-outbound.json";
+const BLACKLIST_PATH: &str = "/opt/etc/xkeen-sub/blacklist.json";
 const MAX_FILE_ATTEMPTS: usize = 5;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -46,7 +47,7 @@ impl StagingDirectory {
             let _ = fs::remove_dir_all(&root);
             return Err(format!("Не удалось ограничить права staging-каталога {}: {error}", root.display()).into());
         }
-        for name in ["configs", "archive", "baseline", "subscriptions"] {
+        for name in ["configs", "archive", "baseline", "subscriptions", "blacklist"] {
             if let Err(error) = fs::create_dir(root.join(name)) {
                 let _ = fs::remove_dir_all(&root);
                 return Err(format!("Не удалось создать staging-подкаталог {name}: {error}").into());
@@ -59,13 +60,7 @@ impl StagingDirectory {
         if operation.kind == PlannedOperationKind::Delete {
             return Ok(None);
         }
-        let folder = match operation.category {
-            "Конфигурация Xray" => "configs",
-            "Архив пользовательских подключений" => "archive",
-            "Baseline" => "baseline",
-            "Реестр подписок" => "subscriptions",
-            other => return Err(format!("Неизвестная категория операции: {other}").into()),
-        };
+        let folder = staging_folder(operation.category)?;
         let name = operation.path.file_name().ok_or("У операции отсутствует имя файла.")?;
         Ok(Some(self.root.join(folder).join(name)))
     }
@@ -287,7 +282,30 @@ fn category_order(category: &str) -> u8 {
         "Архив пользовательских подключений" => 1,
         "Baseline" | "Повреждённый baseline" => 2,
         "Реестр подписок" => 3,
-        _ => 4,
+        "Чёрный список подключений" => 4,
+        _ => 5,
+    }
+}
+
+fn staging_folder(category: &str) -> AppResult<&'static str> {
+    match category {
+        "Конфигурация Xray" => Ok("configs"),
+        "Архив пользовательских подключений" => Ok("archive"),
+        "Baseline" => Ok("baseline"),
+        "Реестр подписок" => Ok("subscriptions"),
+        "Чёрный список подключений" => Ok("blacklist"),
+        other => Err(format!("Неизвестная категория операции: {other}").into()),
+    }
+}
+
+fn target_matches_category(category: &str, path: &Path) -> bool {
+    match category {
+        "Конфигурация Xray" => path.starts_with(CONFIG_ROOT),
+        "Архив пользовательских подключений" => path == Path::new(ARCHIVE_PATH),
+        "Baseline" | "Повреждённый baseline" => path.starts_with(BASELINE_ROOT),
+        "Реестр подписок" => path == Path::new("/opt/etc/xkeen-sub/sub.json"),
+        "Чёрный список подключений" => path == Path::new(BLACKLIST_PATH),
+        _ => false,
     }
 }
 
@@ -296,13 +314,7 @@ fn validate_target(operation: &PlannedFileOperation) -> AppResult<()> {
     if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
         return Err(format!("Недопустимый абсолютный путь операции: {}", path.display()).into());
     }
-    let allowed = match operation.category {
-        "Конфигурация Xray" => path.starts_with(CONFIG_ROOT),
-        "Архив пользовательских подключений" => path == Path::new(ARCHIVE_PATH),
-        "Baseline" | "Повреждённый baseline" => path.starts_with(BASELINE_ROOT),
-        "Реестр подписок" => path == Path::new("/opt/etc/xkeen-sub/sub.json"),
-        _ => false,
-    };
+    let allowed = target_matches_category(operation.category, path);
     if !allowed {
         return Err(format!("Путь не соответствует категории операции: {}", path.display()).into());
     }
@@ -813,7 +825,25 @@ fn start_after_rollback(backup: &mut BackupSession) -> String {
 
 #[cfg(test)]
 mod process_tests {
-    use super::is_xray_proxy_cmdline;
+    use super::{is_xray_proxy_cmdline, staging_folder, target_matches_category, BLACKLIST_PATH};
+    use std::path::Path;
+
+    #[test]
+    fn blacklist_has_a_dedicated_staging_directory() {
+        assert_eq!(staging_folder("Чёрный список подключений").unwrap(), "blacklist");
+    }
+
+    #[test]
+    fn blacklist_category_accepts_only_the_blacklist_file() {
+        assert!(target_matches_category("Чёрный список подключений", Path::new(BLACKLIST_PATH)));
+        assert!(!target_matches_category("Чёрный список подключений", Path::new("/opt/etc/xkeen-sub/sub.json")));
+        assert!(!target_matches_category("Реестр подписок", Path::new(BLACKLIST_PATH)));
+    }
+
+    #[test]
+    fn unknown_staging_categories_are_rejected() {
+        assert!(staging_folder("Неизвестная категория").is_err());
+    }
 
     #[test]
     fn accepts_xray_without_arguments() {

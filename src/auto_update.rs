@@ -77,16 +77,20 @@ pub(crate) fn log_event(message: &str) -> AppResult<()> {
         Err(error) => return Err(error.into()),
     };
     lines.push(line.trim_end().to_owned());
-    if lines.len() > MAX_LOG_LINES {
-        let excess = lines.len() - MAX_LOG_LINES;
-        lines.drain(0..excess);
-    }
+    trim_log_lines(&mut lines);
     let temp = format!("{LOG}.tmp.{}", std::process::id());
     let mut content = lines.join("\n");
     content.push('\n');
     fs::write(&temp, content)?;
     fs::rename(temp, LOG)?;
     Ok(())
+}
+
+fn trim_log_lines(lines: &mut Vec<String>) {
+    if lines.len() > MAX_LOG_LINES {
+        let excess = lines.len() - MAX_LOG_LINES;
+        lines.drain(0..excess);
+    }
 }
 
 fn view_log() -> AppResult<()> {
@@ -480,6 +484,22 @@ mod tests {
         let dt = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
         resolve_local(dt).unwrap().timestamp()
     }
+    #[test]
+    fn auto_update_log_keeps_only_the_latest_100_lines() {
+        let mut lines: Vec<String> = (1..=101).map(|n| n.to_string()).collect();
+        trim_log_lines(&mut lines);
+        assert_eq!(lines.len(), 100);
+        assert_eq!(lines.first().map(String::as_str), Some("2"));
+        assert_eq!(lines.last().map(String::as_str), Some("101"));
+    }
+
+    #[test]
+    fn auto_update_log_does_not_change_short_logs() {
+        let mut lines = vec!["first".to_owned(), "second".to_owned()];
+        trim_log_lines(&mut lines);
+        assert_eq!(lines, vec!["first", "second"]);
+    }
+
     #[test]
     fn interval_keeps_anchor_after_late_execution() {
         let job = Job { id: 1, enabled: true, target: Target::All, schedule: Schedule::Interval { seconds: 21600 }, next_run: ts("2026-11-19 00:00") };

@@ -48,6 +48,9 @@ impl BlacklistStore {
     pub(crate) fn is_blocked(&self, id: &str, tag: &str) -> bool {
         self.entries.iter().any(|e| e.subscription_id == id && e.tag == tag)
     }
+    pub(crate) fn blocked_full_tags(&self, subscriptions: &[Subscription]) -> HashSet<String> {
+        self.entries.iter().filter_map(|entry| subscriptions.iter().find(|sub| sub.id == entry.subscription_id).map(|sub| format!("{}{}", sub.prefix, entry.tag))).collect()
+    }
     pub(crate) fn filter_outbounds(&self, subscriptions: &[Subscription], outbounds: &mut Vec<Value>) -> AppResult<usize> {
         let before = outbounds.len();
         outbounds.retain(|outbound| {

@@ -259,6 +259,32 @@ fn redirect_rules_to_program_balancer(
     Ok(changed)
 }
 
+/// Removes blacklisted outbound tags from every balancer selector. Prefix selectors
+/// covering blocked tags are expanded to the currently available matching tags.
+pub(crate) fn filter_blacklisted_selectors(document: &mut Value, final_tags: &[String], blocked_tags: &HashSet<String>) -> AppResult<usize> {
+    if blocked_tags.is_empty() { return Ok(0); }
+    let balancers = document.as_object_mut().and_then(|root| root.get_mut("routing"))
+        .and_then(Value::as_object_mut).and_then(|routing| routing.get_mut("balancers"))
+        .and_then(Value::as_array_mut);
+    let Some(balancers) = balancers else { return Ok(0); };
+    let mut removed = 0;
+    for balancer in balancers {
+        let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else { continue; };
+        let mut filtered = Vec::new();
+        for value in selector.iter() {
+            let Some(prefix) = value.as_str() else { filtered.push(value.clone()); continue; };
+            if blocked_tags.contains(prefix) { removed += 1; continue; }
+            if blocked_tags.iter().any(|blocked| blocked.starts_with(prefix)) {
+                let matches: Vec<&String> = final_tags.iter().filter(|tag| tag.starts_with(prefix) && !blocked_tags.contains(*tag)).collect();
+                if matches.is_empty() { removed += 1; }
+                else { removed += 1; for tag in matches { let item=Value::String(tag.clone()); if !filtered.contains(&item) { filtered.push(item); } } }
+            } else { filtered.push(value.clone()); }
+        }
+        *selector = filtered;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{prepare_balancers, BalancerCase, PROGRAM_BALANCER_TAG};

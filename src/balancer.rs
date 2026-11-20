@@ -261,32 +261,81 @@ fn redirect_rules_to_program_balancer(
 
 /// Removes blacklisted outbound tags from every balancer selector. Prefix selectors
 /// covering blocked tags are expanded to the currently available matching tags.
-pub(crate) fn filter_blacklisted_selectors(document: &mut Value, final_tags: &[String], blocked_tags: &HashSet<String>) -> AppResult<usize> {
-    if blocked_tags.is_empty() { return Ok(0); }
-    let balancers = document.as_object_mut().and_then(|root| root.get_mut("routing"))
-        .and_then(Value::as_object_mut).and_then(|routing| routing.get_mut("balancers"))
+pub(crate) fn filter_blacklisted_selectors(
+    document: &mut Value,
+    final_tags: &[String],
+    blocked_tags: &HashSet<String>,
+) -> AppResult<usize> {
+    if blocked_tags.is_empty() {
+        return Ok(0);
+    }
+
+    let balancers = document
+        .as_object_mut()
+        .and_then(|root| root.get_mut("routing"))
+        .and_then(Value::as_object_mut)
+        .and_then(|routing| routing.get_mut("balancers"))
         .and_then(Value::as_array_mut);
-    let Some(balancers) = balancers else { return Ok(0); };
+    let Some(balancers) = balancers else {
+        return Ok(0);
+    };
+
     let mut removed = 0;
     for balancer in balancers {
-        let balancer_tag = balancer.get("tag").and_then(Value::as_str)
-            .unwrap_or("<без Tag>").to_owned();
-        let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else { continue; };
+        let balancer_tag = balancer
+            .get("tag")
+            .and_then(Value::as_str)
+            .unwrap_or("<без Tag>")
+            .to_owned();
+        let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
         let mut filtered = Vec::new();
         for value in selector.iter() {
-            let Some(prefix) = value.as_str() else { filtered.push(value.clone()); continue; };
-            if blocked_tags.contains(prefix) { removed += 1; continue; }
-            if blocked_tags.iter().any(|blocked| blocked.starts_with(prefix)) {
-                let matches: Vec<&String> = final_tags.iter().filter(|tag| tag.starts_with(prefix) && !blocked_tags.contains(*tag)).collect();
-                if matches.is_empty() { removed += 1; }
-                else { removed += 1; for tag in matches { let item=Value::String(tag.clone()); if !filtered.contains(&item) { filtered.push(item); } } }
-            } else { filtered.push(value.clone()); }
+            let Some(prefix) = value.as_str() else {
+                filtered.push(value.clone());
+                continue;
+            };
+
+            if blocked_tags.contains(prefix)
+                || blocked_tags.iter().any(|blocked| blocked.starts_with(prefix))
+            {
+                // A selector is a prefix, not necessarily an exact tag. Expand it
+                // to the remaining matching outbounds so blocking one exact tag
+                // does not hide other allowed tags sharing the same prefix.
+                let matches: Vec<&String> = final_tags
+                    .iter()
+                    .filter(|tag| tag.starts_with(prefix) && !blocked_tags.contains(*tag))
+                    .collect();
+                if matches.is_empty() {
+                    removed += 1;
+                } else {
+                    removed += 1;
+                    for tag in matches {
+                        let item = Value::String(tag.clone());
+                        if !filtered.contains(&item) {
+                            filtered.push(item);
+                        }
+                    }
+                }
+            } else {
+                filtered.push(value.clone());
+            }
         }
-        if filtered.is_empty() {
+
+        // Xray accepts selector prefixes that match no current outbound, but
+        // such a selector is useless. Reject the blacklist change if no real,
+        // eligible connection remains, even when the JSON array is non-empty.
+        let has_matching_outbound = filtered.iter().filter_map(Value::as_str).any(|prefix| {
+            final_tags.iter().any(|tag| tag.starts_with(prefix))
+        });
+        if !has_matching_outbound {
             return Err(format!(
-                "Нельзя применить чёрный список: селектор балансировщика {balancer_tag} останется пустым. Оставьте хотя бы одно подходящее подключение."
+                "Нельзя применить чёрный список: селектор балансировщика {balancer_tag} не содержит ни одного доступного подключения. Оставьте хотя бы одно подходящее подключение."
             ).into());
         }
+
         *selector = filtered;
     }
     Ok(removed)
@@ -328,6 +377,45 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--"]));
+    }
+
+    #[test]
+    fn blacklist_rejects_nonempty_selector_without_any_matching_outbound() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [{
+                    "tag": "user-balancer",
+                    "selector": ["missing-prefix"]
+                }]
+            }
+        });
+        let blocked = HashSet::from(["sub1--blocked".to_owned()]);
+        let final_tags = vec!["sub1--allowed".to_owned()];
+        let result = super::filter_blacklisted_selectors(&mut config, &final_tags, &blocked);
+        assert!(result.is_err());
+        assert_eq!(
+            config["routing"]["balancers"][0]["selector"],
+            json!(["missing-prefix"])
+        );
+    }
+
+    #[test]
+    fn blacklist_expands_exact_blocked_tag_to_other_matching_outbounds() {
+        let mut config = json!({
+            "routing": {
+                "balancers": [{
+                    "tag": "user-balancer",
+                    "selector": ["sub1--node"]
+                }]
+            }
+        });
+        let blocked = HashSet::from(["sub1--node".to_owned()]);
+        let final_tags = vec!["sub1--node-backup".to_owned()];
+        super::filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();
+        assert_eq!(
+            config["routing"]["balancers"][0]["selector"],
+            json!(["sub1--node-backup"])
+        );
     }
 
     #[test]

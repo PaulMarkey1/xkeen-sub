@@ -1182,9 +1182,15 @@ fn valid_record_date(date: &str) -> bool {
 }
 
 fn record_label(record: &BackupRecord) -> String {
-    if record.id.contains("--user-backup") { "user-backup".to_owned() }
-    else if record.is_full { "backup-full (старый формат)".to_owned() }
-    else { format!("backup{}", record.number) }
+    if record.id.contains("--user-backup") {
+        "user-backup".to_owned()
+    } else if record.is_full {
+        "backup-full (старый формат)".to_owned()
+    } else if record.id.ends_with("--auto-update") {
+        format!("backup{} — автообновление", record.number)
+    } else {
+        format!("backup{}", record.number)
+    }
 }
 
 fn next_user_backup_number(root: &Path, date: &str) -> AppResult<usize> {
@@ -1564,7 +1570,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, file_checksum, is_allowed_restore_path, is_full_snapshot_path, parse_mode, parse_record_id, read_full_snapshot_file_count, validate_relative_path, BackupSettings, RetentionMode};
+    use super::{days_from_civil, file_checksum, is_allowed_restore_path, is_full_snapshot_path, parse_mode, parse_record_id, read_full_snapshot_file_count, record_label, validate_relative_path, BackupRecord, BackupSettings, RetentionMode};
     use std::path::Path;
 
     #[test]
@@ -1586,6 +1592,27 @@ mod tests {
         assert_eq!(parse_record_id("14-11-2026--backup4-full"), Some(("14-11-2026".to_owned(), 4, true)));
         assert_eq!(parse_record_id("14-11-2026--backup0"), None);
         assert_eq!(parse_record_id("../backup1"), None);
+    }
+
+    #[test]
+    fn labels_automatic_update_backups_in_the_menu() {
+        let record = BackupRecord {
+            id: "20-11-2026--backup1--auto-update".to_owned(),
+            path: Path::new("/tmp/backup").to_path_buf(),
+            date: "20-11-2026".to_owned(),
+            number: 1,
+            is_full: false,
+        };
+        assert_eq!(record_label(&record), "backup1 — автообновление");
+
+        let regular = BackupRecord {
+            id: "20-11-2026--backup2".to_owned(),
+            path: Path::new("/tmp/backup").to_path_buf(),
+            date: "20-11-2026".to_owned(),
+            number: 2,
+            is_full: false,
+        };
+        assert_eq!(record_label(&regular), "backup2");
     }
 
     #[test]

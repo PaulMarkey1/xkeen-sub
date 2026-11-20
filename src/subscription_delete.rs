@@ -4,16 +4,19 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::backup::BackupSession;
+use crate::backup::{BackupSession, BackupSource};
 use crate::subscription_identity::{number_from_id, number_from_tag, SubscriptionIdentity};
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::SubscriptionStore;
-use crate::terminal::{error, success};
+use crate::terminal::{error, success, ProgressBar};
 use crate::update_configuration::rebuild_configuration;
+use crate::update_apply::{self, PlannedOperationKind};
+use crate::update_merge::ArchivePlan;
+use crate::update_plan::build_file_plan_with_registry;
 use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
 use crate::update_config::{find_doc, load_config_documents, OUTBOUND_FILE};
-use crate::subscriptions::save_subscriptions;
+
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -28,13 +31,7 @@ pub(crate) fn delete_subscription(
 
     let selected_id = store.subscriptions[index].id.clone();
     if !subscription_is_in_working_config(&selected_id)? {
-        store.subscriptions.remove(index);
-        save_subscriptions(&store)?;
-        crate::auto_update::remap_subscription_ids(&selected_id, &[])?;
-        success(&format!(
-            "Подписка {selected_id} удалена из sub.json. В рабочих конфигурациях её подключений не было; пересборка и перезапуск XKeen не требуются."
-        ));
-        return Ok(());
+        return delete_unapplied_subscription(store, index, &selected_id);
     }
 
     let mut backup = BackupSession::start("Удаление подписки")?;
@@ -85,6 +82,102 @@ pub(crate) fn delete_subscription(
     if let Err(log_error) = log_result {
         return Err(format!("Не удалось завершить журнал удаления: {log_error}").into());
     }
+    result
+}
+
+
+/// Deletes a subscription that has no entries in the working Xray configuration.
+/// The registry and its baseline are applied through the same staged file plan,
+/// without rebuilding Xray configuration or restarting XKeen.
+fn delete_unapplied_subscription(
+    mut store: SubscriptionStore,
+    index: usize,
+    selected_id: &str,
+) -> AppResult<()> {
+    let original_ids: Vec<String> = store.subscriptions.iter()
+        .map(|item| item.id.clone())
+        .collect();
+    let baseline = baseline_path(&store.subscriptions[index])?;
+    store.subscriptions.remove(index);
+
+    let mut backup = BackupSession::start("Удаление неактивной подписки")?;
+    backup.set_subscriptions(original_ids);
+
+    let result = (|| -> AppResult<()> {
+        let mut state = RunState::default();
+        state.baseline_removals.push((selected_id.to_owned(), baseline));
+        let archive = ArchivePlan { outbounds: Vec::new(), added: 0 };
+        let plan = build_file_plan_with_registry(&[], &state, &archive, &store)?;
+
+        backup.set_updated_subscriptions(Vec::new());
+        backup.set_plan_count(plan.len());
+        backup.event(
+            "DELETE",
+            &format!(
+                "Подписка {selected_id} отсутствует в рабочих конфигурациях. Подготовлено операций с baseline и реестром: {}.",
+                plan.len()
+            ),
+        )?;
+
+        let sources: Vec<BackupSource> = plan.iter()
+            .filter(|operation| operation.kind != PlannedOperationKind::Create)
+            .map(|operation| BackupSource {
+                path: operation.path.clone(),
+                category: operation.category.to_owned(),
+            })
+            .collect();
+        let progress_total = if plan.is_empty() {
+            0
+        } else {
+            sources.len() + plan.len() * 3 + 1
+        };
+        let mut progress = ProgressBar::new(progress_total);
+
+        match backup.backup_files_with_progress(&sources, &mut progress) {
+            Ok(saved) => {
+                backup.event(
+                    "BACKUP",
+                    &format!("Проверка файлов baseline и реестра по полному снимку завершена: {saved} файлов."),
+                )?;
+                if let Err(failure) = update_apply::execute_baseline_only(&plan, &mut backup, &mut progress) {
+                    progress.stop("Удаление подписки остановлено");
+                    return Err(failure);
+                }
+                progress.finish("Baseline и реестр обновлены");
+            }
+            Err(failure) => {
+                progress.stop("Резервирование не удалось");
+                return Err(failure);
+            }
+        }
+
+        crate::auto_update::remap_subscription_ids(selected_id, &[])?;
+        backup.event(
+            "DELETE",
+            &format!("Подписка {selected_id} удалена из реестра, её baseline очищен. Конфигурации Xray не пересобирались, XKeen не перезапускался."),
+        )?;
+        backup.set_outcome(
+            "УСПЕШНО",
+            "Удалена неактивная подписка вместе с baseline. Рабочие конфигурации не менялись, XKeen не перезапускался.",
+            true,
+        );
+        success(&format!(
+            "Подписка {selected_id} и её baseline удалены. Пересборка и перезапуск XKeen не требовались."
+        ));
+        Ok(())
+    })();
+
+    if let Err(ref failure) = result {
+        if backup.is_running() {
+            backup.set_outcome(
+                "ОШИБКА УДАЛЕНИЯ",
+                &format!("Удаление не завершено: {failure}"),
+                true,
+            );
+        }
+    }
+
+    backup.finish()?;
     result
 }
 

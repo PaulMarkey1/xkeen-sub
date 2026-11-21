@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{auto_update, backup, install, maintenance, setup, update};
+use crate::{auto_update, backup, install_config, maintenance, setup, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -33,7 +33,7 @@ pub fn run() -> AppResult<()> {
         [action] if action == "update" => update::run(None),
         [action, target] if action == "update" => update::run(Some(target)),
         // Internal command used by install.sh before replacing the installed binary.
-        [action] if action == "install-check" => install::ensure_observatory(),
+        [action] if action == "install-check" => install_config::run_install_config_check(),
         [action] if action == "uxs" => maintenance::update(),
         [action] if action == "reinstall" => maintenance::reinstall(),
         [action] if action == "uninstall" => maintenance::uninstall(),

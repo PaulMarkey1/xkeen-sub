@@ -686,6 +686,41 @@ mod tests {
         assert!(!same_process(&previous, &rebooted));
     }
 
+
+    #[test]
+    fn available_tags_excludes_blacklisted_connections_and_other_subscriptions() {
+        use super::available_tags;
+        use crate::blacklist::{BlacklistEntry, BlacklistStore};
+        use crate::subscriptions::Subscription;
+        use serde_json::json;
+
+        let configs = vec![json!({
+            "outbounds": [
+                {"tag": "sub1--Home--node-a"},
+                {"tag": "sub1--Home--node-b"},
+                {"tag": "sub2--Work--node-c"},
+                {"tag": "direct"}
+            ]
+        })];
+        let subscription = Subscription {
+            id: "sub1".to_owned(),
+            name: Some("Home".to_owned()),
+            url: "https://example.test".to_owned(),
+            prefix: "sub1--Home--".to_owned(),
+        };
+        let blacklist = BlacklistStore {
+            entries: vec![BlacklistEntry {
+                subscription_id: "sub1".to_owned(),
+                tag: "node-a".to_owned(),
+            }],
+        };
+
+        assert_eq!(
+            available_tags(&configs, &subscription, &blacklist),
+            vec!["sub1--Home--node-b".to_owned()]
+        );
+    }
+
     #[test]
     fn rejects_xray_api_and_test_processes() {
         assert!(!is_xray_proxy_cmdline(b"xray\0api\0bo\0"));

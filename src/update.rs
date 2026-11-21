@@ -64,6 +64,14 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
 
     let mut summary_logged = false;
     let result = run_inner(target_id, &mut backup, automatic, &mut summary_logged);
+
+    // Any completed update attempt ends a manual node pin. If Xray was
+    // restarted while applying the update, the periodic node tick will detect
+    // the changed process identity and discard the stale state.
+    if let Err(error) = crate::current_connection::reset_after_update() {
+        eprintln!("xkeen-sub node: не удалось снять принудительный выбор после обновления: {error}");
+    }
+
     if let Err(ref error) = result {
         if backup.is_running() {
             backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), true);

@@ -92,10 +92,7 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
 
     let mut discarded = false;
     let mut verification_error = None;
-    let discardable_outcome = matches!(
-        status.as_str(),
-        "ЗАВЕРШЕНО" | "УСПЕШНО" | "БЕЗ ИЗМЕНЕНИЙ" | "BASELINE ОБНОВЛЁН"
-    );
+    let discardable_outcome = is_discardable_auto_update_outcome(&status);
     if automatic && log_result.is_ok() && discardable_outcome {
         match backup.discard_if_unchanged() {
             Ok(unchanged) => discarded = unchanged,
@@ -207,6 +204,12 @@ fn run_inner(
         update_configuration(&store.subscriptions, &state, backup)
     };
 
+    if let Err(failure) = &result {
+        if backup.is_running() {
+            backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {failure}"), true);
+        }
+    }
+
     if automatic {
         let applied = result.is_ok() && matches!(
             backup.outcome_status(),
@@ -279,6 +282,33 @@ fn log_auto_update_summary(
 fn write_auto_update_log(message: &str) {
     if let Err(error) = crate::auto_update::log_event(message) {
         eprintln!("xkeen-sub auto-update: не удалось записать журнал: {error}");
+    }
+}
+
+fn is_discardable_auto_update_outcome(status: &str) -> bool {
+    matches!(
+        status,
+        "ЗАВЕРШЕНО" | "УСПЕШНО" | "БЕЗ ИЗМЕНЕНИЙ" | "BASELINE ОБНОВЛЁН"
+    )
+}
+
+#[cfg(test)]
+mod auto_update_backup_tests {
+    use super::is_discardable_auto_update_outcome;
+
+    #[test]
+    fn successful_unchanged_auto_updates_can_discard_their_backup() {
+        assert!(is_discardable_auto_update_outcome("УСПЕШНО"));
+        assert!(is_discardable_auto_update_outcome("БЕЗ ИЗМЕНЕНИЙ"));
+        assert!(is_discardable_auto_update_outcome("BASELINE ОБНОВЛЁН"));
+    }
+
+    #[test]
+    fn failed_auto_updates_keep_their_detailed_backup_log() {
+        assert!(!is_discardable_auto_update_outcome("ОШИБКА ЗАГРУЗКИ"));
+        assert!(!is_discardable_auto_update_outcome("ОШИБКА ОБРАБОТКИ"));
+        assert!(!is_discardable_auto_update_outcome("ЗАБЛОКИРОВАНО"));
+        assert!(!is_discardable_auto_update_outcome("ОШИБКА ПРИМЕНЕНИЯ"));
     }
 }
 

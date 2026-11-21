@@ -141,8 +141,11 @@ fn query_balancer(server: &str, balancer: &str) -> AppResult<String> {
         return Err(format!("Исполняемый файл Xray не найден: {XRAY_BIN}").into());
     }
 
+    let server_arg = format!("--server={server}");
     let output = Command::new(XRAY_BIN)
-        .args(["api", "bi", &format!("--server={server}"), "--timeout=3", "--json", balancer])
+        .args(["api", "bi"])
+        .arg(server_arg)
+        .args(["--timeout=3", "--json", balancer])
         .output()
         .map_err(|error| format!("Не удалось запустить Xray API: {error}"))?;
 

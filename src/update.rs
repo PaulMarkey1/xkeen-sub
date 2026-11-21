@@ -270,6 +270,20 @@ fn log_auto_update_summary(
             format!("{label} — без изменений.")
         };
         write_auto_update_log(&format!("ИТОГ: {outcome}"));
+
+        if applied {
+            if let Some(changes) = state.subscription_changes.iter().find(|item| item.id == subscription.id) {
+                for tag in &changes.changed {
+                    write_auto_update_log(&format!("ИТОГ: {} — {} — изменён.", label, tag));
+                }
+                for tag in &changes.removed {
+                    write_auto_update_log(&format!("ИТОГ: {} — {} — удалён.", label, tag));
+                }
+                for tag in &changes.added {
+                    write_auto_update_log(&format!("ИТОГ: {} — {} — добавлен.", label, tag));
+                }
+            }
+        }
     }
 
     write_auto_update_log(&format!(

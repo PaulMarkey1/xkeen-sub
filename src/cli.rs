@@ -89,6 +89,6 @@ fn print_setup_help() -> AppResult<()> {
     command_item("xkeen-sub setup del", "Удалить подписку");
     command_item("xkeen-sub setup edit", "Редактировать подписку");
     command_item("auto-update", "Настройка автообновления подписок");
-    command_item("current", "Показать тэг текущего подключения");
+    command_item("node", "Просмотреть и изменить текущее подключение");
     Ok(())
 }

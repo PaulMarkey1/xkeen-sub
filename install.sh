@@ -17,6 +17,52 @@ fail() {
     exit 1
 }
 
+package_installed() {
+    opkg list-installed 2>/dev/null | awk -v package="$1" '$1 == package { found=1 } END { exit !found }'
+}
+
+cron_ready() {
+    command -v crontab >/dev/null 2>&1 || return 1
+    command -v crond >/dev/null 2>&1 || return 1
+    for script in /opt/etc/init.d/S10*cron* /opt/etc/init.d/s10*cron*; do
+        [ -x "$script" ] && return 0
+    done
+    return 1
+}
+
+ensure_required_packages() {
+    command -v opkg >/dev/null 2>&1 || fail "Не найден opkg. Сначала установите Entware — без пакетного менеджера невозможно автоматически установить зависимости."
+
+    # Entware opkg downloads packages through wget. Without it, opkg cannot
+    # install the missing packages itself.
+    command -v wget >/dev/null 2>&1 || fail "Не найден wget, необходимый пакетному менеджеру Entware. Восстановите wget/Entware и повторите установку."
+
+    MISSING=""
+    package_installed curl || MISSING="$MISSING curl"
+    package_installed ca-bundle || MISSING="$MISSING ca-bundle"
+    if ! cron_ready; then
+        MISSING="$MISSING cronie"
+    fi
+
+    if [ -n "$MISSING" ]; then
+        echo "Устанавливаем необходимые пакеты Entware:$MISSING"
+        opkg update || fail "Не удалось обновить список пакетов Entware. Проверьте подключение и работу wget."
+        # opkg installs missing dependencies of these packages automatically.
+        # Deliberately do not run a system-wide upgrade.
+        opkg install $MISSING || fail "Не удалось установить необходимые пакеты:$MISSING"
+    else
+        echo "Все необходимые пакеты Entware уже установлены."
+    fi
+
+    package_installed curl || fail "Пакет curl не установлен."
+    package_installed ca-bundle || fail "Пакет ca-bundle не установлен."
+    cron_ready || fail "Пакет cronie установлен не полностью: не найдены crontab, crond или сценарий запуска cron."
+    command -v curl >/dev/null 2>&1 || fail "Пакет curl установлен, но команда curl недоступна."
+    if ! curl --version >/dev/null 2>&1; then
+        echo "Предупреждение: curl установлен, но не запускается. При загрузке будет предпринята попытка использовать wget."
+    fi
+}
+
 # Check prerequisites before downloading or replacing xkeen-sub.
 if ! command -v xkeen >/dev/null 2>&1; then
     printf '%b%s%b\n' "$RED" "XKeen — отсутствует." "$RESET" >&2
@@ -39,6 +85,10 @@ fi
 if [ ! -d "$XRAY_ASSET_DIR" ]; then
     fail "Каталог данных Xray не найден: $XRAY_ASSET_DIR"
 fi
+
+# Check and install missing Entware dependencies only after platform
+# prerequisites have been confirmed, and before downloading/replacing the app.
+ensure_required_packages
 
 # Entware architecture is preferred over uname -m because it reflects the ABI.
 ENTWARE_ARCH=""
@@ -82,12 +132,13 @@ TMP_FILE="$(mktemp)"
 TMP_BIN="/opt/sbin/.${BIN_NAME}.install.$$"
 trap 'rm -f "$TMP_FILE" "$TMP_BIN"' EXIT HUP INT TERM
 
-if command -v curl >/dev/null 2>&1; then
-    curl -fL "$URL" -o "$TMP_FILE" || fail "Не удалось скачать бинарный файл."
+if command -v curl >/dev/null 2>&1 && curl -fL "$URL" -o "$TMP_FILE"; then
+    :
 elif command -v wget >/dev/null 2>&1; then
-    wget -O "$TMP_FILE" "$URL" || fail "Не удалось скачать бинарный файл."
+    echo "curl не сработал, пробуем wget..."
+    wget -O "$TMP_FILE" "$URL" || fail "Не удалось скачать бинарный файл через curl и wget."
 else
-    fail "Для загрузки нужен curl или wget."
+    fail "Не удалось скачать бинарный файл через curl; wget недоступен."
 fi
 
 [ -s "$TMP_FILE" ] || fail "Загруженный файл пуст."

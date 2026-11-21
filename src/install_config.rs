@@ -210,13 +210,36 @@ fn confirm(prompt: &str) -> AppResult<bool> {
     }
 }
 
-fn program_balancer() -> Value {
+fn program_balancer(selectors: &[String]) -> Value {
     json!({
         "tag": PROGRAM_BALANCER_TAG,
-        "selector": [],
+        "selector": selectors,
         "fallbackTag": "direct",
         "strategy": { "type": "leastPing" }
     })
+}
+
+fn available_outbound_tags(configs: &[ConfigFile]) -> Vec<String> {
+    let protected = ["freedom", "blackhole", "dns", "loopback"];
+    let mut tags = Vec::new();
+    for config in configs {
+        let Some(outbounds) = config.document.get("outbounds").and_then(Value::as_array) else {
+            continue;
+        };
+        for outbound in outbounds {
+            let Some(tag) = outbound.get("tag").and_then(Value::as_str) else {
+                continue;
+            };
+            let protocol = outbound.get("protocol").and_then(Value::as_str).unwrap_or("");
+            if protected.contains(&protocol) || tag == "api" || tag == PROGRAM_BALANCER_TAG {
+                continue;
+            }
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_owned());
+            }
+        }
+    }
+    tags
 }
 
 fn observatory_template() -> Value {
@@ -326,9 +349,9 @@ mod tests {
 
     #[test]
     fn program_balancer_uses_expected_tag_and_strategy() {
-        let balancer = program_balancer();
+        let balancer = program_balancer(&["sub1--node".to_owned()]);
         assert_eq!(balancer["tag"], PROGRAM_BALANCER_TAG);
-        assert_eq!(balancer["selector"], json!([]));
+        assert_eq!(balancer["selector"], json!(["sub1--node"]));
         assert_eq!(balancer["strategy"]["type"], "leastPing");
     }
 

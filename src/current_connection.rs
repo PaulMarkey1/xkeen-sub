@@ -11,7 +11,6 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const XRAY_BIN: &str = "/opt/sbin/xray";
-const PROGRAM_BALANCER_TAG: &str = "xkeen-sub-balancer";
 
 pub fn run() -> AppResult<()> {
     let configs = load_configs()?;
@@ -122,22 +121,15 @@ fn find_active_balancer(configs: &[Value]) -> AppResult<String> {
     let active = referenced.intersection(&configured).cloned().collect::<Vec<_>>();
     match active.as_slice() {
         [tag] => Ok(tag.clone()),
-        [] => match configured.as_slice() {
-            [tag] => Ok(tag.clone()),
+        [] => match configured.iter().collect::<Vec<_>>().as_slice() {
+            [tag] => Ok((*tag).clone()),
             [] => Err("В конфигурации Xray не найден ни один балансировщик.".into()),
             _ => Err("Не удалось однозначно определить балансировщик: ни один из настроенных балансировщиков не указан в routing.rules.".into()),
         },
-        tags => {
-            let preferred = tags.iter().find(|tag| tag.as_str() == PROGRAM_BALANCER_TAG);
-            if let Some(tag) = preferred {
-                Ok(tag.clone())
-            } else {
-                Err(format!(
-                    "В routing.rules используются несколько балансировщиков ({}). Нельзя определить один текущий тэг без контекста конкретного запроса.",
-                    tags.join(", ")
-                ).into())
-            }
-        }
+        tags => Err(format!(
+            "В routing.rules используются несколько балансировщиков ({}). Нельзя определить один текущий тэг без контекста конкретного запроса.",
+            tags.join(", ")
+        ).into()),
     }
 }
 

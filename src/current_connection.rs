@@ -50,18 +50,12 @@ struct ForcedSelection {
     process: ProcessIdentity,
 }
 
-struct CurrentContext {
-    server: String,
-    balancer: String,
-    selected_tag: String,
-}
-
 pub fn run() -> AppResult<()> {
     tick()?;
     loop {
         println!();
         title("XKEEN-SUB — ТЕКУЩИЙ УЗЕЛ");
-        let context = show_current()?;
+        show_current()?;
         show_forced_status()?;
         println!();
         menu_item("1", "Повторная проверка");
@@ -71,8 +65,7 @@ pub fn run() -> AppResult<()> {
 
         match read_input("Выберите пункт: ")?.as_str() {
             "1" => {
-                let refreshed = show_current()?;
-                info(&format!("Текущий тэг: {}", refreshed.selected_tag));
+                show_current()?;
             }
             "2" => change_connection()?,
             "3" => settings_menu()?,
@@ -82,13 +75,13 @@ pub fn run() -> AppResult<()> {
     }
 }
 
-fn show_current() -> AppResult<CurrentContext> {
+fn show_current() -> AppResult<()> {
     let configs = load_configs()?;
     let server = find_api_server(&configs)?;
     let balancer = find_active_balancer(&configs)?;
     let selected_tag = query_balancer(&server, &balancer)?;
     info(&format!("Тэг: {selected_tag}"));
-    Ok(CurrentContext { server, balancer, selected_tag })
+    Ok(())
 }
 
 fn show_forced_status() -> AppResult<()> {
@@ -97,6 +90,7 @@ fn show_forced_status() -> AppResult<()> {
         return Ok(());
     };
 
+    info(&format!("Выбрано вручную: {}", state.outbound_tag));
     match state.expires_at {
         Some(expires_at) => {
             let time = Local.timestamp_opt(expires_at, 0).single()

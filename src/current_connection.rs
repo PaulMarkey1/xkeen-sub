@@ -74,7 +74,7 @@ pub fn run() -> AppResult<()> {
                 let refreshed = show_current()?;
                 info(&format!("Текущий тэг: {}", refreshed.selected_tag));
             }
-            "2" => change_connection(&context)?,
+            "2" => change_connection()?,
             "3" => settings_menu()?,
             "0" => return Ok(()),
             _ => error("Введите цифру от 0 до 3."),
@@ -109,7 +109,7 @@ fn show_forced_status() -> AppResult<()> {
     Ok(())
 }
 
-fn change_connection(context: &CurrentContext) -> AppResult<()> {
+fn change_connection() -> AppResult<()> {
     let store = crate::subscriptions::load_subscriptions()?;
     if store.subscriptions.is_empty() {
         warning("Подписок пока нет. Сначала добавьте подписку.");
@@ -169,7 +169,7 @@ fn change_connection(context: &CurrentContext) -> AppResult<()> {
     };
 
     let target = &tags[node_index];
-    force_target(&context.server, &context.balancer, target)?;
+    force_target(target)?;
     success(&format!("Подключение {} выбрано принудительно.", target));
     show_forced_status()?;
     Ok(())
@@ -274,7 +274,28 @@ fn save_settings(settings: &NodeSettings) -> AppResult<()> {
     Ok(())
 }
 
-fn force_target(server: &str, balancer: &str, target: &str) -> AppResult<()> {
+fn force_target(target: &str) -> AppResult<()> {
+    let _update = crate::update_lock::FileLock::acquire(UPDATE_LOCK)?
+        .ok_or("Сейчас выполняется обновление подписок. Повторите переключение после его завершения.")?;
+    let configs = load_configs()?;
+    let server = find_api_server(&configs)?;
+    let balancer = find_active_balancer(&configs)?;
+
+    let exists = configs.iter().filter_map(|config| config.get("outbounds").and_then(Value::as_array))
+        .flatten().any(|outbound| outbound.get("tag").and_then(Value::as_str) == Some(target));
+    if !exists {
+        return Err("Выбранное подключение уже отсутствует в активной конфигурации. Обновите список и повторите выбор.".into());
+    }
+    let subscriptions = crate::subscriptions::load_subscriptions()?;
+    let blacklist = crate::blacklist::load()?;
+    for subscription in &subscriptions.subscriptions {
+        if let Some(original_tag) = target.strip_prefix(&subscription.prefix) {
+            if blacklist.is_blocked(&subscription.id, original_tag) {
+                return Err("Выбранное подключение находится в чёрном списке. Обновите список и выберите другое.".into());
+            }
+        }
+    }
+
     let process = current_xray_process()
         .ok_or("Не удалось определить работающий процесс Xray. Принудительное подключение не применено.")?;
     let settings = load_settings()?;
@@ -282,23 +303,23 @@ fn force_target(server: &str, balancer: &str, target: &str) -> AppResult<()> {
     let expires_at = settings.return_after_seconds
         .map(|seconds| now.saturating_add(seconds.min(i64::MAX as u64) as i64));
 
-    set_balancer_target(server, balancer, Some(target))?;
+    set_balancer_target(&server, &balancer, Some(target))?;
 
     let state = ForcedSelection {
-        api_server: server.to_owned(),
-        balancer_tag: balancer.to_owned(),
+        api_server: server.clone(),
+        balancer_tag: balancer.clone(),
         outbound_tag: target.to_owned(),
         selected_at: now,
         expires_at,
         process,
     };
     if let Err(error) = save_forced_selection(&state) {
-        let _ = set_balancer_target(server, balancer, None);
+        let _ = set_balancer_target(&server, &balancer, None);
         let _ = fs::remove_file(STATE_PATH);
         return Err(error);
     }
     if let Err(error) = crate::auto_update::refresh_cron() {
-        let _ = set_balancer_target(server, balancer, None);
+        let _ = set_balancer_target(&server, &balancer, None);
         let _ = fs::remove_file(STATE_PATH);
         return Err(error);
     }
@@ -357,12 +378,17 @@ pub(crate) fn tick() -> AppResult<()> {
 }
 
 pub(crate) fn reset_after_update() -> AppResult<()> {
-    let Some(state) = load_forced_selection()? else {
+    let Some(mut state) = load_forced_selection()? else {
         return Ok(());
     };
     if let Some(process) = current_xray_process() {
         if same_process(&state.process, &process) {
-            set_balancer_target(&state.api_server, &state.balancer_tag, None)?;
+            if let Err(error) = set_balancer_target(&state.api_server, &state.balancer_tag, None) {
+                // Keep the state and make the next cron tick retry immediately.
+                state.expires_at = Some(Local::now().timestamp());
+                save_forced_selection(&state)?;
+                return Err(error);
+            }
         }
     }
     remove_forced_selection()

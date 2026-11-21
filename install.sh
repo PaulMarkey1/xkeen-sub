@@ -148,8 +148,8 @@ chmod 755 "$TMP_BIN"
 
 "$TMP_BIN" --help >/dev/null 2>&1 || fail "Проверка запуска бинарного файла завершилась ошибкой. Текущая установка не заменена."
 
-# Inspect every JSON/JSONC file and create the Observatory placeholder only
-# after the prerequisite checks above have succeeded.
+# Review Xray balancers and Observatory settings before replacing the app.
+# Any accepted config changes are backed up and validated before being saved.
 "$TMP_BIN" install-check || fail "Проверка конфигурации Xray не пройдена. Установка xkeen-sub отменена."
 
 VERSION="$("$TMP_BIN" --version 2>/dev/null)" || VERSION=""

@@ -250,7 +250,7 @@ fn available_outbound_tags(configs: &[ConfigFile]) -> Vec<String> {
             if protected.contains(&protocol) || tag == "api" || tag == PROGRAM_BALANCER_TAG {
                 continue;
             }
-            if !tags.iter().any(|existing| existing == tag) {
+            if !tags.iter().any(|existing: &String| existing.as_str() == tag) {
                 tags.push(tag.to_owned());
             }
         }

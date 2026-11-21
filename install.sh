@@ -40,6 +40,10 @@ if [ ! -d "$XRAY_ASSET_DIR" ]; then
     fail "Каталог данных Xray не найден: $XRAY_ASSET_DIR"
 fi
 
+# Check and install missing Entware dependencies only after platform
+# prerequisites have been confirmed, and before downloading/replacing the app.
+ensure_required_packages
+
 # Entware architecture is preferred over uname -m because it reflects the ABI.
 ENTWARE_ARCH=""
 if command -v opkg >/dev/null 2>&1; then

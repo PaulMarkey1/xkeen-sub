@@ -58,7 +58,9 @@ ensure_required_packages() {
     package_installed ca-bundle || fail "Пакет ca-bundle не установлен."
     cron_ready || fail "Пакет cronie установлен не полностью: не найдены crontab, crond или сценарий запуска cron."
     command -v curl >/dev/null 2>&1 || fail "Пакет curl установлен, но команда curl недоступна."
-    curl --version >/dev/null 2>&1 || fail "curl установлен, но не запускается. Проверьте совместимость curl и libcurl в Entware."
+    if ! curl --version >/dev/null 2>&1; then
+        echo "Предупреждение: curl установлен, но не запускается. При загрузке будет предпринята попытка использовать wget."
+    fi
 }
 
 # Check prerequisites before downloading or replacing xkeen-sub.
@@ -130,12 +132,13 @@ TMP_FILE="$(mktemp)"
 TMP_BIN="/opt/sbin/.${BIN_NAME}.install.$$"
 trap 'rm -f "$TMP_FILE" "$TMP_BIN"' EXIT HUP INT TERM
 
-if command -v curl >/dev/null 2>&1; then
-    curl -fL "$URL" -o "$TMP_FILE" || fail "Не удалось скачать бинарный файл."
+if command -v curl >/dev/null 2>&1 && curl -fL "$URL" -o "$TMP_FILE"; then
+    :
 elif command -v wget >/dev/null 2>&1; then
-    wget -O "$TMP_FILE" "$URL" || fail "Не удалось скачать бинарный файл."
+    echo "curl не сработал, пробуем wget..."
+    wget -O "$TMP_FILE" "$URL" || fail "Не удалось скачать бинарный файл через curl и wget."
 else
-    fail "Для загрузки нужен curl или wget."
+    fail "Не удалось скачать бинарный файл через curl; wget недоступен."
 fi
 
 [ -s "$TMP_FILE" ] || fail "Загруженный файл пуст."

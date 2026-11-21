@@ -18,7 +18,7 @@ pub fn run() -> AppResult<()> {
     let balancer = find_active_balancer(&configs)?;
     let tag = query_balancer(&server, &balancer)?;
 
-    title("ТЕКУЩЕЕ ПОДКЛЮЧЕНИЕ");
+    title("ТЕКУЩИЙ УЗЕЛ");
     info(&format!("Тэг: {tag}"));
     Ok(())
 }

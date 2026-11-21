@@ -147,7 +147,7 @@ pub fn run_install_config_check() -> AppResult<()> {
                 for (index, key) in &observatory_locations {
                     let root = configs[*index].document.as_object_mut()
                         .ok_or("Корень конфигурации должен быть объектом.")?;
-                    root.insert(key.clone(), observatory_template());
+                    root.insert(key.to_owned(), observatory_template());
                     changed.insert(*index);
                 }
                 success("Настройки Observatory заменены стандартным шаблоном.");

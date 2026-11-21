@@ -50,7 +50,7 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
         Ok(backup) => backup,
         Err(error) => {
             if automatic {
-                if let Err(log_error) = crate::auto_update::log_event(&format!("Ошибка создания резервной копии: {error}")) {
+                if let Err(log_error) = crate::auto_update::log_event(&format!("ИТОГ: запуск не выполнен — ошибка создания резервной записи: {error}")) {
                     eprintln!("xkeen-sub auto-update: не удалось записать журнал: {log_error}");
                 }
             }
@@ -62,7 +62,8 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
     }
     backup.event("UPDATE", "Загрузка и анализ подписок.")?;
 
-    let result = run_inner(target_id, &mut backup);
+    let mut summary_logged = false;
+    let result = run_inner(target_id, &mut backup, automatic, &mut summary_logged);
     if let Err(ref error) = result {
         if backup.is_running() {
             backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {error}"), true);
@@ -75,6 +76,15 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
         );
     }
 
+    if automatic && result.is_err() && !summary_logged {
+        if let Err(log_error) = crate::auto_update::log_event(&format!(
+            "ИТОГ: обновление не выполнено: {}",
+            result.as_ref().err().map(ToString::to_string).unwrap_or_else(|| "неизвестная ошибка".to_owned())
+        )) {
+            eprintln!("xkeen-sub auto-update: не удалось записать журнал: {log_error}");
+        }
+    }
+
     let status = backup.outcome_status().to_owned();
     let summary = backup.outcome_summary().to_owned();
     let backup_id = backup.id().to_owned();
@@ -82,7 +92,8 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
 
     let mut discarded = false;
     let mut verification_error = None;
-    if automatic && log_result.is_ok() {
+    let discardable_outcome = is_discardable_auto_update_outcome(&status);
+    if automatic && log_result.is_ok() && discardable_outcome {
         match backup.discard_if_unchanged() {
             Ok(unchanged) => discarded = unchanged,
             Err(error) => verification_error = Some(error.to_string()),
@@ -121,7 +132,12 @@ fn run_with_origin(target_id: Option<&str>, automatic: bool) -> AppResult<()> {
     result
 }
 
-fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<()> {
+fn run_inner(
+    target_id: Option<&str>,
+    backup: &mut BackupSession,
+    automatic: bool,
+    summary_logged: &mut bool,
+) -> AppResult<()> {
     println!();
     title("XKEEN-SUB — ОБНОВЛЕНИЕ ПОДПИСОК");
     warning("Перед применением будет создана проверенная резервная копия; при сбое предусмотрен откат.");
@@ -131,6 +147,9 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
     backup.event("UPDATE", &format!("Загружен список подписок: {}.", store.subscriptions.len()))?;
     if store.subscriptions.is_empty() {
         info("Подписок пока нет. Добавьте подписку, чтобы запустить обновление.");
+        if automatic {
+            log_auto_update_summary(&[], &Default::default(), backup, true, summary_logged);
+        }
         return Ok(());
     }
 
@@ -161,6 +180,9 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         print_subscription_summary(&state);
         backup.event("ERROR", "Не удалось загрузить ни одну подписку; применение заблокировано.")?;
         backup.set_outcome("ОШИБКА ЗАГРУЗКИ", "Ни одна подписка не была успешно загружена.", true);
+        if automatic {
+            log_auto_update_summary(&selected, &state, backup, false, summary_logged);
+        }
         warning("Обновление остановлено. Файлы роутера не менялись.");
         return Ok(());
     }
@@ -169,16 +191,125 @@ fn run_inner(target_id: Option<&str>, backup: &mut BackupSession) -> AppResult<(
         print_baseline_plan(&state);
         backup.event("ERROR", "Ни одна подписка не прошла обработку; дальнейшая подготовка прекращена.")?;
         backup.set_outcome("ОШИБКА ОБРАБОТКИ", "Ни одна подписка не прошла обработку.", true);
+        if automatic {
+            log_auto_update_summary(&selected, &state, backup, false, summary_logged);
+        }
         warning("Не удалось обработать ни одну подписку. Конфигурация роутера осталась без изменений.");
         return Ok(());
     }
 
-    if state.prepared.is_empty() {
-        return apply_baseline_only(&state, backup);
+    let result = if state.prepared.is_empty() {
+        apply_baseline_only(&state, backup)
+    } else {
+        update_configuration(&store.subscriptions, &state, backup)
+    };
+
+    if let Err(failure) = &result {
+        if backup.is_running() {
+            backup.set_outcome("ОШИБКА", &format!("Выполнение update прервано: {failure}"), true);
+        }
     }
 
-    update_configuration(&store.subscriptions, &state, backup)
+    if automatic {
+        let applied = result.is_ok() && matches!(
+            backup.outcome_status(),
+            "УСПЕШНО" | "БЕЗ ИЗМЕНЕНИЙ" | "BASELINE ОБНОВЛЁН"
+        );
+        log_auto_update_summary(&selected, &state, backup, applied, summary_logged);
+    }
+    result
+}
 
+fn log_auto_update_summary(
+    selected: &[&Subscription],
+    state: &crate::update_state::RunState,
+    backup: &BackupSession,
+    applied: bool,
+    summary_logged: &mut bool,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    let failed: HashMap<&str, &str> = state.failed.iter()
+        .map(|(id, message)| (id.as_str(), message.as_str()))
+        .collect();
+    let changed: HashSet<&str> = state.prepared.iter()
+        .map(|item| item.id.as_str())
+        .chain(state.baseline_updates.iter().map(|item| item.id.as_str()))
+        .collect();
+
+    let mut updated_count = 0usize;
+    let mut unchanged_count = 0usize;
+    let mut failed_count = 0usize;
+
+    if selected.is_empty() {
+        write_auto_update_log("ИТОГ: подписок нет; обновление не выполнялось.");
+        *summary_logged = true;
+        return;
+    }
+
+    for subscription in selected {
+        let label = match subscription.name.as_deref().filter(|name| !name.trim().is_empty()) {
+            Some(name) => format!("{} ({name})", subscription.id),
+            None => subscription.id.clone(),
+        };
+        let outcome = if let Some(message) = failed.get(subscription.id.as_str()) {
+            failed_count += 1;
+            format!("{label} — не обновлена: {message}.")
+        } else if changed.contains(subscription.id.as_str()) && applied {
+            updated_count += 1;
+            if state.prepared.iter().any(|item| item.id == subscription.id) {
+                format!("{label} — обновлена.")
+            } else {
+                format!("{label} — обновлена; изменился только baseline, подключения прежние.")
+            }
+        } else if changed.contains(subscription.id.as_str()) {
+            failed_count += 1;
+            format!("{label} — не обновлена: {}.", backup.outcome_summary())
+        } else {
+            unchanged_count += 1;
+            format!("{label} — без изменений.")
+        };
+        write_auto_update_log(&format!("ИТОГ: {outcome}"));
+    }
+
+    write_auto_update_log(&format!(
+        "ИТОГ: результат — обновлено {updated_count}, без изменений {unchanged_count}, ошибок {failed_count} из {}.",
+        selected.len()
+    ));
+    *summary_logged = true;
+}
+
+fn write_auto_update_log(message: &str) {
+    if let Err(error) = crate::auto_update::log_event(message) {
+        eprintln!("xkeen-sub auto-update: не удалось записать журнал: {error}");
+    }
+}
+
+fn is_discardable_auto_update_outcome(status: &str) -> bool {
+    matches!(
+        status,
+        "ЗАВЕРШЕНО" | "УСПЕШНО" | "БЕЗ ИЗМЕНЕНИЙ" | "BASELINE ОБНОВЛЁН"
+    )
+}
+
+#[cfg(test)]
+mod auto_update_backup_tests {
+    use super::is_discardable_auto_update_outcome;
+
+    #[test]
+    fn successful_unchanged_auto_updates_can_discard_their_backup() {
+        assert!(is_discardable_auto_update_outcome("УСПЕШНО"));
+        assert!(is_discardable_auto_update_outcome("БЕЗ ИЗМЕНЕНИЙ"));
+        assert!(is_discardable_auto_update_outcome("BASELINE ОБНОВЛЁН"));
+    }
+
+    #[test]
+    fn failed_auto_updates_keep_their_detailed_backup_log() {
+        assert!(!is_discardable_auto_update_outcome("ОШИБКА ЗАГРУЗКИ"));
+        assert!(!is_discardable_auto_update_outcome("ОШИБКА ОБРАБОТКИ"));
+        assert!(!is_discardable_auto_update_outcome("ЗАБЛОКИРОВАНО"));
+        assert!(!is_discardable_auto_update_outcome("ОШИБКА ПРИМЕНЕНИЯ"));
+    }
 }
 
 fn format_elapsed(duration: Duration) -> String {

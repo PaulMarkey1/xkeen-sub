@@ -68,12 +68,26 @@ pub fn run_menu() -> AppResult<()> {
     }
 }
 
+fn is_summary_log_entry(message: &str) -> bool {
+    message.trim_start().starts_with("ИТОГ:")
+}
+
 pub(crate) fn log_event(message: &str) -> AppResult<()> {
+    // BackupSession sends every technical event through this hook. Keep those
+    // details exclusively in backup/.../log.txt; the bounded auto-update log
+    // is reserved for concise subscription outcomes.
+    if !is_summary_log_entry(message) {
+        return Ok(());
+    }
+
     fs::create_dir_all("/opt/etc/xkeen-sub")?;
     let message = message.replace('\r', " ").replace('\n', " ");
     let line = format!("[{}] {}\n", Local::now().format("%Y-%m-%d %H:%M:%S"), message.trim());
     let mut lines: Vec<String> = match fs::read_to_string(LOG) {
-        Ok(content) => content.lines().map(str::to_owned).collect(),
+        Ok(content) => content.lines()
+            .filter(|entry| entry.contains("] ИТОГ:"))
+            .map(str::to_owned)
+            .collect(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
@@ -485,6 +499,27 @@ mod tests {
         let dt = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
         resolve_local(dt).unwrap().timestamp()
     }
+    #[test]
+    fn auto_update_log_accepts_only_summary_entries() {
+        assert!(is_summary_log_entry("ИТОГ: sub1 — обновлена."));
+        assert!(is_summary_log_entry("  ИТОГ: sub2 — ошибка загрузки."));
+        assert!(!is_summary_log_entry("DOWNLOAD: sub1: получено 123 байт."));
+        assert!(!is_summary_log_entry("Запуск: все подписки."));
+    }
+
+    #[test]
+    fn auto_update_log_keeps_only_existing_summary_entries() {
+        let entries = [
+            "[2026-11-21 10:00:00] DOWNLOAD: raw details",
+            "[2026-11-21 10:01:00] ИТОГ: sub1 — обновлена.",
+        ];
+        let retained: Vec<&str> = entries.into_iter()
+            .filter(|line| line.contains("] ИТОГ:"))
+            .collect();
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].contains("sub1 — обновлена"));
+    }
+
     #[test]
     fn auto_update_log_keeps_only_the_latest_100_lines() {
         let mut lines: Vec<String> = (1..=101).map(|n| n.to_string()).collect();

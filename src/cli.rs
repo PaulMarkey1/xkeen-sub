@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{auto_update, backup, install_config, maintenance, setup, update};
+use crate::{auto_update, backup, current_connection, install_config, maintenance, setup, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -22,6 +22,7 @@ pub fn run() -> AppResult<()> {
     match args.as_slice() {
         [root, subcommand] if root == "setup" && subcommand == "help" => print_setup_help(),
         [root] if root == "backup" => backup::run(),
+        [action] if action == "node" => current_connection::run(),
         [root, rest @ ..] if root == "backup" => backup::run_command(rest),
         [root] if root == "setup" => setup::run_menu(),
         [root] if root == "auto-update" => auto_update::run_menu(),
@@ -69,6 +70,7 @@ fn print_help() -> AppResult<()> {
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");
     command_item("auto-update", "Настроить автоматическое обновление подписок");
+    command_item("node", "Показать тэг выбранного узла");
     println!();
     command_item("uxs", "Обновить программу");
     command_item("reinstall", "Установить выбранную версию программы");
@@ -80,11 +82,12 @@ fn print_setup_help() -> AppResult<()> {
     title("XKEEN-SUB — настройка подписок");
     println!();
     separator("Использование:");
-    command_item("xkeen-sub setup", "Открыть меню настройки (чёрный список — отдельный пункт 6)");
+    command_item("xkeen-sub setup", "Открыть меню настройки (чёрный список — пункт 6, текущий узел — пункт 7)");
     command_item("xkeen-sub setup add", "Добавить подписку");
     command_item("xkeen-sub setup list", "Просмотреть подписки");
     command_item("xkeen-sub setup del", "Удалить подписку");
     command_item("xkeen-sub setup edit", "Редактировать подписку");
     command_item("auto-update", "Настройка автообновления подписок");
+    command_item("current", "Показать тэг текущего подключения");
     Ok(())
 }

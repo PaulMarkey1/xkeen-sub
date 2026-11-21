@@ -509,8 +509,13 @@ mod tests {
 
     #[test]
     fn auto_update_log_keeps_only_existing_summary_entries() {
-        let content = "[2026-11-21 10:00:00] DOWNLOAD: raw details\\n[2026-11-21 10:01:00] ИТОГ: sub1 — обновлена.\\n";
-        let retained: Vec<&str> = content.lines().filter(|line| line.contains("] ИТОГ:")).collect();
+        let entries = [
+            "[2026-11-21 10:00:00] DOWNLOAD: raw details",
+            "[2026-11-21 10:01:00] ИТОГ: sub1 — обновлена.",
+        ];
+        let retained: Vec<&str> = entries.into_iter()
+            .filter(|line| line.contains("] ИТОГ:"))
+            .collect();
         assert_eq!(retained.len(), 1);
         assert!(retained[0].contains("sub1 — обновлена"));
     }

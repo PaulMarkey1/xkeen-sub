@@ -150,7 +150,7 @@ chmod 755 "$TMP_BIN"
 
 # Inspect every JSON/JSONC file and create the Observatory placeholder only
 # after the prerequisite checks above have succeeded.
-"$TMP_BIN" install-check || fail "Проверка конфигурации Observatory не пройдена. Установка xkeen-sub отменена."
+"$TMP_BIN" install-check || fail "Проверка конфигурации Xray не пройдена. Установка xkeen-sub отменена."
 
 VERSION="$("$TMP_BIN" --version 2>/dev/null)" || VERSION=""
 case "$VERSION" in

@@ -221,7 +221,7 @@ fn sync_cron(enabled: bool) -> AppResult<()> {
     };
     let mut lines: Vec<String> = current.lines().filter(|line| !line.contains(MARKER)).map(str::to_owned).collect();
     if enabled {
-        ensure_crond()?;
+        ensure_cron()?;
         lines.push(CRON.to_owned());
     }
     let temp = format!("/opt/etc/xkeen-sub/crontab.tmp.{}", std::process::id());
@@ -237,16 +237,18 @@ fn sync_cron(enabled: bool) -> AppResult<()> {
     Ok(())
 }
 
-fn ensure_crond() -> AppResult<()> {
-    if !crate::system::command_exists("crond") {
-        return Err("Не найден crond. Установите cron (например, пакет cronie) в Entware.".into());
+fn ensure_cron() -> AppResult<()> {
+    if !crate::system::command_exists("cron") && !crate::system::command_exists("crond") {
+        return Err("Не найден демон cron. Установите пакет cron в Entware.".into());
     }
     if cron_running() { return Ok(()); }
     let mut scripts = Vec::new();
     if let Ok(entries) = fs::read_dir("/opt/etc/init.d") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name.starts_with("s10") && name.contains("cron") { scripts.push(entry.path()); }
+            if name.starts_with("s10") && name.contains("cron") && entry.path().is_file() {
+                scripts.push(entry.path());
+            }
         }
     }
     scripts.sort();
@@ -255,11 +257,14 @@ fn ensure_crond() -> AppResult<()> {
     if !status.success() || !cron_running() { return Err("Не удалось запустить службу cron.".into()); }
     Ok(())
 }
+fn is_cron_process_name(name: &str) -> bool {
+    matches!(name.trim(), "cron" | "crond")
+}
 fn cron_running() -> bool {
     fs::read_dir("/proc").ok().into_iter().flatten().flatten().any(|entry| {
         let pid = entry.file_name();
         let Some(pid) = pid.to_str().filter(|s| s.chars().all(|c| c.is_ascii_digit())) else { return false };
-        matches!(fs::read_to_string(format!("/proc/{pid}/comm")), Ok(s) if s.trim() == "crond")
+        matches!(fs::read_to_string(format!("/proc/{pid}/comm")), Ok(s) if is_cron_process_name(&s))
     })
 }
 
@@ -563,6 +568,14 @@ mod tests {
         let dt = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
         resolve_local(dt).unwrap().timestamp()
     }
+    #[test]
+    fn recognizes_both_entware_cron_daemon_names() {
+        assert!(is_cron_process_name("cron"));
+        assert!(is_cron_process_name("crond"));
+        assert!(!is_cron_process_name("cron-helper"));
+        assert!(!is_cron_process_name("xray"));
+    }
+
     #[test]
     fn auto_update_log_accepts_only_summary_entries() {
         assert!(is_summary_log_entry("ИТОГ: sub1 — обновлена."));

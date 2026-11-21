@@ -329,7 +329,8 @@ fn toggle_job() -> AppResult<()> {
 fn delete_job() -> AppResult<()> {
     let config = load()?;
     let Some(i) = choose_job(&config)? else { return Ok(()) };
-    let selected_id = config.jobs[i].id;
+    let selected_job = config.jobs[i].clone();
+    let selected_id = selected_job.id;
 
     // tick identifies due schedules by ID. Lock only after the user chooses,
     // then reload to avoid deleting a different job after a concurrent update.
@@ -345,6 +346,10 @@ fn delete_job() -> AppResult<()> {
         warning("Это расписание уже изменилось. Откройте список ещё раз.");
         return Ok(());
     };
+    if latest.jobs[index] != selected_job {
+        warning("Параметры расписания изменились. Откройте список ещё раз и повторите удаление.");
+        return Ok(());
+    }
     latest.jobs.remove(index);
     normalize_job_ids(&mut latest);
     save(&latest)?;

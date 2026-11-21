@@ -4,7 +4,7 @@ use crate::subscription_download::download_subscription;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::Subscription;
 use crate::terminal::{error, info, success, title, warning};
-use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState};
+use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState, SubscriptionChanges};
 use crate::update_report::{print_comparison, show_value};
 
 use serde_json::Value;
@@ -175,6 +175,14 @@ pub(crate) fn prepare_subscription(
     report.unrecognized_current += current.unrecognized;
     if let Some(previous) = &previous_parsed {
         report.unrecognized_previous += previous.unrecognized;
+    }
+    if !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty() {
+        state.subscription_changes.push(SubscriptionChanges {
+            id: subscription.id.clone(),
+            added: report.added.iter().map(|item| item.tag.clone()).collect(),
+            removed: report.removed.iter().map(|item| item.tag.clone()).collect(),
+            changed: report.changed.iter().map(|item| item.tag.clone()).collect(),
+        });
     }
     print_comparison(&report);
     backup.event(

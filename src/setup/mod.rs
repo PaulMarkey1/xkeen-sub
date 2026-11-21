@@ -33,7 +33,7 @@ pub fn run_menu() -> AppResult<()> {
                 }
             }
             "5" => crate::auto_update::run_menu()?,
-            "6" => crate::blacklist::run_menu()?,
+            "6" => { if crate::blacklist::run_menu()? { return Ok(()); } },
             "0" => return Ok(()),
             _ => error("Неизвестный пункт меню. Введите цифру от 0 до 6."),
         }

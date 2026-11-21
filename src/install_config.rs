@@ -36,6 +36,19 @@ pub fn run_install_config_check() -> AppResult<()> {
 
     let mut changed = HashSet::<usize>::new();
 
+    for config in &configs {
+        if let Some(routing_value) = config.document.get("routing") {
+            let routing = routing_value.as_object()
+                .ok_or_else(|| format!("Поле routing в {} должно быть объектом.", config.name))?;
+            if let Some(balancers) = routing.get("balancers") {
+                if !balancers.is_array() {
+                    return Err(format!("Поле routing.balancers в {} должно быть массивом.", config.name).into());
+                }
+            }
+        }
+
+    }
+
     // Offer to replace user-defined balancers only when a non-empty list exists
     // and does not already contain the xkeen-sub balancer.
     let candidates: Vec<usize> = configs.iter().enumerate().filter_map(|(index, config)| {

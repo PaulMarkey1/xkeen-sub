@@ -267,23 +267,43 @@ fn list_jobs() -> AppResult<()> {
     let config = load()?;
     title("РАСПИСАНИЯ АВТООБНОВЛЕНИЯ");
     if config.jobs.is_empty() { info("Расписаний пока нет."); return Ok(()); }
+    let subscriptions = crate::subscriptions::load_subscriptions()?;
     for job in &config.jobs {
-        let target = match &job.target { Target::All => "все подписки".to_owned(), Target::Subscription(id) => id.clone() };
-        info(&format!("№{} — {}; {}", job.id, if job.enabled { "включено" } else { "выключено" }, target));
-        info(&format!("  {}; следующий запуск: {}", describe(&job.schedule), show_time(job.next_run)?));
+        info(&format!("№{} — {}", job.id, target_label(&job.target, &subscriptions.subscriptions)));
+        info(&format!("  {}; {}; следующий запуск: {}",
+            describe(&job.schedule),
+            if job.enabled { "включено" } else { "выключено" },
+            show_time(job.next_run)?));
     }
     Ok(())
 }
+
+fn target_label(target: &Target, subscriptions: &[crate::subscriptions::Subscription]) -> String {
+    match target {
+        Target::All => "все подписки".to_owned(),
+        Target::Subscription(id) => match subscriptions.iter().find(|sub| sub.id == *id) {
+            Some(sub) => format!("{} ({})", id, sub.name.as_deref().unwrap_or("без имени")),
+            None => format!("{} (подписка не найдена)", id),
+        },
+    }
+}
+
+fn normalize_job_ids(config: &mut Config) {
+    for (index, job) in config.jobs.iter_mut().enumerate() {
+        job.id = index as u64 + 1;
+    }
+    config.next_id = config.jobs.len() as u64 + 1;
+}
 fn add_job() -> AppResult<()> {
     let mut config = load()?;
+    normalize_job_ids(&mut config);
     let target = choose_target()?;
     let (schedule, next_run) = read_schedule()?;
-    let max_id = config.jobs.iter().map(|job| job.id).max().unwrap_or(0).max(config.next_id.saturating_sub(1));
-    let id = max_id.checked_add(1).ok_or("Исчерпаны номера расписаний.")?;
+    let id = config.next_id;
     config.next_id = id.checked_add(1).ok_or("Исчерпаны номера расписаний.")?;
     config.jobs.push(Job { id, enabled: true, target, schedule, next_run });
     save(&config)?;
-    success("Расписание добавлено и включено.");
+    success(&format!("Расписание №{id} добавлено и включено."));
     Ok(())
 }
 fn edit_job() -> AppResult<()> {
@@ -307,25 +327,60 @@ fn toggle_job() -> AppResult<()> {
     Ok(())
 }
 fn delete_job() -> AppResult<()> {
-    let mut config = load()?;
+    let config = load()?;
     let Some(i) = choose_job(&config)? else { return Ok(()) };
-    config.jobs.remove(i);
-    save(&config)?;
-    success("Расписание удалено.");
+    let selected_job = config.jobs[i].clone();
+    let selected_id = selected_job.id;
+
+    // tick identifies due schedules by ID. Lock only after the user chooses,
+    // then reload to avoid deleting a different job after a concurrent update.
+    let _tick = match crate::update_lock::FileLock::acquire("/opt/var/run/xkeen-sub-auto-update-tick.lock")? {
+        Some(lock) => lock,
+        None => {
+            warning("Сейчас выполняется обновление по расписанию. Повторите удаление чуть позже.");
+            return Ok(());
+        }
+    };
+    let mut latest = load()?;
+    let Some(index) = latest.jobs.iter().position(|job| job.id == selected_id) else {
+        warning("Это расписание уже изменилось. Откройте список ещё раз.");
+        return Ok(());
+    };
+    if latest.jobs[index] != selected_job {
+        warning("Параметры расписания изменились. Откройте список ещё раз и повторите удаление.");
+        return Ok(());
+    }
+    latest.jobs.remove(index);
+    normalize_job_ids(&mut latest);
+    save(&latest)?;
+    success(&format!("Расписание №{selected_id} удалено. Оставшиеся расписания перенумерованы."));
     Ok(())
 }
 fn choose_job(config: &Config) -> AppResult<Option<usize>> {
     if config.jobs.is_empty() { info("Расписаний пока нет."); return Ok(None); }
+    let subscriptions = crate::subscriptions::load_subscriptions()?;
     loop {
+        title("ВЫБОР РАСПИСАНИЯ");
         for (i, job) in config.jobs.iter().enumerate() {
-            let target = match &job.target { Target::All => "все подписки".to_owned(), Target::Subscription(id) => id.clone() };
-            menu_item(&(i + 1).to_string(), &format!("№{} — {}", job.id, target));
+            menu_item(&(i + 1).to_string(), &format!("№{} — {}", job.id, target_label(&job.target, &subscriptions.subscriptions)));
+            info(&format!("  {}; {}; запуск: {}",
+                describe(&job.schedule),
+                if job.enabled { "включено" } else { "выключено" },
+                show_time(job.next_run)?));
         }
         menu_item("0", "Назад");
-        let value = read_input("Выберите расписание: ")?;
+        let value = read_input("Выберите расписание по номеру в списке: ")?;
         if value == "0" { return Ok(None); }
         match value.parse::<usize>() {
-            Ok(n) if n > 0 && n <= config.jobs.len() => return Ok(Some(n - 1)),
+            Ok(n) if n > 0 && n <= config.jobs.len() => {
+                let job = &config.jobs[n - 1];
+                title(&format!("РАСПИСАНИЕ №{}", job.id));
+                info(&format!("Обновление: {}", target_label(&job.target, &subscriptions.subscriptions)));
+                info(&format!("Периодичность: {}", describe(&job.schedule)));
+                info(&format!("Состояние: {}", if job.enabled { "включено" } else { "выключено" }));
+                info(&format!("Следующий запуск: {}", show_time(job.next_run)?));
+                return Ok(Some(n - 1));
+            }
             _ => error("Расписания с таким номером нет. Попробуйте ещё раз."),
         }
     }
@@ -473,7 +528,16 @@ fn show_time(ts: i64) -> AppResult<String> { Ok(local_time(ts)?.format("%Y-%m-%d
 fn describe(s: &Schedule) -> String {
     match s {
         Schedule::Daily { time } => format!("ежедневно в {time}"),
-        Schedule::Interval { seconds } => format!("каждые {} дн. {} ч. {} мин.", seconds / 86400, seconds % 86400 / 3600, seconds % 3600 / 60),
+        Schedule::Interval { seconds } => {
+            let days = seconds / 86400;
+            let hours = seconds % 86400 / 3600;
+            let minutes = seconds % 3600 / 60;
+            let mut parts = Vec::new();
+            if days > 0 { parts.push(format!("{days} дн.")); }
+            if hours > 0 { parts.push(format!("{hours} ч.")); }
+            if minutes > 0 || parts.is_empty() { parts.push(format!("{minutes} мин.")); }
+            format!("каждые {}", parts.join(" "))
+        },
         Schedule::Calendar { days, hours, minutes, time } => format!("каждые {days} календарных дн., +{hours} ч. {minutes} мин., от {time}"),
     }
 }
@@ -534,6 +598,36 @@ mod tests {
         let mut lines = vec!["first".to_owned(), "second".to_owned()];
         trim_log_lines(&mut lines);
         assert_eq!(lines, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn deleting_schedule_compacts_ids_and_resets_next_id() {
+        let mut config = Config {
+            jobs: vec![
+                Job { id: 4, enabled: true, target: Target::All, schedule: Schedule::Daily { time: "06:00".into() }, next_run: 100 },
+                Job { id: 9, enabled: false, target: Target::All, schedule: Schedule::Daily { time: "12:00".into() }, next_run: 200 },
+                Job { id: 300, enabled: true, target: Target::All, schedule: Schedule::Daily { time: "18:00".into() }, next_run: 300 },
+            ],
+            next_id: 301,
+        };
+        config.jobs.remove(1);
+        normalize_job_ids(&mut config);
+        assert_eq!(config.jobs.iter().map(|job| job.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(config.next_id, 3);
+        assert_eq!(config.jobs.iter().map(|job| job.next_run).collect::<Vec<_>>(), vec![100, 300]);
+    }
+
+    #[test]
+    fn adding_after_compaction_uses_the_next_sequential_id() {
+        let mut config = Config {
+            jobs: vec![Job { id: 87, enabled: true, target: Target::All, schedule: Schedule::Daily { time: "06:00".into() }, next_run: 100 }],
+            next_id: 88,
+        };
+        normalize_job_ids(&mut config);
+        let new_id = config.next_id;
+        config.next_id += 1;
+        assert_eq!(new_id, 2);
+        assert_eq!(config.next_id, 3);
     }
 
     #[test]

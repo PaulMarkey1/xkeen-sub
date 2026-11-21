@@ -129,6 +129,10 @@ pub fn tick() -> AppResult<()> {
         Some(lock) => lock,
         None => return Ok(()),
     };
+    // The same minute cron also handles the expiry and restart detection
+    // of a manually selected Xray node, even when no update schedule is enabled.
+    crate::current_connection::tick()?;
+
     let initial = load()?;
     let due: Vec<u64> = initial.jobs.iter()
         .filter(|job| job.enabled && job.next_run <= Local::now().timestamp())
@@ -204,7 +208,15 @@ fn save(config: &Config) -> AppResult<()> {
     sync_cron(config.jobs.iter().any(|job| job.enabled))
 }
 
+pub(crate) fn refresh_cron() -> AppResult<()> {
+    let config = load()?;
+    sync_cron(config.jobs.iter().any(|job| job.enabled))
+}
+
 fn sync_cron(enabled: bool) -> AppResult<()> {
+    // Keep the existing single cron entry while either scheduled updates or
+    // a temporary manual node selection needs periodic processing.
+    let enabled = enabled || crate::current_connection::has_pending_selection();
     if !crate::system::command_exists("crontab") {
         if enabled { return Err("Не найдена команда crontab. Установите cron в Entware.".into()); }
         return Ok(());

@@ -61,11 +61,14 @@ pub fn run_install_config_check() -> AppResult<()> {
             info(&format!("  {}: {}", configs[*index].name, if tags.is_empty() { "без Tag".to_owned() } else { tags }));
         }
         warning("Замена удалит перечисленные балансировщики и оставит только xkeen-sub-balancer.");
-        if confirm("Заменить пользовательские балансировщики? (1 — да, 2 — нет): ")? {
+        let selectors = available_outbound_tags(&configs);
+        if selectors.is_empty() {
+            warning("Не найдено ни одного подходящего исходящего подключения. Замена балансировщиков пропущена, чтобы не создавать пустой selector.");
+        } else if confirm("Заменить пользовательские балансировщики? (1 — да, 2 — нет): ")? {
             for index in &candidates {
                 let routing = configs[*index].document["routing"].as_object_mut()
                     .ok_or("Поле routing должно быть объектом.")?;
-                routing.insert("balancers".to_owned(), Value::Array(vec![program_balancer()]));
+                routing.insert("balancers".to_owned(), Value::Array(vec![program_balancer(&selectors)]));
                 changed.insert(*index);
             }
 

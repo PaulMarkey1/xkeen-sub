@@ -4,7 +4,6 @@ mod backup;
 mod blacklist;
 mod balancer;
 mod cli;
-mod install;
 mod install_config;
 mod maintenance;
 mod observatory;

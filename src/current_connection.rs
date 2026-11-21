@@ -119,17 +119,20 @@ fn find_active_balancer(configs: &[Value]) -> AppResult<String> {
     }
 
     let active = referenced.intersection(&configured).cloned().collect::<Vec<_>>();
-    match active.as_slice() {
-        [tag] => Ok(tag.clone()),
-        [] => match configured.iter().collect::<Vec<_>>().as_slice() {
-            [tag] => Ok((*tag).clone()),
-            [] => Err("В конфигурации Xray не найден ни один балансировщик.".into()),
-            _ => Err("Не удалось однозначно определить балансировщик: ни один из настроенных балансировщиков не указан в routing.rules.".into()),
-        },
-        tags => Err(format!(
+    if active.len() == 1 {
+        return Ok(active[0].clone());
+    }
+    if active.len() > 1 {
+        return Err(format!(
             "В routing.rules используются несколько балансировщиков ({}). Нельзя определить один текущий тэг без контекста конкретного запроса.",
-            tags.join(", ")
-        ).into()),
+            active.join(", ")
+        ).into());
+    }
+
+    match configured.len() {
+        0 => Err("В конфигурации Xray не найден ни один балансировщик.".into()),
+        1 => Ok(configured.iter().next().expect("one configured balancer").clone()),
+        _ => Err("Не удалось однозначно определить балансировщик: ни один из настроенных балансировщиков не указан в routing.rules.".into()),
     }
 }
 

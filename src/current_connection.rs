@@ -42,6 +42,7 @@ struct ProcessIdentity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ForcedSelection {
+    api_server: String,
     balancer_tag: String,
     outbound_tag: String,
     selected_at: i64,
@@ -284,6 +285,7 @@ fn force_target(server: &str, balancer: &str, target: &str) -> AppResult<()> {
     set_balancer_target(server, balancer, Some(target))?;
 
     let state = ForcedSelection {
+        api_server: server.to_owned(),
         balancer_tag: balancer.to_owned(),
         outbound_tag: target.to_owned(),
         selected_at: now,
@@ -292,6 +294,7 @@ fn force_target(server: &str, balancer: &str, target: &str) -> AppResult<()> {
     };
     if let Err(error) = save_forced_selection(&state) {
         let _ = set_balancer_target(server, balancer, None);
+        let _ = fs::remove_file(STATE_PATH);
         return Err(error);
     }
     if let Err(error) = crate::auto_update::refresh_cron() {
@@ -347,9 +350,7 @@ pub(crate) fn tick() -> AppResult<()> {
     }
 
     if state.expires_at.map(|expires| expires <= Local::now().timestamp()).unwrap_or(false) {
-        let configs = load_configs()?;
-        let server = find_api_server(&configs)?;
-        set_balancer_target(&server, &state.balancer_tag, None)?;
+        set_balancer_target(&state.api_server, &state.balancer_tag, None)?;
         remove_forced_selection()?;
     }
     Ok(())
@@ -361,9 +362,7 @@ pub(crate) fn reset_after_update() -> AppResult<()> {
     };
     if let Some(process) = current_xray_process() {
         if same_process(&state.process, &process) {
-            let configs = load_configs()?;
-            let server = find_api_server(&configs)?;
-            set_balancer_target(&server, &state.balancer_tag, None)?;
+            set_balancer_target(&state.api_server, &state.balancer_tag, None)?;
         }
     }
     remove_forced_selection()
@@ -407,18 +406,28 @@ fn current_xray_process() -> Option<ProcessIdentity> {
     let mut entries = fs::read_dir("/proc").ok()?.filter_map(Result::ok).collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        let pid = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
+        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
         let process_dir = entry.path();
-        if fs::read_to_string(process_dir.join("comm")).ok()?.trim() != "xray" {
+        if !matches!(fs::read_to_string(process_dir.join("comm")), Ok(name) if name.trim() == "xray") {
             continue;
         }
-        let cmdline = fs::read(process_dir.join("cmdline")).ok()?;
+        let Ok(cmdline) = fs::read(process_dir.join("cmdline")) else {
+            continue;
+        };
         if !is_xray_proxy_cmdline(&cmdline) {
             continue;
         }
-        let stat = fs::read_to_string(process_dir.join("stat")).ok()?;
-        let (_, fields) = stat.rsplit_once(')')?;
-        let start_ticks = fields.split_whitespace().nth(19)?.parse::<u64>().ok()?;
+        let Ok(stat) = fs::read_to_string(process_dir.join("stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let Some(start_ticks) = fields.split_whitespace().nth(19).and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
         let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
             .unwrap_or_default().trim().to_owned();
         return Some(ProcessIdentity { pid, start_ticks, boot_id });

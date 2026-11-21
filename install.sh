@@ -23,7 +23,9 @@ package_installed() {
 
 cron_ready() {
     command -v crontab >/dev/null 2>&1 || return 1
-    command -v crond >/dev/null 2>&1 || return 1
+    if ! command -v cron >/dev/null 2>&1 && ! command -v crond >/dev/null 2>&1; then
+        return 1
+    fi
     for script in /opt/etc/init.d/S10*cron* /opt/etc/init.d/s10*cron*; do
         [ -x "$script" ] && return 0
     done
@@ -41,7 +43,7 @@ ensure_required_packages() {
     package_installed curl || MISSING="$MISSING curl"
     package_installed ca-bundle || MISSING="$MISSING ca-bundle"
     if ! cron_ready; then
-        MISSING="$MISSING cronie"
+        MISSING="$MISSING cron"
     fi
 
     if [ -n "$MISSING" ]; then
@@ -56,7 +58,7 @@ ensure_required_packages() {
 
     package_installed curl || fail "Пакет curl не установлен."
     package_installed ca-bundle || fail "Пакет ca-bundle не установлен."
-    cron_ready || fail "Пакет cronie установлен не полностью: не найдены crontab, crond или сценарий запуска cron."
+    cron_ready || fail "Служба cron установлена не полностью: не найдены crontab, cron/crond или сценарий запуска в /opt/etc/init.d."
     command -v curl >/dev/null 2>&1 || fail "Пакет curl установлен, но команда curl недоступна."
     if ! curl --version >/dev/null 2>&1; then
         echo "Предупреждение: curl установлен, но не запускается. При загрузке будет предпринята попытка использовать wget."

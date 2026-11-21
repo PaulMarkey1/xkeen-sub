@@ -149,12 +149,16 @@ pub fn run_install_config_check() -> AppResult<()> {
     }
 
     // Validate the complete resulting config set before touching active files.
-    let staged: Vec<XrayConfigInput> = configs.iter()
-        .map(|config| XrayConfigInput::new(config.name.clone(), if changed.contains(&configs.iter().position(|item| item.name == config.name).unwrap()) {
-            serde_json::to_string_pretty(&config.document).unwrap_or_else(|_| config.original.clone())
-        } else {
-            config.original.clone()
-        }))
+    let staged: Vec<XrayConfigInput> = configs.iter().enumerate()
+        .map(|(index, config)| {
+            let content = if changed.contains(&index) {
+                serde_json::to_string_pretty(&config.document)
+                    .expect("serde_json::Value serialization cannot fail")
+            } else {
+                config.original.clone()
+            };
+            XrayConfigInput::new(config.name.clone(), content)
+        })
         .collect();
 
     info("Проверяем итоговую конфигурацию командой Xray...");

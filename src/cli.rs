@@ -67,7 +67,6 @@ fn print_help() -> AppResult<()> {
     command_item("  mode auto|unlimited", "Хранить 3 дня или бессрочно");
     command_item("  clear", "Удалить все точки восстановления после подтверждения");
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
-    command_item("current", "Показать тэг текущего подключения");
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");
     command_item("auto-update", "Настроить автоматическое обновление подписок");
@@ -83,11 +82,12 @@ fn print_setup_help() -> AppResult<()> {
     title("XKEEN-SUB — настройка подписок");
     println!();
     separator("Использование:");
-    command_item("xkeen-sub setup", "Открыть меню настройки (чёрный список — отдельный пункт 6)");
+    command_item("xkeen-sub setup", "Открыть меню настройки (чёрный список — пункт 6, текущее подключение — пункт 7)");
     command_item("xkeen-sub setup add", "Добавить подписку");
     command_item("xkeen-sub setup list", "Просмотреть подписки");
     command_item("xkeen-sub setup del", "Удалить подписку");
     command_item("xkeen-sub setup edit", "Редактировать подписку");
     command_item("auto-update", "Настройка автообновления подписок");
+    command_item("current", "Показать тэг текущего подключения");
     Ok(())
 }

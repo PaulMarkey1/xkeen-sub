@@ -92,6 +92,46 @@ pub fn compare_subscription(
     Ok(report)
 }
 
+/// Returns true when normalized outbounds differ, but become identical after
+/// removing every Xray `shortId` field.
+pub fn outbounds_differ_only_by_short_id(
+    previous_json: &[u8],
+    current_json: &[u8],
+) -> AppResult<bool> {
+    let (previous, _, _) = normalize_document(previous_json)?;
+    let (current, _, _) = normalize_document(current_json)?;
+    if previous == current {
+        return Ok(false);
+    }
+
+    fn without_short_id(items: &[TaggedOutbound]) -> Vec<Value> {
+        items.iter().map(|item| {
+            let mut outbound = item.outbound.clone();
+            remove_short_id(&mut outbound);
+            outbound
+        }).collect()
+    }
+
+    fn remove_short_id(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("shortId");
+                for child in object.values_mut() {
+                    remove_short_id(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    remove_short_id(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(without_short_id(&previous) == without_short_id(&current))
+}
+
 /// Extracts every recognized Outbound from a subscription document using
 /// the same duplicate-Tag normalization as the comparison stage.
 pub fn extract_outbounds(bytes: &[u8]) -> AppResult<Vec<TaggedOutbound>> {
@@ -218,8 +258,8 @@ fn collect_changes(
         keys.dedup();
 
         for key in keys {
-            // Tag is the comparison key, not a connection parameter.
-            if path.is_empty() && key == "tag" {
+            // Tag identifies the outbound; shortId rotation alone must not trigger an update.
+            if (path.is_empty() && key == "tag") || key == "shortId" {
                 continue;
             }
 
@@ -368,6 +408,42 @@ mod tests {
     fn malformed_document_or_missing_outbounds_is_an_error() {
         assert!(compare_subscription(None, br#"{"outbounds":"wrong"}"#).is_err());
         assert!(compare_subscription(None, b"{").is_err());
+    }
+
+    #[test]
+    fn short_id_only_rotation_is_ignored_and_detected_separately() {
+        let previous = document(json!([{
+            "tag":"node",
+            "protocol":"vless",
+            "streamSettings":{"realitySettings":{"shortId":"aaaa"}}
+        }]));
+        let current = document(json!([{
+            "tag":"node",
+            "protocol":"vless",
+            "streamSettings":{"realitySettings":{"shortId":"bbbb"}}
+        }]));
+
+        let report = compare_subscription(Some(&previous), &current).unwrap();
+        assert!(report.changed.is_empty());
+        assert_eq!(report.unchanged, 1);
+        assert!(super::outbounds_differ_only_by_short_id(&previous, &current).unwrap());
+    }
+
+    #[test]
+    fn short_id_is_ignored_but_other_parameter_changes_are_not() {
+        let previous = document(json!([{
+            "tag":"node","protocol":"vless","port":443,
+            "streamSettings":{"realitySettings":{"shortId":"aaaa"}}
+        }]));
+        let current = document(json!([{
+            "tag":"node","protocol":"vless","port":8443,
+            "streamSettings":{"realitySettings":{"shortId":"bbbb"}}
+        }]));
+
+        let report = compare_subscription(Some(&previous), &current).unwrap();
+        assert_eq!(report.changed.len(), 1);
+        assert!(report.changed[0].changes.iter().any(|change| change.path == "port"));
+        assert!(!super::outbounds_differ_only_by_short_id(&previous, &current).unwrap());
     }
 
     #[test]

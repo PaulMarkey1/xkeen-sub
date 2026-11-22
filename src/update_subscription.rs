@@ -1,10 +1,10 @@
 use crate::backup::BackupSession;
-use crate::outbound_compare::compare_subscription;
+use crate::outbound_compare::{compare_subscription, outbounds_differ_only_by_short_id};
 use crate::subscription_download::download_subscription;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::Subscription;
 use crate::terminal::{error, info, success, title, warning};
-use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState, SubscriptionChanges};
+use crate::update_state::{DeferredShortIdUpdate, PreparedBaseline, PreparedSubscription, RunState, SubscriptionChanges};
 use crate::update_report::{print_comparison, show_value};
 
 use serde_json::Value;
@@ -241,6 +241,38 @@ pub(crate) fn prepare_subscription(
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;
+
+        if let Some(previous_json) = previous_json.as_deref() {
+            if outbounds_differ_only_by_short_id(previous_json, &current_json)? {
+                let outbounds = current.outbounds.iter().cloned().map(|mut outbound| {
+                    let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
+                    let tag = format!("{}{}", subscription.prefix, original_tag);
+                    if let Some(object) = outbound.as_object_mut() {
+                        object.insert("tag".to_owned(), Value::String(tag));
+                    }
+                    outbound
+                }).collect();
+
+                state.deferred_short_id_updates.push(DeferredShortIdUpdate {
+                    subscription: PreparedSubscription {
+                        id: subscription.id.clone(),
+                        outbounds,
+                    },
+                    baseline: PreparedBaseline {
+                        id: subscription.id.clone(),
+                        original: downloaded,
+                        path: baseline.clone(),
+                    },
+                });
+                success("Изменился только shortId. Обновление отложено до появления других изменений в подписках.");
+                backup.event("COMPARE", &format!(
+                    "{}: обнаружена только ротация shortId; подключение и baseline пока не обновляются.",
+                    subscription.id
+                ))?;
+                record_observed_tags(state, subscription, &current);
+                return Ok(());
+            }
+        }
         if previous.as_deref().map(|bytes| !byte_contents_equal(Some(bytes), &downloaded)).unwrap_or(true) {
             state.baseline_updates.push(PreparedBaseline {
                 id: subscription.id.clone(),
@@ -314,8 +346,29 @@ pub(crate) fn prepare_subscriptions(
         )?;
     }
 
+    let promoted_short_id_updates = promote_deferred_short_id_updates(&mut state);
+    for id in promoted_short_id_updates {
+        backup.event("COMPARE", &format!(
+            "{id}: отложенная ротация shortId применена вместе с другими изменениями подписок."
+        ))?;
+    }
+
     backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());
     Ok(state)
+}
+
+fn promote_deferred_short_id_updates(state: &mut RunState) -> Vec<String> {
+    if state.prepared.is_empty() {
+        return Vec::new();
+    }
+
+    let mut promoted = Vec::new();
+    for deferred in state.deferred_short_id_updates.drain(..) {
+        promoted.push(deferred.subscription.id.clone());
+        state.prepared.push(deferred.subscription);
+        state.baseline_updates.push(deferred.baseline);
+    }
+    promoted
 }
 
 pub(crate) fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
@@ -355,6 +408,62 @@ mod subscription_comparison_tests {
     use crate::subscriptions::Subscription;
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn short_id_only_updates_stay_deferred_when_no_other_subscription_changed() {
+        use super::promote_deferred_short_id_updates;
+        use crate::update_state::{DeferredShortIdUpdate, PreparedBaseline, PreparedSubscription, RunState};
+        use serde_json::json;
+        use std::path::PathBuf;
+
+        let mut state = RunState::default();
+        state.deferred_short_id_updates.push(DeferredShortIdUpdate {
+            subscription: PreparedSubscription {
+                id: "sub2".to_owned(),
+                outbounds: vec![json!({"tag":"sub2--node","protocol":"vless"})],
+            },
+            baseline: PreparedBaseline {
+                id: "sub2".to_owned(),
+                original: b"new".to_vec(),
+                path: PathBuf::from("/tmp/sub2.json"),
+            },
+        });
+
+        assert!(promote_deferred_short_id_updates(&mut state).is_empty());
+        assert!(state.prepared.is_empty());
+        assert!(state.baseline_updates.is_empty());
+        assert_eq!(state.deferred_short_id_updates.len(), 1);
+    }
+
+    #[test]
+    fn short_id_only_updates_are_promoted_when_another_subscription_changed() {
+        use super::promote_deferred_short_id_updates;
+        use crate::update_state::{DeferredShortIdUpdate, PreparedBaseline, PreparedSubscription, RunState};
+        use serde_json::json;
+        use std::path::PathBuf;
+
+        let mut state = RunState::default();
+        state.prepared.push(PreparedSubscription {
+            id: "sub1".to_owned(),
+            outbounds: vec![json!({"tag":"sub1--node","protocol":"vless","port":8443})],
+        });
+        state.deferred_short_id_updates.push(DeferredShortIdUpdate {
+            subscription: PreparedSubscription {
+                id: "sub2".to_owned(),
+                outbounds: vec![json!({"tag":"sub2--node","protocol":"vless"})],
+            },
+            baseline: PreparedBaseline {
+                id: "sub2".to_owned(),
+                original: b"new".to_vec(),
+                path: PathBuf::from("/tmp/sub2.json"),
+            },
+        });
+
+        assert_eq!(promote_deferred_short_id_updates(&mut state), vec!["sub2"]);
+        assert_eq!(state.prepared.len(), 2);
+        assert_eq!(state.baseline_updates.len(), 1);
+        assert!(state.deferred_short_id_updates.is_empty());
+    }
 
     #[test]
     fn baseline_path_uses_dedicated_directory_and_subscription_id() {

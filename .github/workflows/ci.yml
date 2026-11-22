@@ -21,6 +21,7 @@ jobs:
         run: sh -n install.sh
 
   build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: Build ${{ matrix.target }}
     needs: test
     runs-on: ubuntu-latest

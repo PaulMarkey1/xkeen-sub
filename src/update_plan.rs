@@ -162,6 +162,19 @@ pub(crate) fn build_file_plan_with_registry(
     Ok(plan)
 }
 
+/// Extends the normal update plan with an atomic blacklist replacement.
+pub(crate) fn build_file_plan_with_blacklist(
+    docs: &[ConfigDocument],
+    state: &RunState,
+    archive: &ArchivePlan,
+    blacklist: &BlacklistStore,
+) -> AppResult<Vec<PlannedFileOperation>> {
+    let mut plan = build_file_plan(docs, state, archive)?;
+    append_blacklist_operation(&mut plan, PathBuf::from(BLACKLIST_FILE), blacklist)?;
+    plan.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(plan)
+}
+
 /// Extends the update plan with atomic subscription registry and blacklist replacements.
 pub(crate) fn build_file_plan_with_registry_and_blacklist(
     docs: &[ConfigDocument],
@@ -171,22 +184,43 @@ pub(crate) fn build_file_plan_with_registry_and_blacklist(
     blacklist: &BlacklistStore,
 ) -> AppResult<Vec<PlannedFileOperation>> {
     let mut plan = build_file_plan_with_registry(docs, state, archive, store)?;
-    let path = PathBuf::from(BLACKLIST_FILE);
-    let mut content = serde_json::to_vec_pretty(blacklist)?;
-    content.push(b'\n');
-    match fs::read(&path) {
-        Ok(original) if original == content => {}
-        Ok(_) => plan.push(PlannedFileOperation { path, category: "Чёрный список подключений", kind: PlannedOperationKind::Replace, content: Some(content) }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => plan.push(PlannedFileOperation { path, category: "Чёрный список подключений", kind: PlannedOperationKind::Create, content: Some(content) }),
-        Err(error) => return Err(format!("Не удалось прочитать чёрный список: {error}").into()),
-    }
+    append_blacklist_operation(&mut plan, PathBuf::from(BLACKLIST_FILE), blacklist)?;
     plan.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(plan)
 }
 
+fn append_blacklist_operation(
+    plan: &mut Vec<PlannedFileOperation>,
+    path: PathBuf,
+    blacklist: &BlacklistStore,
+) -> AppResult<()> {
+    let mut content = serde_json::to_vec_pretty(blacklist)?;
+    content.push(b'\n');
+    match fs::read(&path) {
+        Ok(original) if original == content => {}
+        Ok(_) => plan.push(PlannedFileOperation {
+            path,
+            category: "Чёрный список подключений",
+            kind: PlannedOperationKind::Replace,
+            content: Some(content),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            plan.push(PlannedFileOperation {
+                path,
+                category: "Чёрный список подключений",
+                kind: PlannedOperationKind::Create,
+                content: Some(content),
+            });
+        }
+        Err(error) => return Err(format!("Не удалось прочитать чёрный список {}: {error}", path.display()).into()),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod file_plan_tests {
-    use super::{build_file_plan, ConfigDocument, PlannedOperationKind, PreparedBaseline, RunState};
+    use super::{append_blacklist_operation, build_file_plan, ConfigDocument, PlannedOperationKind, PreparedBaseline, RunState};
+    use crate::blacklist::{BlacklistEntry, BlacklistStore};
     use crate::update_merge::ArchivePlan;
     use serde_json::json;
     use std::fs;
@@ -194,6 +228,32 @@ mod file_plan_tests {
 
     fn temporary_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("xkeen-sub-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn pruned_blacklist_is_included_in_the_file_plan() {
+        let root = temporary_path("plan-blacklist");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("blacklist.json");
+        fs::write(&path, br#"{"entries":[{"subscription_id":"sub1","tag":"gone"}]}"#).unwrap();
+
+        let blacklist = BlacklistStore {
+            entries: vec![BlacklistEntry {
+                subscription_id: "sub1".to_owned(),
+                tag: "keep".to_owned(),
+            }],
+        };
+        let mut plan = Vec::new();
+        append_blacklist_operation(&mut plan, path.clone(), &blacklist).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].path, path);
+        assert_eq!(plan[0].kind, PlannedOperationKind::Replace);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(plan[0].content.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(&blacklist).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

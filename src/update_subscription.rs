@@ -346,19 +346,29 @@ pub(crate) fn prepare_subscriptions(
         )?;
     }
 
-    if !state.prepared.is_empty() && !state.deferred_short_id_updates.is_empty() {
-        for deferred in state.deferred_short_id_updates.drain(..) {
-            backup.event("COMPARE", &format!(
-                "{}: отложенная ротация shortId применена вместе с другими изменениями подписок.",
-                deferred.subscription.id
-            ))?;
-            state.prepared.push(deferred.subscription);
-            state.baseline_updates.push(deferred.baseline);
-        }
+    let promoted_short_id_updates = promote_deferred_short_id_updates(&mut state);
+    for id in promoted_short_id_updates {
+        backup.event("COMPARE", &format!(
+            "{id}: отложенная ротация shortId применена вместе с другими изменениями подписок."
+        ))?;
     }
 
     backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());
     Ok(state)
+}
+
+fn promote_deferred_short_id_updates(state: &mut RunState) -> Vec<String> {
+    if state.prepared.is_empty() {
+        return Vec::new();
+    }
+
+    let mut promoted = Vec::new();
+    for deferred in state.deferred_short_id_updates.drain(..) {
+        promoted.push(deferred.subscription.id.clone());
+        state.prepared.push(deferred.subscription);
+        state.baseline_updates.push(deferred.baseline);
+    }
+    promoted
 }
 
 pub(crate) fn baseline_path(subscription: &Subscription) -> AppResult<PathBuf> {
@@ -398,6 +408,62 @@ mod subscription_comparison_tests {
     use crate::subscriptions::Subscription;
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn short_id_only_updates_stay_deferred_when_no_other_subscription_changed() {
+        use super::promote_deferred_short_id_updates;
+        use crate::update_state::{DeferredShortIdUpdate, PreparedBaseline, PreparedSubscription, RunState};
+        use serde_json::json;
+        use std::path::PathBuf;
+
+        let mut state = RunState::default();
+        state.deferred_short_id_updates.push(DeferredShortIdUpdate {
+            subscription: PreparedSubscription {
+                id: "sub2".to_owned(),
+                outbounds: vec![json!({"tag":"sub2--node","protocol":"vless"})],
+            },
+            baseline: PreparedBaseline {
+                id: "sub2".to_owned(),
+                original: b"new".to_vec(),
+                path: PathBuf::from("/tmp/sub2.json"),
+            },
+        });
+
+        assert!(promote_deferred_short_id_updates(&mut state).is_empty());
+        assert!(state.prepared.is_empty());
+        assert!(state.baseline_updates.is_empty());
+        assert_eq!(state.deferred_short_id_updates.len(), 1);
+    }
+
+    #[test]
+    fn short_id_only_updates_are_promoted_when_another_subscription_changed() {
+        use super::promote_deferred_short_id_updates;
+        use crate::update_state::{DeferredShortIdUpdate, PreparedBaseline, PreparedSubscription, RunState};
+        use serde_json::json;
+        use std::path::PathBuf;
+
+        let mut state = RunState::default();
+        state.prepared.push(PreparedSubscription {
+            id: "sub1".to_owned(),
+            outbounds: vec![json!({"tag":"sub1--node","protocol":"vless","port":8443})],
+        });
+        state.deferred_short_id_updates.push(DeferredShortIdUpdate {
+            subscription: PreparedSubscription {
+                id: "sub2".to_owned(),
+                outbounds: vec![json!({"tag":"sub2--node","protocol":"vless"})],
+            },
+            baseline: PreparedBaseline {
+                id: "sub2".to_owned(),
+                original: b"new".to_vec(),
+                path: PathBuf::from("/tmp/sub2.json"),
+            },
+        });
+
+        assert_eq!(promote_deferred_short_id_updates(&mut state), vec!["sub2"]);
+        assert_eq!(state.prepared.len(), 2);
+        assert_eq!(state.baseline_updates.len(), 1);
+        assert!(state.deferred_short_id_updates.is_empty());
+    }
 
     #[test]
     fn baseline_path_uses_dedicated_directory_and_subscription_id() {

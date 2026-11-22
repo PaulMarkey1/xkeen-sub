@@ -15,8 +15,8 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const PROGRAM_BALANCER_TAG: &str = "xkeen-sub-balancer";
 const OBSERVATORY_KEYS: [&str; 3] = ["observatory", "burstObservatory", "burstobservatory"];
-const LOOPBACK_RULE_PRIMARY = "loopback-in";
-const LOOPBACK_RULE_RESERVE = "loopback-in-rezerve";
+const LOOPBACK_RULE_PRIMARY: &str = "loopback-in";
+const LOOPBACK_RULE_RESERVE: &str = "loopback-in-rezerve";
 
 struct ConfigFile {
     path: PathBuf,

@@ -609,7 +609,7 @@ fn ensure_loopback_rules(rules: &mut Vec<Value>) -> bool {
 
     retained.insert(0, second);
     retained.insert(0, first);
-    let changed = *rules != retained;
+    let changed = original != retained;
     *rules = retained;
     changed
 }

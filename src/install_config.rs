@@ -117,7 +117,7 @@ pub fn run_install_config_check() -> AppResult<()> {
         routing.insert("balancers".to_owned(), template);
         changed.insert(target);
         let mode_kind = if mode == "2" { RoutingMode::Advanced } else { RoutingMode::Simple };
-        apply_routing_mode(&mut configs, mode_kind, &mut changed)?;
+        apply_routing_mode(&mut configs, mode_kind, Some(target), &mut changed)?;
         success(if mode == "1" {
             "Установлен шаблон Simple."
         } else {
@@ -140,7 +140,7 @@ pub fn run_install_config_check() -> AppResult<()> {
                     routing.insert("balancers".to_owned(), advanced_balancers_template());
                     changed.insert(*index);
                 }
-                apply_routing_mode(&mut configs, RoutingMode::Advanced, &mut changed)?;
+                apply_routing_mode(&mut configs, RoutingMode::Advanced, incomplete_advanced.first().copied(), &mut changed)?;
                 success("Шаблон Advanced восстановлен, правила маршрутизации проверены.");
             } else {
                 info("Неполный шаблон Advanced оставлен без изменений.");
@@ -150,10 +150,10 @@ pub fn run_install_config_check() -> AppResult<()> {
         // An already installed template is also a declaration of the selected mode.
         // Keep its routing rules synchronized on every installer check.
         if !simple_configs.is_empty() {
-            apply_routing_mode(&mut configs, RoutingMode::Simple, &mut changed)?;
+            apply_routing_mode(&mut configs, RoutingMode::Simple, simple_configs.first().copied(), &mut changed)?;
         }
         if !advanced_configs.is_empty() {
-            apply_routing_mode(&mut configs, RoutingMode::Advanced, &mut changed)?;
+            apply_routing_mode(&mut configs, RoutingMode::Advanced, advanced_configs.first().copied(), &mut changed)?;
         }
 
         if !user_balancer_candidates.is_empty() {
@@ -201,7 +201,7 @@ pub fn run_install_config_check() -> AppResult<()> {
                         no_persistent_backup.insert(*index);
                     }
                     let mode_kind = if mode == "2" { RoutingMode::Advanced } else { RoutingMode::Simple };
-                    apply_routing_mode(&mut configs, mode_kind, &mut changed)?;
+                    apply_routing_mode(&mut configs, mode_kind, user_balancer_candidates.first().copied(), &mut changed)?;
                     success(if mode == "1" {
                         "Установлен шаблон Simple, пользовательские правила перенаправлены на основной балансировщик."
                     } else {
@@ -474,6 +474,7 @@ const PROTECTED_OUTBOUND_PROTOCOLS: [&str; 4] = ["freedom", "blackhole", "dns", 
 fn apply_routing_mode(
     configs: &mut [ConfigFile],
     mode: RoutingMode,
+    loopback_owner: Option<usize>,
     changed: &mut HashSet<usize>,
 ) -> AppResult<()> {
     let protocols: std::collections::HashMap<String, String> = configs.iter()
@@ -505,7 +506,7 @@ fn apply_routing_mode(
                         object.insert("balancerTag".to_owned(), Value::String(PROGRAM_BALANCER_TAG.to_owned()));
                         modified = true;
                     }
-                    object.remove("outboundTag");
+                    modified |= object.remove("outboundTag").is_some();
                     continue;
                 }
 
@@ -536,9 +537,11 @@ fn apply_routing_mode(
                 }
             }
             RoutingMode::Advanced => {
-                let rules = routing.entry("rules").or_insert_with(|| Value::Array(Vec::new()))
-                    .as_array_mut().ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config_name))?;
-                modified |= ensure_loopback_rules(rules);
+                if loopback_owner == Some(index) {
+                    let rules = routing.entry("rules").or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut().ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config_name))?;
+                    modified |= ensure_loopback_rules(rules);
+                }
             }
         }
 

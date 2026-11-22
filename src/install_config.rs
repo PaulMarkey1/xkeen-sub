@@ -15,6 +15,8 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const CONFIG_DIR: &str = "/opt/etc/xray/configs";
 const PROGRAM_BALANCER_TAG: &str = "xkeen-sub-balancer";
 const OBSERVATORY_KEYS: [&str; 3] = ["observatory", "burstObservatory", "burstobservatory"];
+const LOOPBACK_RULE_PRIMARY: &str = "loopback-in";
+const LOOPBACK_RULE_RESERVE: &str = "loopback-in-rezerve";
 
 struct ConfigFile {
     path: PathBuf,
@@ -49,71 +51,186 @@ pub fn run_install_config_check() -> AppResult<()> {
 
     }
 
-    // Offer to replace user-defined balancers only when a non-empty list exists
-    // and does not already contain the xkeen-sub balancer.
-    let candidates: Vec<usize> = configs.iter().enumerate().filter_map(|(index, config)| {
-        let routing = config.document.get("routing")?.as_object()?;
-        let balancers = routing.get("balancers")?.as_array()?;
-        if balancers.is_empty() {
-            return None;
-        }
-        let has_program = balancers.iter().any(|item| {
-            item.get("tag").and_then(Value::as_str) == Some(PROGRAM_BALANCER_TAG)
-        });
-        (!has_program).then_some(index)
-    }).collect();
+    // Detect xkeen-sub templates and user-defined balancers.
+    let mut user_balancer_candidates = Vec::<usize>::new();
+    let mut incomplete_advanced = Vec::<usize>::new();
+    let mut simple_configs = Vec::<usize>::new();
+    let mut advanced_configs = Vec::<usize>::new();
 
-    if !candidates.is_empty() {
-        info("В конфигурации найдены пользовательские балансировщики:");
-        for index in &candidates {
-            let balancers = configs[*index].document["routing"]["balancers"].as_array().unwrap();
-            let tags = balancers.iter()
-                .filter_map(|item| item.get("tag").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join(", ");
-            info(&format!("  {}: {}", configs[*index].name, if tags.is_empty() { "без Tag".to_owned() } else { tags }));
+    for (index, config) in configs.iter().enumerate() {
+        let Some(balancers) = config.document.get("routing")
+            .and_then(|routing| routing.get("balancers"))
+            .and_then(Value::as_array) else { continue };
+
+        if balancers.is_empty() { continue; }
+        match inspect_program_balancers(balancers) {
+            ProgramBalancerState::Simple => {
+                success(&format!("{}: найден шаблон Simple.", config.name));
+                simple_configs.push(index);
+            }
+            ProgramBalancerState::Advanced => {
+                success(&format!("{}: найден полный шаблон Advanced.", config.name));
+                advanced_configs.push(index);
+            }
+            ProgramBalancerState::IncompleteAdvanced => incomplete_advanced.push(index),
+            ProgramBalancerState::Mixed => user_balancer_candidates.push(index),
+            ProgramBalancerState::Ambiguous => warning(&format!(
+                "{}: структура балансировщиков xkeen-sub неоднозначна (повторяющиеся Tag). Автоматическая замена пропущена.",
+                config.name
+            )),
+            ProgramBalancerState::NoProgram => user_balancer_candidates.push(index),
         }
-        warning("Замена удалит перечисленные балансировщики и оставит только xkeen-sub-balancer.");
-        let selectors = available_outbound_tags(&configs);
-        if selectors.is_empty() {
-            warning("Не найдено ни одного подходящего исходящего подключения. Замена балансировщиков пропущена, чтобы не создавать пустой selector.");
-        } else if confirm("Заменить пользовательские балансировщики? (1 — да, 2 — нет): ")? {
-            for index in &candidates {
-                let routing = configs[*index].document["routing"].as_object_mut()
-                    .ok_or("Поле routing должно быть объектом.")?;
-                routing.insert("balancers".to_owned(), Value::Array(vec![program_balancer(&selectors)]));
-                changed.insert(*index);
+    }
+
+    let mut no_persistent_backup = HashSet::<usize>::new();
+
+    // If there are no balancers at all, ask which xkeen-sub template to install.
+    let any_nonempty_balancers = configs.iter().any(|config| {
+        config.document.get("routing")
+            .and_then(|routing| routing.get("balancers"))
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+    });
+
+    if !any_nonempty_balancers {
+        info("Балансировщики Xray не найдены.");
+        info("  1 — установить простой режим");
+        info("  2 — установить продвинутый режим");
+        let mode = read_choice("Выберите режим: ", &["1", "2"])?;
+        let target = configs.iter().position(|config| {
+            config.document.get("routing").and_then(|routing| routing.get("rules"))
+                .and_then(Value::as_array).is_some()
+        }).or_else(|| configs.iter().position(|config| {
+            config.document.get("routing").and_then(Value::as_object).is_some()
+        })).ok_or("Не найден файл с объектом routing. Невозможно установить балансировщик.")?;
+
+        let template = if mode == "1" {
+            let selectors = available_outbound_tags(&configs);
+            if selectors.is_empty() {
+                return Err("Не найдено подходящих исходящих подключений. Балансировщик не установлен, чтобы не создавать пустой selector.".into());
+            }
+            Value::Array(vec![program_balancer(&selectors)])
+        } else {
+            advanced_balancers_template()
+        };
+
+        let routing = configs[target].document["routing"].as_object_mut()
+            .ok_or("Поле routing должно быть объектом.")?;
+        routing.insert("balancers".to_owned(), template);
+        changed.insert(target);
+        let mode_kind = if mode == "2" { RoutingMode::Advanced } else { RoutingMode::Simple };
+        apply_routing_mode(&mut configs, mode_kind, Some(target), &mut changed)?;
+        success(if mode == "1" {
+            "Установлен шаблон Simple."
+        } else {
+            "Установлен шаблон Advanced."
+        });
+    } else {
+        if !incomplete_advanced.is_empty() {
+            info("Найден неполный шаблон Advanced: основной балансировщик и только один из двух дополнительных.");
+            for index in &incomplete_advanced {
+                let tags = configs[*index].document["routing"]["balancers"].as_array().unwrap()
+                    .iter().filter_map(|item| item.get("tag").and_then(Value::as_str))
+                    .collect::<Vec<_>>().join(", ");
+                info(&format!("  {}: {}", configs[*index].name, tags));
+            }
+            warning("Замена восстановит полный шаблон Advanced. Пользовательских балансировщиков в этих файлах не обнаружено.");
+            if confirm("Заменить неполный шаблон актуальным шаблоном Advanced? (1 — да, 2 — нет): ")? {
+                for index in &incomplete_advanced {
+                    let routing = configs[*index].document["routing"].as_object_mut()
+                        .ok_or("Поле routing должно быть объектом.")?;
+                    routing.insert("balancers".to_owned(), advanced_balancers_template());
+                    changed.insert(*index);
+                }
+                apply_routing_mode(&mut configs, RoutingMode::Advanced, incomplete_advanced.first().copied(), &mut changed)?;
+                success("Шаблон Advanced восстановлен, правила маршрутизации проверены.");
+            } else {
+                info("Неполный шаблон Advanced оставлен без изменений.");
+            }
+        }
+
+        // An already installed template is also a declaration of the selected mode.
+        // Keep its routing rules synchronized on every installer check.
+        if !simple_configs.is_empty() {
+            apply_routing_mode(&mut configs, RoutingMode::Simple, simple_configs.first().copied(), &mut changed)?;
+        }
+        if !advanced_configs.is_empty() {
+            apply_routing_mode(&mut configs, RoutingMode::Advanced, advanced_configs.first().copied(), &mut changed)?;
+        }
+
+        if !user_balancer_candidates.is_empty() {
+            info("Найдены пользовательские балансировщики:");
+            for index in &user_balancer_candidates {
+                let balancers = configs[*index].document["routing"]["balancers"].as_array().unwrap();
+                let tags = balancers.iter().filter_map(|item| item.get("tag").and_then(Value::as_str))
+                    .collect::<Vec<_>>().join(", ");
+                info(&format!("  {}: {}", configs[*index].name, if tags.is_empty() { "без Tag".to_owned() } else { tags }));
             }
 
-            // Redirect only rules that already use balancerTag. Rules with
-            // outboundTag are deliberately left unchanged.
-            for (index, config) in configs.iter_mut().enumerate() {
-                let Some(routing) = config.document.get_mut("routing").and_then(Value::as_object_mut) else {
-                    continue;
+            info("Как поступить с найденными балансировщиками?");
+            info("  1 — заменить с резервной копией в /opt");
+            info("  2 — заменить без резервной копии");
+            info("  3 — оставить пользовательские и добавить только основной балансировщик xkeen-sub");
+            let replacement_choice = read_choice("Ваш выбор: ", &["1", "2", "3"])?;
+
+            if replacement_choice == "1" || replacement_choice == "2" {
+                info("Выберите шаблон балансировщиков:");
+                info("  1 — Simple");
+                info("  2 — Advanced");
+                let mode = read_choice("Ваш выбор: ", &["1", "2"])?;
+                let replacement = if mode == "1" {
+                    let selectors = available_outbound_tags(&configs);
+                    if selectors.is_empty() {
+                        warning("Не найдено подходящих исходящих подключений. Замена отменена, чтобы не создавать пустой selector.");
+                        None
+                    } else {
+                        Some(Value::Array(vec![program_balancer(&selectors)]))
+                    }
+                } else {
+                    Some(advanced_balancers_template())
                 };
-                let Some(rules) = routing.get_mut("rules").and_then(Value::as_array_mut) else {
-                    continue;
-                };
-                let mut modified = false;
-                for rule in rules {
-                    let Some(object) = rule.as_object_mut() else { continue };
-                    if let Some(tag) = object.get_mut("balancerTag") {
-                        if tag.as_str() != Some(PROGRAM_BALANCER_TAG) {
-                            *tag = Value::String(PROGRAM_BALANCER_TAG.to_owned());
-                            modified = true;
+
+                if let Some(replacement) = replacement {
+                    if replacement_choice == "1" {
+                        create_opt_backups(&configs, &user_balancer_candidates)?;
+                    }
+                    for index in &user_balancer_candidates {
+                        let routing = configs[*index].document["routing"].as_object_mut()
+                            .ok_or("Поле routing должно быть объектом.")?;
+                        routing.insert("balancers".to_owned(), replacement.clone());
+                        changed.insert(*index);
+                        no_persistent_backup.insert(*index);
+                    }
+                    let mode_kind = if mode == "2" { RoutingMode::Advanced } else { RoutingMode::Simple };
+                    apply_routing_mode(&mut configs, mode_kind, user_balancer_candidates.first().copied(), &mut changed)?;
+                    success(if mode == "1" {
+                        "Установлен шаблон Simple, пользовательские правила перенаправлены на основной балансировщик."
+                    } else {
+                        "Установлен шаблон Advanced, пользовательские правила перенаправлены на основной балансировщик."
+                    });
+                }
+            } else {
+                // Preserve the user's routing exactly. Add only our own primary
+                // balancer so it can be selected manually by the user later.
+                let selectors = available_outbound_tags(&configs);
+                if selectors.is_empty() {
+                    warning("Не найдено подходящих исходящих подключений. Основной балансировщик не добавлен.");
+                } else {
+                    for index in &user_balancer_candidates {
+                        let routing = configs[*index].document["routing"].as_object_mut()
+                            .ok_or("Поле routing должно быть объектом.")?;
+                        let balancers = routing.entry("balancers").or_insert_with(|| Value::Array(Vec::new()))
+                            .as_array_mut().ok_or("Поле routing.balancers должно быть массивом.")?;
+                        if !balancers.iter().any(|item| item.get("tag").and_then(Value::as_str) == Some(PROGRAM_BALANCER_TAG)) {
+                            balancers.push(program_balancer(&selectors));
+                            changed.insert(*index);
                         }
                     }
-                }
-                if modified {
-                    changed.insert(index);
+                    success("Пользовательские балансировщики и правила маршрутизации оставлены без изменений. Добавлен только основной балансировщик xkeen-sub.");
                 }
             }
-            success("Балансировщики будут заменены на xkeen-sub-balancer.");
-        } else {
-            info("Пользовательские балансировщики оставлены без изменений.");
         }
-    } else {
-        success("Пользовательские балансировщики для замены не найдены.");
     }
 
     // Check every top-level Observatory variant in every JSON/JSONC file.
@@ -182,7 +299,7 @@ pub fn run_install_config_check() -> AppResult<()> {
         format!("Итоговая конфигурация не прошла проверку Xray. Файлы не изменены. {error}")
     })?;
 
-    persist_changes(&mut configs, &changed)?;
+    persist_changes(&mut configs, &changed, &no_persistent_backup)?;
     success("Конфигурация успешно проверена и сохранена.");
     Ok(())
 }
@@ -216,6 +333,52 @@ fn is_json_config(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn read_choice(prompt: &str, allowed: &[&str]) -> AppResult<String> {
+    loop {
+        let value = read_input(prompt)?;
+        if allowed.contains(&value.as_str()) {
+            return Ok(value);
+        }
+        warning("Выберите один из предложенных вариантов.");
+    }
+}
+
+fn create_opt_backups(configs: &[ConfigFile], indices: &[usize]) -> AppResult<()> {
+    let backup_dir = Path::new("/opt");
+    if !backup_dir.is_dir() {
+        return Err("Каталог /opt не найден. Резервная копия не создана, конфигурация не изменена.".into());
+    }
+
+    let mut targets = Vec::new();
+    for index in indices {
+        let config = &configs[*index];
+        let backup_path = backup_dir.join(&config.name);
+        if backup_path.exists() {
+            return Err(format!(
+                "Файл резервной копии уже существует: {}. Он не будет перезаписан. Удалите или переместите его и повторите установку.",
+                backup_path.display()
+            ).into());
+        }
+        targets.push((*index, backup_path));
+    }
+
+    let mut created = Vec::<PathBuf>::new();
+    for (index, backup_path) in targets {
+        if let Err(error) = fs::copy(&configs[index].path, &backup_path) {
+            for path in created.iter().rev() {
+                let _ = fs::remove_file(path);
+            }
+            return Err(format!(
+                "Не удалось создать резервную копию {}: {error}. Созданные копии удалены, конфигурация не изменена.",
+                backup_path.display()
+            ).into());
+        }
+        created.push(backup_path.clone());
+        success(&format!("Резервная копия создана: {}", backup_path.display()));
+    }
+    Ok(())
+}
+
 fn confirm(prompt: &str) -> AppResult<bool> {
     loop {
         match read_input(prompt)?.as_str() {
@@ -224,6 +387,49 @@ fn confirm(prompt: &str) -> AppResult<bool> {
             _ => warning("Введите 1 для подтверждения или 2 для отказа."),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgramBalancerState { NoProgram, Simple, Advanced, IncompleteAdvanced, Mixed, Ambiguous }
+
+const PROGRAM_BALANCER_TAGS: [&str; 3] = [
+    PROGRAM_BALANCER_TAG,
+    "xkeen-sub-balancer-rezerve",
+    "xkeen-sub-rest",
+];
+
+fn inspect_program_balancers(balancers: &[Value]) -> ProgramBalancerState {
+    let mut found = HashSet::<&str>::new();
+    let mut has_user_balancer = false;
+    let mut duplicate = false;
+    for balancer in balancers {
+        let Some(tag) = balancer.get("tag").and_then(Value::as_str) else {
+            has_user_balancer = true;
+            continue;
+        };
+        if PROGRAM_BALANCER_TAGS.contains(&tag) {
+            if !found.insert(tag) { duplicate = true; }
+        } else {
+            has_user_balancer = true;
+        }
+    }
+    if !found.contains(PROGRAM_BALANCER_TAG) { return ProgramBalancerState::NoProgram; }
+    if has_user_balancer { return ProgramBalancerState::Mixed; }
+    if duplicate { return ProgramBalancerState::Ambiguous; }
+    match found.len() {
+        1 => ProgramBalancerState::Simple,
+        2 => ProgramBalancerState::IncompleteAdvanced,
+        3 => ProgramBalancerState::Advanced,
+        _ => ProgramBalancerState::Ambiguous,
+    }
+}
+
+fn advanced_balancers_template() -> Value {
+    json!([
+        { "tag": "xkeen-sub-balancer", "fallbackTag": "loopback-out", "strategy": { "type": "leastPing" } },
+        { "tag": "xkeen-sub-balancer-rezerve", "fallbackTag": "loopback-out-rezerve", "strategy": { "type": "random" } },
+        { "tag": "xkeen-sub-rest", "fallbackTag": "direct", "strategy": { "type": "random" } }
+    ])
 }
 
 fn program_balancer(selectors: &[String]) -> Value {
@@ -256,6 +462,161 @@ fn available_outbound_tags(configs: &[ConfigFile]) -> Vec<String> {
         }
     }
     tags
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutingMode {
+    Simple,
+    Advanced,
+}
+
+const PROTECTED_OUTBOUND_PROTOCOLS: [&str; 4] = ["freedom", "blackhole", "dns", "loopback"];
+
+fn apply_routing_mode(
+    configs: &mut [ConfigFile],
+    mode: RoutingMode,
+    loopback_owner: Option<usize>,
+    changed: &mut HashSet<usize>,
+) -> AppResult<()> {
+    let protocols: std::collections::HashMap<String, String> = configs.iter()
+        .filter_map(|config| config.document.get("outbounds").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|outbound| Some((
+            outbound.get("tag")?.as_str()?.to_owned(),
+            outbound.get("protocol")?.as_str()?.to_owned(),
+        )))
+        .collect();
+
+    for (index, config) in configs.iter_mut().enumerate() {
+        let config_name = config.name.clone();
+        let Some(routing) = config.document.get_mut("routing").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let mut modified = false;
+        if let Some(rules_value) = routing.get_mut("rules") {
+            let rules = rules_value.as_array_mut()
+                .ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config_name))?;
+            for rule in rules.iter_mut() {
+                let Some(object) = rule.as_object_mut() else { continue };
+                if is_loopback_rule(object) {
+                    continue;
+                }
+
+                if object.get("balancerTag").is_some() {
+                    if object.get("balancerTag").and_then(Value::as_str) != Some(PROGRAM_BALANCER_TAG) {
+                        object.insert("balancerTag".to_owned(), Value::String(PROGRAM_BALANCER_TAG.to_owned()));
+                        modified = true;
+                    }
+                    modified |= object.remove("outboundTag").is_some();
+                    continue;
+                }
+
+                let Some(outbound_tag) = object.get("outboundTag").and_then(Value::as_str).map(str::to_owned) else {
+                    continue;
+                };
+                if ["api", "direct", "block"].contains(&outbound_tag.as_str()) {
+                    continue;
+                }
+                if protocols.get(&outbound_tag)
+                    .map(|protocol| PROTECTED_OUTBOUND_PROTOCOLS.contains(&protocol.as_str()))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                object.remove("outboundTag");
+                object.insert("balancerTag".to_owned(), Value::String(PROGRAM_BALANCER_TAG.to_owned()));
+                modified = true;
+            }
+        }
+
+        match mode {
+            RoutingMode::Simple => {
+                if let Some(rules) = routing.get_mut("rules").and_then(Value::as_array_mut) {
+                    let before = rules.len();
+                    rules.retain(|rule| rule.as_object().map(|object| !is_loopback_rule(object)).unwrap_or(true));
+                    modified |= rules.len() != before;
+                }
+            }
+            RoutingMode::Advanced => {
+                if loopback_owner == Some(index) {
+                    let rules = routing.entry("rules").or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut().ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config_name))?;
+                    modified |= ensure_loopback_rules(rules);
+                }
+            }
+        }
+
+        if modified {
+            changed.insert(index);
+        }
+    }
+    Ok(())
+}
+
+fn is_loopback_rule(rule: &serde_json::Map<String, Value>) -> bool {
+    let Some(tags) = rule.get("inboundTag").and_then(Value::as_array) else { return false };
+    tags.len() == 1 && matches!(
+        tags[0].as_str(),
+        Some(LOOPBACK_RULE_PRIMARY) | Some(LOOPBACK_RULE_RESERVE)
+    )
+}
+
+fn ensure_loopback_rules(rules: &mut Vec<Value>) -> bool {
+    let original = rules.clone();
+    let mut primary = None;
+    let mut reserve = None;
+    let mut retained = Vec::with_capacity(rules.len() + 2);
+
+    for rule in rules.drain(..) {
+        let matched = rule.as_object().and_then(|object| {
+            let tags = object.get("inboundTag")?.as_array()?;
+            if tags.len() != 1 { return None; }
+            match tags[0].as_str()? {
+                LOOPBACK_RULE_PRIMARY => Some(true),
+                LOOPBACK_RULE_RESERVE => Some(false),
+                _ => None,
+            }
+        });
+
+        match matched {
+            Some(true) if primary.is_none() => {
+                let mut rule = rule;
+                let object = rule.as_object_mut().expect("matched rule is an object");
+                object.insert("type".to_owned(), Value::String("field".to_owned()));
+                object.insert("balancerTag".to_owned(), Value::String("xkeen-sub-balancer-rezerve".to_owned()));
+                object.remove("outboundTag");
+                primary = Some(rule);
+            }
+            Some(false) if reserve.is_none() => {
+                let mut rule = rule;
+                let object = rule.as_object_mut().expect("matched rule is an object");
+                object.insert("type".to_owned(), Value::String("field".to_owned()));
+                object.insert("balancerTag".to_owned(), Value::String("xkeen-sub-rest".to_owned()));
+                object.remove("outboundTag");
+                reserve = Some(rule);
+            }
+            Some(_) => {}
+            None => retained.push(rule),
+        }
+    }
+
+    let first = primary.unwrap_or_else(|| json!({
+        "type": "field",
+        "inboundTag": [LOOPBACK_RULE_PRIMARY],
+        "balancerTag": "xkeen-sub-balancer-rezerve"
+    }));
+    let second = reserve.unwrap_or_else(|| json!({
+        "type": "field",
+        "inboundTag": [LOOPBACK_RULE_RESERVE],
+        "balancerTag": "xkeen-sub-rest"
+    }));
+
+    retained.insert(0, second);
+    retained.insert(0, first);
+    let changed = original != retained;
+    *rules = retained;
+    changed
 }
 
 fn observatory_template() -> Value {
@@ -301,7 +662,7 @@ fn ensure_default_observatory(
     Ok(())
 }
 
-fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppResult<()> {
+fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>, no_persistent_backup: &HashSet<usize>) -> AppResult<()> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let mut backups = Vec::<(usize, PathBuf, bool)>::new();
     let mut written = Vec::<usize>::new();
@@ -310,11 +671,21 @@ fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppR
     for index in changed {
         let config = &configs[*index];
         let existed = config.path.exists();
-        let backup = PathBuf::from(format!("{}.xkeen-sub-install-{nonce}.bak", config.path.display()));
-        if existed {
-            fs::copy(&config.path, &backup)
-                .map_err(|error| format!("Не удалось создать резервную копию {}: {error}", config.path.display()))?;
-        }
+        let backup = if no_persistent_backup.contains(index) {
+            let temp_backup = PathBuf::from(format!("/tmp/{}.xkeen-sub-install-{nonce}.rollback", config.name));
+            if existed {
+                fs::copy(&config.path, &temp_backup)
+                    .map_err(|error| format!("Не удалось подготовить откат {}: {error}", config.path.display()))?;
+            }
+            temp_backup
+        } else {
+            let persistent = PathBuf::from(format!("{}.xkeen-sub-install-{nonce}.bak", config.path.display()));
+            if existed {
+                fs::copy(&config.path, &persistent)
+                    .map_err(|error| format!("Не удалось создать резервную копию {}: {error}", config.path.display()))?;
+            }
+            persistent
+        };
         backups.push((*index, backup, existed));
     }
 
@@ -350,8 +721,10 @@ fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppR
         written.push(*index);
     }
 
-    for (_, backup, existed) in backups {
-        if existed {
+    for (index, backup, existed) in backups {
+        if no_persistent_backup.contains(&index) {
+            if existed { let _ = fs::remove_file(&backup); }
+        } else if existed {
             info(&format!("Резервная копия: {}", backup.display()));
         }
     }
@@ -362,6 +735,63 @@ fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppR
 mod tests {
     use super::{observatory_matches_template, observatory_template, program_balancer, PROGRAM_BALANCER_TAG};
     use serde_json::json;
+
+    fn inspect(value: serde_json::Value) -> super::ProgramBalancerState {
+        super::inspect_program_balancers(value.as_array().expect("balancers must be an array"))
+    }
+
+    #[test]
+    fn detects_simple_template_by_primary_tag_only() {
+        assert_eq!(inspect(json!([{ "tag": "xkeen-sub-balancer" }])), super::ProgramBalancerState::Simple);
+    }
+
+    #[test]
+    fn detects_complete_advanced_template() {
+        assert_eq!(inspect(json!([
+            { "tag": "xkeen-sub-balancer" },
+            { "tag": "xkeen-sub-balancer-rezerve" },
+            { "tag": "xkeen-sub-rest" }
+        ])), super::ProgramBalancerState::Advanced);
+    }
+
+    #[test]
+    fn detects_incomplete_advanced_only_without_user_balancers() {
+        assert_eq!(inspect(json!([
+            { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }
+        ])), super::ProgramBalancerState::IncompleteAdvanced);
+        assert_eq!(inspect(json!([
+            { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }, { "tag": "my-user-balancer" }
+        ])), super::ProgramBalancerState::Mixed);
+    }
+
+    #[test]
+    fn user_balancers_are_detected_even_if_program_tags_are_duplicated() {
+        assert_eq!(inspect(json!([
+            { "tag": "xkeen-sub-balancer" },
+            { "tag": "xkeen-sub-balancer" },
+            { "tag": "custom-balancer" }
+        ])), super::ProgramBalancerState::Mixed);
+    }
+
+    #[test]
+    fn advanced_tags_without_primary_are_not_recognized_as_program_template() {
+        assert_eq!(inspect(json!([
+            { "tag": "xkeen-sub-balancer-rezerve" }, { "tag": "xkeen-sub-rest" }
+        ])), super::ProgramBalancerState::NoProgram);
+    }
+
+    #[test]
+    fn advanced_template_has_no_selectors_and_expected_fallbacks() {
+        let template = super::advanced_balancers_template();
+        assert_eq!(template.as_array().unwrap().len(), 3);
+        assert!(template.as_array().unwrap().iter().all(|item| item.get("selector").is_none()));
+        assert_eq!(template[0]["fallbackTag"], "loopback-out");
+        assert_eq!(template[0]["strategy"]["type"], "leastPing");
+        assert_eq!(template[1]["fallbackTag"], "loopback-out-rezerve");
+        assert_eq!(template[1]["strategy"]["type"], "random");
+        assert_eq!(template[2]["fallbackTag"], "direct");
+        assert_eq!(template[2]["strategy"]["type"], "random");
+    }
 
     #[test]
     fn program_balancer_uses_expected_tag_and_strategy() {
@@ -395,4 +825,103 @@ mod tests {
         custom["extra"] = json!(true);
         assert!(!observatory_matches_template(&custom));
     }
+
+    #[test]
+    fn advanced_loopback_rules_are_inserted_in_order_before_user_rules() {
+        let mut rules = vec![
+            json!({"type":"field","domain":["example.com"],"outboundTag":"direct"})
+        ];
+        assert!(super::ensure_loopback_rules(&mut rules));
+        assert_eq!(rules[0]["inboundTag"], json!(["loopback-in"]));
+        assert_eq!(rules[0]["balancerTag"], "xkeen-sub-balancer-rezerve");
+        assert_eq!(rules[1]["inboundTag"], json!(["loopback-in-rezerve"]));
+        assert_eq!(rules[1]["balancerTag"], "xkeen-sub-rest");
+        assert_eq!(rules[2]["domain"], json!(["example.com"]));
+        assert!(!super::ensure_loopback_rules(&mut rules));
+    }
+
+    #[test]
+    fn missing_second_loopback_rule_is_inserted_after_existing_first_rule() {
+        let mut rules = vec![
+            json!({"type":"field","inboundTag":["loopback-in"],"balancerTag":"wrong"}),
+            json!({"domain":["example.com"],"outboundTag":"direct"})
+        ];
+        assert!(super::ensure_loopback_rules(&mut rules));
+        assert_eq!(rules[0]["inboundTag"], json!(["loopback-in"]));
+        assert_eq!(rules[1]["inboundTag"], json!(["loopback-in-rezerve"]));
+        assert_eq!(rules[2]["domain"], json!(["example.com"]));
+        assert!(!super::ensure_loopback_rules(&mut rules));
+    }
+
+    #[test]
+    fn selected_template_redirects_proxy_routes_but_preserves_direct_and_block() {
+        let mut configs = vec![super::ConfigFile {
+            path: std::path::PathBuf::from("06_policy.json"),
+            name: "06_policy.json".to_owned(),
+            original: String::new(),
+            document: json!({
+                "outbounds": [
+                    {"tag":"proxy-a","protocol":"vless"},
+                    {"tag":"direct","protocol":"freedom"},
+                    {"tag":"block","protocol":"blackhole"}
+                ],
+                "routing": {
+                    "balancers": [],
+                    "rules": [
+                        {"type":"field","outboundTag":"proxy-a","domain":["example.com"]},
+                        {"type":"field","outboundTag":"direct","network":"tcp"},
+                        {"type":"field","outboundTag":"block","domain":["blocked.example"]},
+                        {"type":"field","balancerTag":"old-user-balancer","ip":["1.2.3.4"]}
+                    ]
+                }
+            })
+        }];
+        let mut changed = std::collections::HashSet::new();
+        super::apply_routing_mode(
+            &mut configs,
+            super::RoutingMode::Simple,
+            Some(0),
+            &mut changed
+        ).unwrap();
+
+        let rules = configs[0].document["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["balancerTag"], super::PROGRAM_BALANCER_TAG);
+        assert_eq!(rules[0].get("outboundTag"), None);
+        assert_eq!(rules[0]["domain"], json!(["example.com"]));
+        assert_eq!(rules[1]["outboundTag"], "direct");
+        assert_eq!(rules[2]["outboundTag"], "block");
+        assert_eq!(rules[3]["balancerTag"], super::PROGRAM_BALANCER_TAG);
+        assert_eq!(rules[3]["ip"], json!(["1.2.3.4"]));
+    }
+
+    #[test]
+    fn advanced_loopback_rules_are_only_added_to_the_balancer_owner_file() {
+        let mut configs = vec![
+            super::ConfigFile {
+                path: std::path::PathBuf::from("06_policy.json"),
+                name: "06_policy.json".to_owned(),
+                original: String::new(),
+                document: json!({"routing":{"rules":[{"outboundTag":"proxy"}]}}),
+            },
+            super::ConfigFile {
+                path: std::path::PathBuf::from("07_custom.json"),
+                name: "07_custom.json".to_owned(),
+                original: String::new(),
+                document: json!({"routing":{"rules":[{"outboundTag":"proxy"}]}}),
+            }
+        ];
+        let mut changed = std::collections::HashSet::new();
+        super::apply_routing_mode(
+            &mut configs,
+            super::RoutingMode::Advanced,
+            Some(0),
+            &mut changed
+        ).unwrap();
+
+        assert_eq!(configs[0].document["routing"]["rules"][0]["inboundTag"], json!(["loopback-in"]));
+        assert_eq!(configs[0].document["routing"]["rules"][1]["inboundTag"], json!(["loopback-in-rezerve"]));
+        assert_eq!(configs[1].document["routing"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(configs[1].document["routing"]["rules"][0]["balancerTag"], super::PROGRAM_BALANCER_TAG);
+    }
+
 }

@@ -14,7 +14,7 @@ use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_apply::{self, PlannedOperationKind};
 use crate::update_config::{collect_api_tags, find_doc, load_config_documents, validate_all, ConfigDocument, CONFIG_DIR, OUTBOUND_FILE, ROUTING_FILE};
 use crate::update_merge::{collect_selector_tags, collect_tags, ensure_service_outbounds, load_archive, merge_outbounds, rebuild_outbounds, subscription_id_number, ArchivePlan};
-use crate::update_plan::{build_file_plan, build_file_plan_with_registry, build_file_plan_with_registry_and_blacklist};
+use crate::update_plan::{build_file_plan, build_file_plan_with_blacklist, build_file_plan_with_registry, build_file_plan_with_registry_and_blacklist};
 use crate::update_report::{print_baseline_plan, print_configuration_summary, print_file_plan, print_json_section, print_merge_summary, print_prepared_documents, print_subscription_summary, print_updated_outbound, print_xray_test};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -217,7 +217,8 @@ fn apply_configuration(
         let plan = match (registry, blacklist_override) {
             (Some(store), Some(blacklist)) => build_file_plan_with_registry_and_blacklist(&docs, state, &archive, store, blacklist)?,
             (Some(store), None) => build_file_plan_with_registry(&docs, state, &archive, store)?,
-            (None, _) => build_file_plan(&docs, state, &archive)?,
+            (None, Some(blacklist)) => build_file_plan_with_blacklist(&docs, state, &archive, blacklist)?,
+            (None, None) => build_file_plan(&docs, state, &archive)?,
         };
         no_file_changes = plan.is_empty();
         print_file_plan(&plan);

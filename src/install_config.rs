@@ -49,28 +49,63 @@ pub fn run_install_config_check() -> AppResult<()> {
 
     }
 
-    // Offer to replace user-defined balancers only when a non-empty list exists
-    // and does not already contain the xkeen-sub balancer.
-    let candidates: Vec<usize> = configs.iter().enumerate().filter_map(|(index, config)| {
-        let routing = config.document.get("routing")?.as_object()?;
-        let balancers = routing.get("balancers")?.as_array()?;
-        if balancers.is_empty() {
-            return None;
-        }
-        let has_program = balancers.iter().any(|item| {
-            item.get("tag").and_then(Value::as_str) == Some(PROGRAM_BALANCER_TAG)
-        });
-        (!has_program).then_some(index)
-    }).collect();
+    // Detect xkeen-sub's own balancer templates in each routing file.
+    let mut legacy_candidates = Vec::<usize>::new();
+    let mut incomplete_advanced = Vec::<usize>::new();
 
-    if !candidates.is_empty() {
-        info("В конфигурации найдены пользовательские балансировщики:");
-        for index in &candidates {
+    for (index, config) in configs.iter().enumerate() {
+        let Some(balancers) = config.document.get("routing")
+            .and_then(|routing| routing.get("balancers"))
+            .and_then(Value::as_array) else { continue };
+
+        match inspect_program_balancers(balancers) {
+            ProgramBalancerState::Simple => success(&format!("{}: найден шаблон Simple.", config.name)),
+            ProgramBalancerState::Advanced => success(&format!("{}: найден полный шаблон Advanced.", config.name)),
+            ProgramBalancerState::IncompleteAdvanced => incomplete_advanced.push(index),
+            ProgramBalancerState::Mixed => warning(&format!(
+                "{}: найдены балансировщики xkeen-sub вместе с пользовательскими. Автоматическая замена не предлагается.",
+                config.name
+            )),
+            ProgramBalancerState::Ambiguous => warning(&format!(
+                "{}: структура балансировщиков xkeen-sub неоднозначна (повторяющиеся или некорректные Tag). Автоматическая замена пропущена.",
+                config.name
+            )),
+            ProgramBalancerState::NoProgram => {
+                if !balancers.is_empty() { legacy_candidates.push(index); }
+            }
+        }
+    }
+
+    if !incomplete_advanced.is_empty() {
+        info("Найден неполный шаблон Advanced: основной балансировщик и только один из двух дополнительных.");
+        for index in &incomplete_advanced {
+            let tags = configs[*index].document["routing"]["balancers"].as_array().unwrap()
+                .iter().filter_map(|item| item.get("tag").and_then(Value::as_str))
+                .collect::<Vec<_>>().join(", ");
+            info(&format!("  {}: {}", configs[*index].name, tags));
+        }
+        warning("Замена восстановит полный шаблон Advanced. Пользовательских балансировщиков в этих файлах не обнаружено.");
+        if confirm("Заменить неполный шаблон актуальным шаблоном Advanced? (1 — да, 2 — нет): ")? {
+            for index in &incomplete_advanced {
+                let routing = configs[*index].document["routing"].as_object_mut()
+                    .ok_or("Поле routing должно быть объектом.")?;
+                routing.insert("balancers".to_owned(), advanced_balancers_template());
+                changed.insert(*index);
+            }
+            success("Неполный шаблон заменён полным шаблоном Advanced.");
+        } else {
+            info("Неполный шаблон Advanced оставлен без изменений.");
+        }
+    }
+
+    // Without the primary xkeen-sub tag, similarly named balancers are not
+    // considered ours. Keep the existing opt-in replacement flow for them.
+    if !legacy_candidates.is_empty() {
+        info("В конфигурации найдены балансировщики без основного Tag xkeen-sub:");
+        for index in &legacy_candidates {
             let balancers = configs[*index].document["routing"]["balancers"].as_array().unwrap();
-            let tags = balancers.iter()
-                .filter_map(|item| item.get("tag").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let tags = balancers.iter().filter_map(|item| item.get("tag").and_then(Value::as_str))
+                .collect::<Vec<_>>().join(", ");
             info(&format!("  {}: {}", configs[*index].name, if tags.is_empty() { "без Tag".to_owned() } else { tags }));
         }
         warning("Замена удалит перечисленные балансировщики и оставит только xkeen-sub-balancer.");
@@ -78,22 +113,16 @@ pub fn run_install_config_check() -> AppResult<()> {
         if selectors.is_empty() {
             warning("Не найдено ни одного подходящего исходящего подключения. Замена балансировщиков пропущена, чтобы не создавать пустой selector.");
         } else if confirm("Заменить пользовательские балансировщики? (1 — да, 2 — нет): ")? {
-            for index in &candidates {
+            for index in &legacy_candidates {
                 let routing = configs[*index].document["routing"].as_object_mut()
                     .ok_or("Поле routing должно быть объектом.")?;
                 routing.insert("balancers".to_owned(), Value::Array(vec![program_balancer(&selectors)]));
                 changed.insert(*index);
             }
 
-            // Redirect only rules that already use balancerTag. Rules with
-            // outboundTag are deliberately left unchanged.
             for (index, config) in configs.iter_mut().enumerate() {
-                let Some(routing) = config.document.get_mut("routing").and_then(Value::as_object_mut) else {
-                    continue;
-                };
-                let Some(rules) = routing.get_mut("rules").and_then(Value::as_array_mut) else {
-                    continue;
-                };
+                let Some(routing) = config.document.get_mut("routing").and_then(Value::as_object_mut) else { continue };
+                let Some(rules) = routing.get_mut("rules").and_then(Value::as_array_mut) else { continue };
                 let mut modified = false;
                 for rule in rules {
                     let Some(object) = rule.as_object_mut() else { continue };
@@ -104,16 +133,14 @@ pub fn run_install_config_check() -> AppResult<()> {
                         }
                     }
                 }
-                if modified {
-                    changed.insert(index);
-                }
+                if modified { changed.insert(index); }
             }
             success("Балансировщики будут заменены на xkeen-sub-balancer.");
         } else {
             info("Пользовательские балансировщики оставлены без изменений.");
         }
-    } else {
-        success("Пользовательские балансировщики для замены не найдены.");
+    } else if incomplete_advanced.is_empty() {
+        success("Балансировщики xkeen-sub не требуют восстановления.");
     }
 
     // Check every top-level Observatory variant in every JSON/JSONC file.
@@ -224,6 +251,49 @@ fn confirm(prompt: &str) -> AppResult<bool> {
             _ => warning("Введите 1 для подтверждения или 2 для отказа."),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgramBalancerState { NoProgram, Simple, Advanced, IncompleteAdvanced, Mixed, Ambiguous }
+
+const PROGRAM_BALANCER_TAGS: [&str; 3] = [
+    PROGRAM_BALANCER_TAG,
+    "xkeen-sub-balancer-rezerve",
+    "xkeen-sub-rest",
+];
+
+fn inspect_program_balancers(balancers: &[Value]) -> ProgramBalancerState {
+    let mut found = HashSet::<&str>::new();
+    let mut has_user_balancer = false;
+    let mut duplicate = false;
+    for balancer in balancers {
+        let Some(tag) = balancer.get("tag").and_then(Value::as_str) else {
+            has_user_balancer = true;
+            continue;
+        };
+        if PROGRAM_BALANCER_TAGS.contains(&tag) {
+            if !found.insert(tag) { duplicate = true; }
+        } else {
+            has_user_balancer = true;
+        }
+    }
+    if !found.contains(PROGRAM_BALANCER_TAG) { return ProgramBalancerState::NoProgram; }
+    if duplicate { return ProgramBalancerState::Ambiguous; }
+    if has_user_balancer { return ProgramBalancerState::Mixed; }
+    match found.len() {
+        1 => ProgramBalancerState::Simple,
+        2 => ProgramBalancerState::IncompleteAdvanced,
+        3 => ProgramBalancerState::Advanced,
+        _ => ProgramBalancerState::Ambiguous,
+    }
+}
+
+fn advanced_balancers_template() -> Value {
+    json!([
+        { "tag": "xkeen-sub-balancer", "fallbackTag": "loopback-out", "strategy": { "type": "leastPing" } },
+        { "tag": "xkeen-sub-balancer-rezerve", "fallbackTag": "loopback-out-rezerve", "strategy": { "type": "random" } },
+        { "tag": "xkeen-sub-rest", "fallbackTag": "direct", "strategy": { "type": "random" } }
+    ])
 }
 
 fn program_balancer(selectors: &[String]) -> Value {
@@ -362,6 +432,50 @@ fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppR
 mod tests {
     use super::{observatory_matches_template, observatory_template, program_balancer, PROGRAM_BALANCER_TAG};
     use serde_json::json;
+
+    #[test]
+    fn detects_simple_template_by_primary_tag_only() {
+        assert_eq!(super::inspect_program_balancers(&json!([{ "tag": "xkeen-sub-balancer" }])), super::ProgramBalancerState::Simple);
+    }
+
+    #[test]
+    fn detects_complete_advanced_template() {
+        assert_eq!(super::inspect_program_balancers(&json!([
+            { "tag": "xkeen-sub-balancer" },
+            { "tag": "xkeen-sub-balancer-rezerve" },
+            { "tag": "xkeen-sub-rest" }
+        ])), super::ProgramBalancerState::Advanced);
+    }
+
+    #[test]
+    fn detects_incomplete_advanced_only_without_user_balancers() {
+        assert_eq!(super::inspect_program_balancers(&json!([
+            { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }
+        ])), super::ProgramBalancerState::IncompleteAdvanced);
+        assert_eq!(super::inspect_program_balancers(&json!([
+            { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }, { "tag": "my-user-balancer" }
+        ])), super::ProgramBalancerState::Mixed);
+    }
+
+    #[test]
+    fn advanced_tags_without_primary_are_not_recognized_as_program_template() {
+        assert_eq!(super::inspect_program_balancers(&json!([
+            { "tag": "xkeen-sub-balancer-rezerve" }, { "tag": "xkeen-sub-rest" }
+        ])), super::ProgramBalancerState::NoProgram);
+    }
+
+    #[test]
+    fn advanced_template_has_no_selectors_and_expected_fallbacks() {
+        let template = super::advanced_balancers_template();
+        assert_eq!(template.as_array().unwrap().len(), 3);
+        assert!(template.as_array().unwrap().iter().all(|item| item.get("selector").is_none()));
+        assert_eq!(template[0]["fallbackTag"], "loopback-out");
+        assert_eq!(template[0]["strategy"]["type"], "leastPing");
+        assert_eq!(template[1]["fallbackTag"], "loopback-out-rezerve");
+        assert_eq!(template[1]["strategy"]["type"], "random");
+        assert_eq!(template[2]["fallbackTag"], "direct");
+        assert_eq!(template[2]["strategy"]["type"], "random");
+    }
 
     #[test]
     fn program_balancer_uses_expected_tag_and_strategy() {

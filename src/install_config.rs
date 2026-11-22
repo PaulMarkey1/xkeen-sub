@@ -823,4 +823,103 @@ mod tests {
         custom["extra"] = json!(true);
         assert!(!observatory_matches_template(&custom));
     }
+
+    #[test]
+    fn advanced_loopback_rules_are_inserted_in_order_before_user_rules() {
+        let mut rules = vec![
+            json!({"type":"field","domain":["example.com"],"outboundTag":"direct"})
+        ];
+        assert!(super::ensure_loopback_rules(&mut rules));
+        assert_eq!(rules[0]["inboundTag"], json!(["loopback-in"]));
+        assert_eq!(rules[0]["balancerTag"], "xkeen-sub-balancer-rezerve");
+        assert_eq!(rules[1]["inboundTag"], json!(["loopback-in-rezerve"]));
+        assert_eq!(rules[1]["balancerTag"], "xkeen-sub-rest");
+        assert_eq!(rules[2]["domain"], json!(["example.com"]));
+        assert!(!super::ensure_loopback_rules(&mut rules));
+    }
+
+    #[test]
+    fn missing_second_loopback_rule_is_inserted_after_existing_first_rule() {
+        let mut rules = vec![
+            json!({"type":"field","inboundTag":["loopback-in"],"balancerTag":"wrong"}),
+            json!({"domain":["example.com"],"outboundTag":"direct"})
+        ];
+        assert!(super::ensure_loopback_rules(&mut rules));
+        assert_eq!(rules[0]["inboundTag"], json!(["loopback-in"]));
+        assert_eq!(rules[1]["inboundTag"], json!(["loopback-in-rezerve"]));
+        assert_eq!(rules[2]["domain"], json!(["example.com"]));
+        assert!(!super::ensure_loopback_rules(&mut rules));
+    }
+
+    #[test]
+    fn selected_template_redirects_proxy_routes_but_preserves_direct_and_block() {
+        let mut configs = vec![super::ConfigFile {
+            path: std::path::PathBuf::from("06_policy.json"),
+            name: "06_policy.json".to_owned(),
+            original: String::new(),
+            document: json!({
+                "outbounds": [
+                    {"tag":"proxy-a","protocol":"vless"},
+                    {"tag":"direct","protocol":"freedom"},
+                    {"tag":"block","protocol":"blackhole"}
+                ],
+                "routing": {
+                    "balancers": [],
+                    "rules": [
+                        {"type":"field","outboundTag":"proxy-a","domain":["example.com"]},
+                        {"type":"field","outboundTag":"direct","network":"tcp"},
+                        {"type":"field","outboundTag":"block","domain":["blocked.example"]},
+                        {"type":"field","balancerTag":"old-user-balancer","ip":["1.2.3.4"]}
+                    ]
+                }
+            })
+        }];
+        let mut changed = std::collections::HashSet::new();
+        super::apply_routing_mode(
+            &mut configs,
+            super::RoutingMode::Simple,
+            Some(0),
+            &mut changed
+        ).unwrap();
+
+        let rules = configs[0].document["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["balancerTag"], super::PROGRAM_BALANCER_TAG);
+        assert_eq!(rules[0].get("outboundTag"), None);
+        assert_eq!(rules[0]["domain"], json!(["example.com"]));
+        assert_eq!(rules[1]["outboundTag"], "direct");
+        assert_eq!(rules[2]["outboundTag"], "block");
+        assert_eq!(rules[3]["balancerTag"], super::PROGRAM_BALANCER_TAG);
+        assert_eq!(rules[3]["ip"], json!(["1.2.3.4"]));
+    }
+
+    #[test]
+    fn advanced_loopback_rules_are_only_added_to_the_balancer_owner_file() {
+        let mut configs = vec![
+            super::ConfigFile {
+                path: std::path::PathBuf::from("06_policy.json"),
+                name: "06_policy.json".to_owned(),
+                original: String::new(),
+                document: json!({"routing":{"rules":[{"outboundTag":"proxy"}]}}),
+            },
+            super::ConfigFile {
+                path: std::path::PathBuf::from("07_custom.json"),
+                name: "07_custom.json".to_owned(),
+                original: String::new(),
+                document: json!({"routing":{"rules":[{"outboundTag":"proxy"}]}}),
+            }
+        ];
+        let mut changed = std::collections::HashSet::new();
+        super::apply_routing_mode(
+            &mut configs,
+            super::RoutingMode::Advanced,
+            Some(0),
+            &mut changed
+        ).unwrap();
+
+        assert_eq!(configs[0].document["routing"]["rules"][0]["inboundTag"], json!(["loopback-in"]));
+        assert_eq!(configs[0].document["routing"]["rules"][1]["inboundTag"], json!(["loopback-in-rezerve"]));
+        assert_eq!(configs[1].document["routing"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(configs[1].document["routing"]["rules"][0]["balancerTag"], super::PROGRAM_BALANCER_TAG);
+    }
+
 }

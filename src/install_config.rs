@@ -349,8 +349,8 @@ fn inspect_program_balancers(balancers: &[Value]) -> ProgramBalancerState {
         }
     }
     if !found.contains(PROGRAM_BALANCER_TAG) { return ProgramBalancerState::NoProgram; }
-    if duplicate { return ProgramBalancerState::Ambiguous; }
     if has_user_balancer { return ProgramBalancerState::Mixed; }
+    if duplicate { return ProgramBalancerState::Ambiguous; }
     match found.len() {
         1 => ProgramBalancerState::Simple,
         2 => ProgramBalancerState::IncompleteAdvanced,
@@ -541,6 +541,15 @@ mod tests {
         ])), super::ProgramBalancerState::IncompleteAdvanced);
         assert_eq!(inspect(json!([
             { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }, { "tag": "my-user-balancer" }
+        ])), super::ProgramBalancerState::Mixed);
+    }
+
+    #[test]
+    fn user_balancers_are_detected_even_if_program_tags_are_duplicated() {
+        assert_eq!(inspect(json!([
+            { "tag": "xkeen-sub-balancer" },
+            { "tag": "xkeen-sub-balancer" },
+            { "tag": "custom-balancer" }
         ])), super::ProgramBalancerState::Mixed);
     }
 

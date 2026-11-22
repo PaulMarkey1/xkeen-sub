@@ -1,10 +1,10 @@
 use crate::backup::BackupSession;
-use crate::outbound_compare::compare_subscription;
+use crate::outbound_compare::{compare_subscription, outbounds_differ_only_by_short_id};
 use crate::subscription_download::download_subscription;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::Subscription;
 use crate::terminal::{error, info, success, title, warning};
-use crate::update_state::{PreparedBaseline, PreparedSubscription, RunState, SubscriptionChanges};
+use crate::update_state::{DeferredShortIdUpdate, PreparedBaseline, PreparedSubscription, RunState, SubscriptionChanges};
 use crate::update_report::{print_comparison, show_value};
 
 use serde_json::Value;
@@ -241,6 +241,38 @@ pub(crate) fn prepare_subscription(
     let changed = !report.added.is_empty() || !report.removed.is_empty() || !report.changed.is_empty();
     if !changed {
         state.processed += 1;
+
+        if let Some(previous_json) = previous_json.as_deref() {
+            if outbounds_differ_only_by_short_id(previous_json, &current_json)? {
+                let outbounds = current.outbounds.iter().cloned().map(|mut outbound| {
+                    let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
+                    let tag = format!("{}{}", subscription.prefix, original_tag);
+                    if let Some(object) = outbound.as_object_mut() {
+                        object.insert("tag".to_owned(), Value::String(tag));
+                    }
+                    outbound
+                }).collect();
+
+                state.deferred_short_id_updates.push(DeferredShortIdUpdate {
+                    subscription: PreparedSubscription {
+                        id: subscription.id.clone(),
+                        outbounds,
+                    },
+                    baseline: PreparedBaseline {
+                        id: subscription.id.clone(),
+                        original: downloaded,
+                        path: baseline.clone(),
+                    },
+                });
+                success("Изменился только shortId. Обновление отложено до появления других изменений в подписках.");
+                backup.event("COMPARE", &format!(
+                    "{}: обнаружена только ротация shortId; подключение и baseline пока не обновляются.",
+                    subscription.id
+                ))?;
+                record_observed_tags(state, subscription, &current);
+                return Ok(());
+            }
+        }
         if previous.as_deref().map(|bytes| !byte_contents_equal(Some(bytes), &downloaded)).unwrap_or(true) {
             state.baseline_updates.push(PreparedBaseline {
                 id: subscription.id.clone(),
@@ -312,6 +344,17 @@ pub(crate) fn prepare_subscriptions(
                 state.failed.len()
             ),
         )?;
+    }
+
+    if !state.prepared.is_empty() && !state.deferred_short_id_updates.is_empty() {
+        for deferred in state.deferred_short_id_updates.drain(..) {
+            backup.event("COMPARE", &format!(
+                "{}: отложенная ротация shortId применена вместе с другими изменениями подписок.",
+                deferred.subscription.id
+            ))?;
+            state.prepared.push(deferred.subscription);
+            state.baseline_updates.push(deferred.baseline);
+        }
     }
 
     backup.set_updated_subscriptions(state.prepared.iter().map(|item| item.id.clone()).collect());

@@ -16,6 +16,23 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const BASELINE_DIR: &str = "/opt/etc/xkeen-sub/baseline";
 
+fn record_observed_tags(
+    state: &mut RunState,
+    subscription: &Subscription,
+    parsed: &crate::subscription_parser::ParsedSubscription,
+) {
+    if parsed.unrecognized > 0 || parsed.outbounds.is_empty() {
+        return;
+    }
+    let tags: Vec<String> = parsed.outbounds.iter()
+        .filter_map(|outbound| outbound.get("tag").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    if !tags.is_empty() && tags.len() == parsed.outbounds.len() {
+        state.observed_tags.retain(|(id, _)| id != &subscription.id);
+        state.observed_tags.push((subscription.id.clone(), tags));
+    }
+}
+
 pub(crate) fn prepare_subscription(
     subscription: &Subscription,
     state: &mut RunState,
@@ -90,6 +107,9 @@ pub(crate) fn prepare_subscription(
             state.processed += 1;
             success("Сервер вернул те же данные, что и при прошлом обновлении. Изменений нет.");
             backup.event("COMPARE", &format!("{}: уровень 1 — исходные байты совпадают с baseline; изменений нет.", subscription.id))?;
+            if let Some(parsed) = previous_parsed.as_ref() {
+                record_observed_tags(state, subscription, parsed);
+            }
             return Ok(());
         }
         info("Полученные данные отличаются от сохранённой копии. Проверяем, что именно изменилось.");
@@ -149,6 +169,7 @@ pub(crate) fn prepare_subscription(
                 "{}: уровень 2 — сформированные Outbound совпадают побайтно; подготовлено обновление только baseline.",
                 subscription.id
             ))?;
+            record_observed_tags(state, subscription, &current);
             backup.event("BASELINE", &format!(
                 "{}: исходные байты подписки изменились, но поддерживаемые Outbound прежние; новая версия подготовлена для baseline.",
                 subscription.id
@@ -235,6 +256,7 @@ pub(crate) fn prepare_subscription(
             success("Изменений среди распознанных подключений нет. Рабочая группа и baseline остаются без изменений.");
             backup.event("SUBSCRIPTION", &format!("{}: поддерживаемые подключения и исходные байты не изменились.", subscription.id))?;
         }
+        record_observed_tags(state, subscription, &current);
         return Ok(());
     }
 
@@ -250,6 +272,7 @@ pub(crate) fn prepare_subscription(
     });
     backup.event("BASELINE", &format!("{}: новый baseline подготовлен для {}.", subscription.id, baseline.display()))?;
 
+    record_observed_tags(state, subscription, &current);
     let outbounds: Vec<Value> = current.outbounds.into_iter().map(|mut outbound| {
         let original_tag = outbound.get("tag").and_then(Value::as_str).unwrap_or("node");
         let tag = format!("{}{}", subscription.prefix, original_tag);

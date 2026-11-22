@@ -32,6 +32,9 @@ pub(crate) struct RunState {
     pub(crate) prepared: Vec<PreparedSubscription>,
     pub(crate) baseline_updates: Vec<PreparedBaseline>,
     pub(crate) baseline_removals: Vec<(String, PathBuf)>,
+    /// Complete source Tag sets from successfully parsed subscriptions.
+    /// Partial/empty parses are deliberately not recorded for blacklist cleanup.
+    pub(crate) observed_tags: Vec<(String, Vec<String>)>,
     pub(crate) failed: Vec<(String, String)>,
     pub(crate) downloaded: usize,
     pub(crate) processed: usize,

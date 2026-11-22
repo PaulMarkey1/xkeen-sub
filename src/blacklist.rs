@@ -70,6 +70,22 @@ impl BlacklistStore {
         });
         self.normalize();
     }
+    /// Removes stale entries only for subscriptions whose current source tags
+    /// were parsed completely. Subscriptions absent from observed_tags are untouched.
+    pub(crate) fn prune_missing_tags(&mut self, observed_tags: &[(String, Vec<String>)]) -> usize {
+        let observed: HashMap<&str, HashSet<&str>> = observed_tags.iter()
+            .map(|(id, tags)| (id.as_str(), tags.iter().map(String::as_str).collect()))
+            .collect();
+        let before = self.entries.len();
+        self.entries.retain(|entry| {
+            observed.get(entry.subscription_id.as_str())
+                .map(|tags| tags.contains(entry.tag.as_str()))
+                .unwrap_or(true)
+        });
+        self.normalize();
+        before - self.entries.len()
+    }
+
     fn toggle(&mut self, id: &str, tag: &str) -> bool {
         if let Some(i) = self.entries.iter().position(|e| e.subscription_id == id && e.tag == tag) {
             self.entries.remove(i); false
@@ -241,6 +257,31 @@ mod tests {
         assert_eq!(store.filter_outbounds(&[sub],&mut outs).unwrap(),1);
         assert_eq!(outs[0]["tag"],"sub1--New--keep");
     }
+    #[test]
+    fn pruning_removes_only_missing_tags_for_observed_subscriptions() {
+        let mut store=BlacklistStore{entries:vec![
+            BlacklistEntry{subscription_id:"sub1".into(),tag:"keep".into()},
+            BlacklistEntry{subscription_id:"sub1".into(),tag:"gone".into()},
+            BlacklistEntry{subscription_id:"sub2".into(),tag:"untouched".into()},
+        ]};
+        let removed=store.prune_missing_tags(&[("sub1".into(),vec!["keep".into(),"new".into()])]);
+        assert_eq!(removed,1);
+        assert_eq!(store.entries,vec![
+            BlacklistEntry{subscription_id:"sub1".into(),tag:"keep".into()},
+            BlacklistEntry{subscription_id:"sub2".into(),tag:"untouched".into()},
+        ]);
+    }
+
+    #[test]
+    fn pruning_does_not_clear_entries_for_empty_or_unobserved_subscriptions() {
+        let mut store=BlacklistStore{entries:vec![
+            BlacklistEntry{subscription_id:"sub1".into(),tag:"blocked".into()},
+        ]};
+        assert_eq!(store.prune_missing_tags(&[]),0);
+        assert_eq!(store.prune_missing_tags(&[("sub1".into(),Vec::new())]),0);
+        assert_eq!(store.entries.len(),1);
+    }
+
     #[test]
     fn deleting_subscription_remaps_remaining_blacklist_ids() {
         let mut store=BlacklistStore{entries:vec![

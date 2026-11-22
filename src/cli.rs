@@ -53,7 +53,7 @@ fn print_help() -> AppResult<()> {
     separator("Использование:");
     command_item("xkeen-sub", "Показать справку");
     command_item("help", "Показать справку");
-    command_item("--version", "Показать версию");
+    command_item("--version", "Показать номер версии");
     println!();
     separator("Команды настройки подписок (все команды начинаются с setup):");
     command_item("setup", "Открыть меню настройки подписок");

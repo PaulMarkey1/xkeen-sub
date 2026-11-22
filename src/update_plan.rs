@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::update_state::{PreparedBaseline, RunState};
 use crate::update_config::ConfigDocument;
@@ -195,7 +195,7 @@ fn append_blacklist_operation(
     blacklist: &BlacklistStore,
 ) -> AppResult<()> {
     let mut content = serde_json::to_vec_pretty(blacklist)?;
-    content.push(b'\\n');
+    content.push(b'\n');
     match fs::read(&path) {
         Ok(original) if original == content => {}
         Ok(_) => plan.push(PlannedFileOperation {

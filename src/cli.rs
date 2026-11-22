@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{auto_update, backup, current_connection, install_config, maintenance, setup, update};
+use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -24,6 +24,7 @@ pub fn run() -> AppResult<()> {
         [root] if root == "backup" => backup::run(),
         [root, action] if root == "node" && action == "tick" => current_connection::tick(),
         [action] if action == "node" => current_connection::run(),
+        [action] if action == "balancers" => balancers::run_menu(),
         [root, rest @ ..] if root == "backup" => backup::run_command(rest),
         [root] if root == "setup" => setup::run_menu(),
         [root] if root == "auto-update" => auto_update::run_menu(),
@@ -52,7 +53,7 @@ fn print_help() -> AppResult<()> {
     separator("Использование:");
     command_item("xkeen-sub", "Показать справку");
     command_item("help", "Показать справку");
-    command_item("--version", "Показать номер версии");
+    command_item("--version", "Показать версию");
     println!();
     separator("Команды настройки подписок (все команды начинаются с setup):");
     command_item("setup", "Открыть меню настройки подписок");
@@ -62,6 +63,7 @@ fn print_help() -> AppResult<()> {
     command_item("setup edit", "Изменить имя или URL подписки");
     command_item("setup help", "Показать справку по настройке");
     println!();
+    command_item("balancers", "Выбрать режим балансировки (пока только просмотр вариантов)");
     command_item("backup", "Настроить и просмотреть резервные копии");
     command_item("  user-backup", "Создать ручную полную точку восстановления");
     command_item("  limit N", "Установить дневной лимит (минимум 5 точек)");

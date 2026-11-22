@@ -99,8 +99,11 @@ pub fn run_install_config_check() -> AppResult<()> {
         info("  2 — установить продвинутый режим");
         let mode = read_choice("Выберите режим: ", &["1", "2"])?;
         let target = configs.iter().position(|config| {
+            config.document.get("routing").and_then(|routing| routing.get("rules"))
+                .and_then(Value::as_array).is_some()
+        }).or_else(|| configs.iter().position(|config| {
             config.document.get("routing").and_then(Value::as_object).is_some()
-        }).ok_or("Не найден файл с объектом routing. Невозможно установить балансировщик.")?;
+        })).ok_or("Не найден файл с объектом routing. Невозможно установить балансировщик.")?;
 
         let template = if mode == "1" {
             let selectors = available_outbound_tags(&configs);
@@ -172,10 +175,6 @@ pub fn run_install_config_check() -> AppResult<()> {
             let replacement_choice = read_choice("Ваш выбор: ", &["1", "2", "3"])?;
 
             if replacement_choice == "1" || replacement_choice == "2" {
-                if replacement_choice == "1" {
-                    create_opt_backups(&configs, &user_balancer_candidates)?;
-                }
-
                 info("Выберите шаблон балансировщиков:");
                 info("  1 — Simple");
                 info("  2 — Advanced");
@@ -193,6 +192,9 @@ pub fn run_install_config_check() -> AppResult<()> {
                 };
 
                 if let Some(replacement) = replacement {
+                    if replacement_choice == "1" {
+                        create_opt_backups(&configs, &user_balancer_candidates)?;
+                    }
                     for index in &user_balancer_candidates {
                         let routing = configs[*index].document["routing"].as_object_mut()
                             .ok_or("Поле routing должно быть объектом.")?;

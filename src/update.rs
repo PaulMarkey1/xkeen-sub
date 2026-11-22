@@ -4,7 +4,7 @@ use crate::subscriptions::{load_subscriptions, Subscription};
 use crate::system::command_exists;
 use crate::terminal::{error, info, title, warning};
 use crate::update_subscription::prepare_subscriptions;
-use crate::update_configuration::update_configuration;
+use crate::update_configuration::{update_configuration, update_configuration_with_blacklist};
 use crate::update_baseline::apply_baseline_only;
 use crate::update_report::{print_baseline_plan, print_subscription_summary};
 
@@ -206,7 +206,21 @@ fn run_inner(
         return Ok(());
     }
 
-    let result = if state.prepared.is_empty() {
+    let mut blacklist = crate::blacklist::load()?;
+    let removed_blacklist_entries = blacklist.prune_missing_tags(&state.observed_tags);
+    if removed_blacklist_entries > 0 {
+        backup.event(
+            "BLACKLIST",
+            &format!("Удалено устаревших записей чёрного списка: {removed_blacklist_entries}."),
+        )?;
+        info(&format!(
+            "Из чёрного списка удалено устаревших подключений: {removed_blacklist_entries}."
+        ));
+    }
+
+    let result = if removed_blacklist_entries > 0 {
+        update_configuration_with_blacklist(&store.subscriptions, &state, backup, &blacklist)
+    } else if state.prepared.is_empty() {
         apply_baseline_only(&state, backup)
     } else {
         update_configuration(&store.subscriptions, &state, backup)

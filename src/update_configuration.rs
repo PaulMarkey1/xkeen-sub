@@ -34,6 +34,15 @@ pub(crate) fn update_configuration(
     update_configuration_with_mode(subscriptions, state, backup, false, None, None).map(|_| ())
 }
 
+pub(crate) fn update_configuration_with_blacklist(
+    subscriptions: &[Subscription],
+    state: &RunState,
+    backup: &mut BackupSession,
+    blacklist: &BlacklistStore,
+) -> AppResult<()> {
+    update_configuration_with_mode(subscriptions, state, backup, false, None, Some(blacklist)).map(|_| ())
+}
+
 /// Rebuilds every subscription-managed outbound group from baseline snapshots.
 pub(crate) fn rebuild_configuration(
     subscriptions: &[Subscription],

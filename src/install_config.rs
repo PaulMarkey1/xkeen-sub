@@ -486,13 +486,14 @@ fn apply_routing_mode(
         .collect();
 
     for (index, config) in configs.iter_mut().enumerate() {
+        let config_name = config.name.clone();
         let Some(routing) = config.document.get_mut("routing").and_then(Value::as_object_mut) else {
             continue;
         };
         let mut modified = false;
         if let Some(rules_value) = routing.get_mut("rules") {
             let rules = rules_value.as_array_mut()
-                .ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config.name))?;
+                .ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config_name))?;
             for rule in rules.iter_mut() {
                 let Some(object) = rule.as_object_mut() else { continue };
                 if is_loopback_rule(object) {
@@ -536,7 +537,7 @@ fn apply_routing_mode(
             }
             RoutingMode::Advanced => {
                 let rules = routing.entry("rules").or_insert_with(|| Value::Array(Vec::new()))
-                    .as_array_mut().ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config.name))?;
+                    .as_array_mut().ok_or_else(|| format!("Поле routing.rules в {} должно быть массивом.", config_name))?;
                 modified |= ensure_loopback_rules(rules);
             }
         }
@@ -557,6 +558,7 @@ fn is_loopback_rule(rule: &serde_json::Map<String, Value>) -> bool {
 }
 
 fn ensure_loopback_rules(rules: &mut Vec<Value>) -> bool {
+    let original = rules.clone();
     let mut primary = None;
     let mut reserve = None;
     let mut retained = Vec::with_capacity(rules.len() + 2);
@@ -605,10 +607,9 @@ fn ensure_loopback_rules(rules: &mut Vec<Value>) -> bool {
         "balancerTag": "xkeen-sub-rest"
     }));
 
-    let changed = rules.len() != retained.len() || primary.is_none() || reserve.is_none()
-        || rules.get(0) != Some(&first) || rules.get(1) != Some(&second);
     retained.insert(0, second);
     retained.insert(0, first);
+    let changed = *rules != retained;
     *rules = retained;
     changed
 }

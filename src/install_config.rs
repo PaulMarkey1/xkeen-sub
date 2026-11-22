@@ -433,14 +433,18 @@ mod tests {
     use super::{observatory_matches_template, observatory_template, program_balancer, PROGRAM_BALANCER_TAG};
     use serde_json::json;
 
+    fn inspect(value: serde_json::Value) -> super::ProgramBalancerState {
+        super::inspect_program_balancers(value.as_array().expect("balancers must be an array"))
+    }
+
     #[test]
     fn detects_simple_template_by_primary_tag_only() {
-        assert_eq!(super::inspect_program_balancers(&json!([{ "tag": "xkeen-sub-balancer" }])), super::ProgramBalancerState::Simple);
+        assert_eq!(inspect(json!([{ "tag": "xkeen-sub-balancer" }])), super::ProgramBalancerState::Simple);
     }
 
     #[test]
     fn detects_complete_advanced_template() {
-        assert_eq!(super::inspect_program_balancers(&json!([
+        assert_eq!(inspect(json!([
             { "tag": "xkeen-sub-balancer" },
             { "tag": "xkeen-sub-balancer-rezerve" },
             { "tag": "xkeen-sub-rest" }
@@ -449,17 +453,17 @@ mod tests {
 
     #[test]
     fn detects_incomplete_advanced_only_without_user_balancers() {
-        assert_eq!(super::inspect_program_balancers(&json!([
+        assert_eq!(inspect(json!([
             { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }
         ])), super::ProgramBalancerState::IncompleteAdvanced);
-        assert_eq!(super::inspect_program_balancers(&json!([
+        assert_eq!(inspect(json!([
             { "tag": "xkeen-sub-balancer" }, { "tag": "xkeen-sub-rest" }, { "tag": "my-user-balancer" }
         ])), super::ProgramBalancerState::Mixed);
     }
 
     #[test]
     fn advanced_tags_without_primary_are_not_recognized_as_program_template() {
-        assert_eq!(super::inspect_program_balancers(&json!([
+        assert_eq!(inspect(json!([
             { "tag": "xkeen-sub-balancer-rezerve" }, { "tag": "xkeen-sub-rest" }
         ])), super::ProgramBalancerState::NoProgram);
     }

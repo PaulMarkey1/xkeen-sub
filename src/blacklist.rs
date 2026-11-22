@@ -74,6 +74,7 @@ impl BlacklistStore {
     /// were parsed completely. Subscriptions absent from observed_tags are untouched.
     pub(crate) fn prune_missing_tags(&mut self, observed_tags: &[(String, Vec<String>)]) -> usize {
         let observed: HashMap<&str, HashSet<&str>> = observed_tags.iter()
+            .filter(|(_, tags)| !tags.is_empty())
             .map(|(id, tags)| (id.as_str(), tags.iter().map(String::as_str).collect()))
             .collect();
         let before = self.entries.len();

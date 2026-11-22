@@ -49,8 +49,9 @@ pub fn run_install_config_check() -> AppResult<()> {
 
     }
 
-    // Detect xkeen-sub's own balancer templates in each routing file.
-    let mut legacy_candidates = Vec::<usize>::new();
+    // Detect xkeen-sub's own balancer templates and identify configurations
+    // that contain user-defined balancers.
+    let mut user_balancer_candidates = Vec::<usize>::new();
     let mut incomplete_advanced = Vec::<usize>::new();
 
     for (index, config) in configs.iter().enumerate() {
@@ -62,16 +63,13 @@ pub fn run_install_config_check() -> AppResult<()> {
             ProgramBalancerState::Simple => success(&format!("{}: найден шаблон Simple.", config.name)),
             ProgramBalancerState::Advanced => success(&format!("{}: найден полный шаблон Advanced.", config.name)),
             ProgramBalancerState::IncompleteAdvanced => incomplete_advanced.push(index),
-            ProgramBalancerState::Mixed => warning(&format!(
-                "{}: найдены балансировщики xkeen-sub вместе с пользовательскими. Автоматическая замена не предлагается.",
-                config.name
-            )),
+            ProgramBalancerState::Mixed => user_balancer_candidates.push(index),
             ProgramBalancerState::Ambiguous => warning(&format!(
-                "{}: структура балансировщиков xkeen-sub неоднозначна (повторяющиеся или некорректные Tag). Автоматическая замена пропущена.",
+                "{}: структура балансировщиков xkeen-sub неоднозначна (повторяющиеся Tag). Автоматическая замена пропущена.",
                 config.name
             )),
             ProgramBalancerState::NoProgram => {
-                if !balancers.is_empty() { legacy_candidates.push(index); }
+                if !balancers.is_empty() { user_balancer_candidates.push(index); }
             }
         }
     }
@@ -98,49 +96,76 @@ pub fn run_install_config_check() -> AppResult<()> {
         }
     }
 
-    // Without the primary xkeen-sub tag, similarly named balancers are not
-    // considered ours. Keep the existing opt-in replacement flow for them.
-    if !legacy_candidates.is_empty() {
-        info("В конфигурации найдены балансировщики без основного Tag xkeen-sub:");
-        for index in &legacy_candidates {
+    // User-defined balancers (including mixed program/user lists) require an
+    // explicit replacement choice and an explicit target template.
+    let mut no_persistent_backup = HashSet::<usize>::new();
+    if !user_balancer_candidates.is_empty() {
+        info("Найдены пользовательские балансировщики:");
+        for index in &user_balancer_candidates {
             let balancers = configs[*index].document["routing"]["balancers"].as_array().unwrap();
             let tags = balancers.iter().filter_map(|item| item.get("tag").and_then(Value::as_str))
                 .collect::<Vec<_>>().join(", ");
             info(&format!("  {}: {}", configs[*index].name, if tags.is_empty() { "без Tag".to_owned() } else { tags }));
         }
-        warning("Замена удалит перечисленные балансировщики и оставит только xkeen-sub-balancer.");
-        let selectors = available_outbound_tags(&configs);
-        if selectors.is_empty() {
-            warning("Не найдено ни одного подходящего исходящего подключения. Замена балансировщиков пропущена, чтобы не создавать пустой selector.");
-        } else if confirm("Заменить пользовательские балансировщики? (1 — да, 2 — нет): ")? {
-            for index in &legacy_candidates {
-                let routing = configs[*index].document["routing"].as_object_mut()
-                    .ok_or("Поле routing должно быть объектом.")?;
-                routing.insert("balancers".to_owned(), Value::Array(vec![program_balancer(&selectors)]));
-                changed.insert(*index);
+
+        info("Как поступить с найденными балансировщиками?");
+        info("  1 — заменить с резервной копией в /opt");
+        info("  2 — заменить без резервной копии");
+        info("  3 — не заменять");
+        let replacement_choice = read_choice("Ваш выбор: ", &["1", "2", "3"])?;
+        if replacement_choice == "1" || replacement_choice == "2" {
+            let backup_requested = replacement_choice == "1";
+            if backup_requested {
+                create_opt_backups(&configs, &user_balancer_candidates)?;
             }
 
-            for (index, config) in configs.iter_mut().enumerate() {
-                let Some(routing) = config.document.get_mut("routing").and_then(Value::as_object_mut) else { continue };
-                let Some(rules) = routing.get_mut("rules").and_then(Value::as_array_mut) else { continue };
-                let mut modified = false;
-                for rule in rules {
-                    let Some(object) = rule.as_object_mut() else { continue };
-                    if let Some(tag) = object.get_mut("balancerTag") {
-                        if tag.as_str() != Some(PROGRAM_BALANCER_TAG) {
-                            *tag = Value::String(PROGRAM_BALANCER_TAG.to_owned());
-                            modified = true;
+            info("Выберите шаблон балансировщиков:");
+            info("  1 — Simple");
+            info("  2 — Advanced");
+            let mode = read_choice("Ваш выбор: ", &["1", "2"])?;
+            let replacement = if mode == "1" {
+                let selectors = available_outbound_tags(&configs);
+                if selectors.is_empty() {
+                    warning("Не найдено подходящих исходящих подключений. Замена отменена, чтобы не создавать пустой selector.");
+                    None
+                } else {
+                    Some(Value::Array(vec![program_balancer(&selectors)]))
+                }
+            } else {
+                Some(advanced_balancers_template())
+            };
+
+            if let Some(replacement) = replacement {
+                for index in &user_balancer_candidates {
+                    let routing = configs[*index].document["routing"].as_object_mut()
+                        .ok_or("Поле routing должно быть объектом.")?;
+                    routing.insert("balancers".to_owned(), replacement.clone());
+
+                    // Keep balancerTag rules in the same routing file aligned
+                    // with the shared primary tag used by both templates.
+                    if let Some(rules) = routing.get_mut("rules").and_then(Value::as_array_mut) {
+                        for rule in rules {
+                            if let Some(object) = rule.as_object_mut() {
+                                if object.contains_key("balancerTag") {
+                                    object.insert("balancerTag".to_owned(), Value::String(PROGRAM_BALANCER_TAG.to_owned()));
+                                }
+                            }
                         }
                     }
+                    changed.insert(*index);
+                    no_persistent_backup.insert(*index);
                 }
-                if modified { changed.insert(index); }
+                success(if mode == "1" {
+                    "Установлен шаблон Simple."
+                } else {
+                    "Установлен шаблон Advanced."
+                });
             }
-            success("Балансировщики будут заменены на xkeen-sub-balancer.");
         } else {
             info("Пользовательские балансировщики оставлены без изменений.");
         }
     } else if incomplete_advanced.is_empty() {
-        success("Балансировщики xkeen-sub не требуют восстановления.");
+        success("Пользовательские балансировщики не найдены.");
     }
 
     // Check every top-level Observatory variant in every JSON/JSONC file.
@@ -209,7 +234,7 @@ pub fn run_install_config_check() -> AppResult<()> {
         format!("Итоговая конфигурация не прошла проверку Xray. Файлы не изменены. {error}")
     })?;
 
-    persist_changes(&mut configs, &changed)?;
+    persist_changes(&mut configs, &changed, &no_persistent_backup)?;
     success("Конфигурация успешно проверена и сохранена.");
     Ok(())
 }
@@ -241,6 +266,52 @@ fn is_json_config(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str())
         .map(|extension| extension.eq_ignore_ascii_case("json") || extension.eq_ignore_ascii_case("jsonc"))
         .unwrap_or(false)
+}
+
+fn read_choice(prompt: &str, allowed: &[&str]) -> AppResult<String> {
+    loop {
+        let value = read_input(prompt)?;
+        if allowed.contains(&value.as_str()) {
+            return Ok(value);
+        }
+        warning("Выберите один из предложенных вариантов.");
+    }
+}
+
+fn create_opt_backups(configs: &[ConfigFile], indices: &[usize]) -> AppResult<()> {
+    let backup_dir = Path::new("/opt");
+    if !backup_dir.is_dir() {
+        return Err("Каталог /opt не найден. Резервная копия не создана, конфигурация не изменена.".into());
+    }
+
+    let mut targets = Vec::new();
+    for index in indices {
+        let config = &configs[*index];
+        let backup_path = backup_dir.join(&config.name);
+        if backup_path.exists() {
+            return Err(format!(
+                "Файл резервной копии уже существует: {}. Он не будет перезаписан. Удалите или переместите его и повторите установку.",
+                backup_path.display()
+            ).into());
+        }
+        targets.push((*index, backup_path));
+    }
+
+    let mut created = Vec::<PathBuf>::new();
+    for (index, backup_path) in targets {
+        if let Err(error) = fs::copy(&configs[index].path, &backup_path) {
+            for path in created.iter().rev() {
+                let _ = fs::remove_file(path);
+            }
+            return Err(format!(
+                "Не удалось создать резервную копию {}: {error}. Созданные копии удалены, конфигурация не изменена.",
+                backup_path.display()
+            ).into());
+        }
+        created.push(backup_path.clone());
+        success(&format!("Резервная копия создана: {}", backup_path.display()));
+    }
+    Ok(())
 }
 
 fn confirm(prompt: &str) -> AppResult<bool> {
@@ -371,7 +442,7 @@ fn ensure_default_observatory(
     Ok(())
 }
 
-fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppResult<()> {
+fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>, no_persistent_backup: &HashSet<usize>) -> AppResult<()> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let mut backups = Vec::<(usize, PathBuf, bool)>::new();
     let mut written = Vec::<usize>::new();
@@ -380,11 +451,21 @@ fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppR
     for index in changed {
         let config = &configs[*index];
         let existed = config.path.exists();
-        let backup = PathBuf::from(format!("{}.xkeen-sub-install-{nonce}.bak", config.path.display()));
-        if existed {
-            fs::copy(&config.path, &backup)
-                .map_err(|error| format!("Не удалось создать резервную копию {}: {error}", config.path.display()))?;
-        }
+        let backup = if no_persistent_backup.contains(index) {
+            let temp_backup = PathBuf::from(format!("/tmp/{}.xkeen-sub-install-{nonce}.rollback", config.name));
+            if existed {
+                fs::copy(&config.path, &temp_backup)
+                    .map_err(|error| format!("Не удалось подготовить откат {}: {error}", config.path.display()))?;
+            }
+            temp_backup
+        } else {
+            let persistent = PathBuf::from(format!("{}.xkeen-sub-install-{nonce}.bak", config.path.display()));
+            if existed {
+                fs::copy(&config.path, &persistent)
+                    .map_err(|error| format!("Не удалось создать резервную копию {}: {error}", config.path.display()))?;
+            }
+            persistent
+        };
         backups.push((*index, backup, existed));
     }
 
@@ -420,8 +501,10 @@ fn persist_changes(configs: &mut [ConfigFile], changed: &HashSet<usize>) -> AppR
         written.push(*index);
     }
 
-    for (_, backup, existed) in backups {
-        if existed {
+    for (index, backup, existed) in backups {
+        if no_persistent_backup.contains(&index) {
+            if existed { let _ = fs::remove_file(&backup); }
+        } else if existed {
             info(&format!("Резервная копия: {}", backup.display()));
         }
     }

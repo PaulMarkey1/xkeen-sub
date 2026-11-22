@@ -8,7 +8,7 @@ use crate::backup::BackupSession;
 use crate::subscription_identity::number_from_id;
 use crate::subscription_parser::parse_subscription;
 use crate::subscriptions::{Subscription, SubscriptionStore};
-use crate::terminal::{error, info, menu_item, read_input, success, title};
+use crate::terminal::{error, info, menu_item, read_input, success, title, GREEN, RED, RESET};
 use crate::update_state::{PreparedSubscription, RunState};
 use crate::update_subscription::baseline_path;
 
@@ -107,7 +107,11 @@ pub(crate) fn run_for_subscription(store: &SubscriptionStore, index: usize) -> A
         println!(); title(&format!("ЧЁРНЫЙ СПИСОК — {}", sub.prefix));
         for (i, outbound) in parsed.outbounds.iter().enumerate() {
             let tag = outbound["tag"].as_str().ok_or("Подключение без Tag.")?;
-            let status = if blacklist.is_blocked(&sub.id,tag) { "[ЗАБЛОКИРОВАНО]" } else { "[РАЗРЕШЕНО]" };
+            let status = if blacklist.is_blocked(&sub.id,tag) {
+                format!("{RED}[ЗАБЛОКИРОВАНО]{RESET}")
+            } else {
+                format!("{GREEN}[РАЗРЕШЕНО]{RESET}")
+            };
             menu_item(&(i+1).to_string(), &format!("{tag} {status}"));
         }
         menu_item("0", "Назад");

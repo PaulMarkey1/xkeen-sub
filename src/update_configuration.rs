@@ -23,7 +23,7 @@ pub(crate) struct PreparedConfiguration {
     pub(crate) docs: Vec<ConfigDocument>,
     balancer: BalancerPreparation,
     archive: ArchivePlan,
-    validation: Result<(), String>,
+    pub(crate) validation: Result<(), String>,
 }
 
 pub(crate) fn update_configuration(

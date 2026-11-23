@@ -22,6 +22,8 @@ mod subscription_url;
 mod terminal;
 mod temp_counter;
 mod xray_test;
+mod xray_probe;
+mod test;
 mod update;
 mod update_baseline;
 mod update_configuration;

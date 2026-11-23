@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::net::TcpListener;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +15,6 @@ const CONFIG_SOURCE: &str = "/opt/etc/xray/configs";
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
-const API_PORT: u16 = 10086;
 const MAX_WAIT: Duration = Duration::from_secs(180);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_DELAY_MS: u64 = 5000;
@@ -120,8 +120,9 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
     ));
 
     let result = (|| -> AppResult<BTreeMap<String, NodeStatus>> {
+        let api_port = reserve_api_port()?;
         let mut helper_documents = documents.to_vec();
-        configure_helper(&mut helper_documents, tags)?;
+        configure_helper(&mut helper_documents, tags, api_port)?;
 
         for (name, value) in &helper_documents {
             if !safe_config_name(name) {
@@ -161,7 +162,7 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
                 }
             }
 
-            match request_status() {
+            match request_status(api_port) {
                 Ok(statuses) => {
                     latest = statuses.into_iter().map(|status| (status.tag.clone(), status)).collect();
                     if tags.iter().all(|tag| latest.get(tag).map(|status| status.last_try > 0).unwrap_or(false)) {
@@ -195,7 +196,7 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
     result
 }
 
-fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String]) -> AppResult<()> {
+fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String], api_port: u16) -> AppResult<()> {
     let api_index = documents.iter().position(|(_, value)| value.get("api").is_some())
         .ok_or("В конфигурации Xray не найден объект api.")?;
 
@@ -221,7 +222,7 @@ fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String]) -> Ap
             if inbound.get("tag").and_then(Value::as_str) == Some("api") {
                 let object = inbound.as_object_mut().ok_or("API inbound должен быть объектом.")?;
                 object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
-                object.insert("port".to_owned(), json!(API_PORT));
+                object.insert("port".to_owned(), json!(api_port));
                 object.insert("protocol".to_owned(), Value::String("dokodemo-door".to_owned()));
                 object.insert("settings".to_owned(), json!({"address":"127.0.0.1"}));
                 retained.push(inbound);
@@ -239,7 +240,7 @@ fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String]) -> Ap
         inbounds.push(json!({
             "tag": "api",
             "listen": "127.0.0.1",
-            "port": API_PORT,
+            "port": api_port,
             "protocol": "dokodemo-door",
             "settings": {"address": "127.0.0.1"}
         }));
@@ -273,7 +274,14 @@ fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String]) -> Ap
     Ok(())
 }
 
-fn request_status() -> Result<Vec<NodeStatus>, String> {
+fn reserve_api_port() -> AppResult<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+fn request_status(api_port: u16) -> Result<Vec<NodeStatus>, String> {
     let mut child = Command::new(CURL_BIN)
         .args([
             "--silent", "--show-error", "--http2-prior-knowledge",
@@ -281,7 +289,7 @@ fn request_status() -> Result<Vec<NodeStatus>, String> {
             "-H", "content-type: application/grpc",
             "-H", "te: trailers",
             "--data-binary", "@-",
-            "http://127.0.0.1:10086/xray.core.app.observatory.command.ObservatoryService/GetOutboundStatus",
+            &format!("http://127.0.0.1:{api_port}/xray.core.app.observatory.command.ObservatoryService/GetOutboundStatus"),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

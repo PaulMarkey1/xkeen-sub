@@ -61,8 +61,6 @@ pub(crate) fn test_outbounds(
         }
 
         let statuses = probe_group(documents, group)?;
-        let mut best: Option<&NodeStatus> = None;
-
         for tag in group {
             let status = statuses.get(tag).cloned().unwrap_or_else(|| NodeStatus {
                 tag: tag.clone(),
@@ -79,12 +77,6 @@ pub(crate) fn test_outbounds(
                 "недоступен".to_owned()
             };
             println!("  {} — {}", status.tag, ping);
-
-            if acceptable && best.map(|current| status.delay_ms < current.delay_ms).unwrap_or(true) {
-                // Keep the owned value outside the temporary status.
-                selected = Some((status.tag.clone(), status.delay_ms));
-                best = None;
-            }
         }
 
         let group_best = group.iter()
@@ -141,7 +133,7 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
             .unwrap_or_else(|| PathBuf::from(XRAY_DEFAULT));
         let log = File::create(&log_path)?;
         let stderr = log.try_clone()?;
-        let mut child = Command::new(&xray_bin)
+        let child = Command::new(&xray_bin)
             .arg("run")
             .env("XRAY_LOCATION_CONFDIR", &directory)
             .env("XRAY_LOCATION_ASSET", ASSET_DIR)
@@ -329,11 +321,11 @@ fn parse_outbound_status(bytes: &[u8]) -> Result<NodeStatus, String> {
     let mut status = NodeStatus::default();
     for (field, wire, payload) in protobuf_fields(bytes)? {
         match (field, wire) {
-            (1, 0) => status.alive = payload[0] != 0,
-            (2, 0) => status.delay_ms = read_varint(payload, &mut 0usize).unwrap_or(0),
+            (1, 0) => status.alive = decode_varint_payload(payload) != 0,
+            (2, 0) => status.delay_ms = decode_varint_payload(payload),
             (3, 2) => status.error = String::from_utf8_lossy(payload).into_owned(),
             (4, 2) => status.tag = String::from_utf8_lossy(payload).into_owned(),
-            (6, 0) => status.last_try = read_varint(payload, &mut 0usize).unwrap_or(0),
+            (6, 0) => status.last_try = decode_varint_payload(payload),
             _ => {}
         }
     }
@@ -381,6 +373,11 @@ fn protobuf_fields(bytes: &[u8]) -> Result<Vec<(u64, u8, &[u8])>, String> {
         }
     }
     Ok(fields)
+}
+
+fn decode_varint_payload(bytes: &[u8]) -> u64 {
+    let mut offset = 0usize;
+    read_varint(bytes, &mut offset).unwrap_or(0)
 }
 
 fn read_varint(bytes: &[u8], offset: &mut usize) -> Option<u64> {

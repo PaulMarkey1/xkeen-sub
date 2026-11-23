@@ -80,9 +80,27 @@ pub(crate) struct BackupSession {
     allow_prune: bool,
     subscriptions: Vec<String>,
     updated_subscriptions: Vec<String>,
+    ephemeral: bool,
 }
 
 impl BackupSession {
+    /// Creates an isolated journal for dry-run operations. It never creates a
+    /// backup record and never captures or changes live configuration files.
+    pub(crate) fn start_ephemeral(reason: &str) -> AppResult<Self> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "xkeen-sub-test-journal-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        let id = format!("test-{}-{nonce}", std::process::id());
+        let mut session = Self::start_in_directory(reason, id, path)?;
+        session.ephemeral = true;
+        Ok(session)
+    }
+
     pub(crate) fn start(reason: &str) -> AppResult<Self> {
         let session = Self::start_with_suffix(reason, "")?;
         Self::complete_startup_snapshot(session)
@@ -194,6 +212,7 @@ impl BackupSession {
             allow_prune: false,
             subscriptions: Vec::new(),
             updated_subscriptions: Vec::new(),
+            ephemeral: false,
         };
         session.event("UPDATE", "Создана резервная запись. Начато выполнение update.")?;
         session.event("UPDATE", &format!("Причина создания: {reason}"))?;
@@ -1718,5 +1737,14 @@ mod tests {
         assert!(validate_relative_path(Path::new("../outside")).is_err());
         assert!(validate_relative_path(Path::new("/absolute")).is_err());
         assert!(validate_relative_path(Path::new("opt/etc/file.json")).is_ok());
+    }
+}
+
+
+impl Drop for BackupSession {
+    fn drop(&mut self) {
+        if self.ephemeral {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }

@@ -19,8 +19,8 @@ use crate::update_report::{print_baseline_plan, print_configuration_summary, pri
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-struct PreparedConfiguration {
-    docs: Vec<ConfigDocument>,
+pub(crate) struct PreparedConfiguration {
+    pub(crate) docs: Vec<ConfigDocument>,
     balancer: BalancerPreparation,
     archive: ArchivePlan,
     validation: Result<(), String>,
@@ -74,6 +74,17 @@ fn update_configuration_with_mode(
 ) -> AppResult<bool> {
     let prepared = prepare_configuration(subscriptions, state, backup, rebuild_all, blacklist_override)?;
     apply_configuration(prepared, state, backup, registry, blacklist_override)
+}
+
+/// Builds the same in-memory configuration as update, but deliberately
+/// returns it before planning or applying any filesystem operations.
+pub(crate) fn prepare_configuration_for_test(
+    subscriptions: &[Subscription],
+    state: &RunState,
+    backup: &mut BackupSession,
+    blacklist: &BlacklistStore,
+) -> AppResult<PreparedConfiguration> {
+    prepare_configuration(subscriptions, state, backup, false, Some(blacklist))
 }
 
 fn prepare_configuration(

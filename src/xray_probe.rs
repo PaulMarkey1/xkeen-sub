@@ -61,16 +61,21 @@ pub(crate) fn test_outbounds(
         }
 
         let statuses = probe_group(documents, group)?;
-        let group_best = group.iter()
+        let group_minimum = group.iter()
             .filter_map(|tag| statuses.get(tag))
-            .filter(|status| status.alive && status.last_try > 0 && status.delay_ms <= MAX_DELAY_MS)
+            .filter(|status| status.alive && status.last_try > 0)
             .min_by_key(|status| status.delay_ms);
 
-        if let Some(best) = group_best {
-            println!("  Лучший узел: {} — {} мс", best.tag, best.delay_ms);
-            selected = Some((best.tag.clone(), best.delay_ms));
+        if let Some(best) = group_minimum {
+            println!("  Минимальный пинг в группе: {} — {} мс", best.tag, best.delay_ms);
+            if best.delay_ms <= MAX_DELAY_MS {
+                println!("  Подключение подходит по порогу.");
+                selected = Some((best.tag.clone(), best.delay_ms));
+            } else {
+                println!("  Пинг выше {MAX_DELAY_MS} мс. Проверяем следующую группу.");
+            }
         } else {
-            println!("  В этой группе нет узлов с пингом до {MAX_DELAY_MS} мс.");
+            println!("  В группе нет успешно проверенных подключений. Проверяем следующую группу.");
         }
 
         for tag in group {
@@ -90,10 +95,8 @@ pub(crate) fn test_outbounds(
             println!("  {} — {}", status.tag, ping);
         }
 
-        if group_best.is_some() {
+        if selected.is_some() {
             break;
-        } else {
-            println!("  Проверяем следующую группу.");
         }
         offset = end;
     }

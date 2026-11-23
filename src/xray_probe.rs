@@ -191,7 +191,7 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
     result
 }
 
-fn configure_helper(documents: &mut [(String, Value)], tags: &[String]) -> AppResult<()> {
+fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String]) -> AppResult<()> {
     let api_index = documents.iter().position(|(_, value)| value.get("api").is_some())
         .ok_or("В конфигурации Xray не найден объект api.")?;
 

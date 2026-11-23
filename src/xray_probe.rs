@@ -61,16 +61,27 @@ pub(crate) fn test_outbounds(
         }
 
         let statuses = probe_group(documents, group)?;
+        let group_best = group.iter()
+            .filter_map(|tag| statuses.get(tag))
+            .filter(|status| status.alive && status.last_try > 0 && status.delay_ms <= MAX_DELAY_MS)
+            .min_by_key(|status| status.delay_ms);
+
+        if let Some(best) = group_best {
+            println!("  Лучший узел: {} — {} мс", best.tag, best.delay_ms);
+            selected = Some((best.tag.clone(), best.delay_ms));
+        } else {
+            println!("  В этой группе нет узлов с пингом до {MAX_DELAY_MS} мс.");
+        }
+
         for tag in group {
             let status = statuses.get(tag).cloned().unwrap_or_else(|| NodeStatus {
                 tag: tag.clone(),
                 ..NodeStatus::default()
             });
-            let acceptable = status.alive && status.last_try > 0 && status.delay_ms <= MAX_DELAY_MS;
-            let ping = if acceptable {
-                format!("{} мс", status.delay_ms)
-            } else if status.last_try == 0 {
+            let ping = if status.last_try == 0 {
                 "нет результата".to_owned()
+            } else if status.alive {
+                format!("{} мс{}", status.delay_ms, if status.delay_ms > MAX_DELAY_MS { " (выше порога)" } else { "" })
             } else if !status.error.is_empty() {
                 format!("недоступен ({})", status.error)
             } else {
@@ -79,17 +90,10 @@ pub(crate) fn test_outbounds(
             println!("  {} — {}", status.tag, ping);
         }
 
-        let group_best = group.iter()
-            .filter_map(|tag| statuses.get(tag))
-            .filter(|status| status.alive && status.last_try > 0 && status.delay_ms <= MAX_DELAY_MS)
-            .min_by_key(|status| status.delay_ms);
-
-        if let Some(best) = group_best {
-            println!("  Лучший в группе: {} — {} мс", best.tag, best.delay_ms);
-            selected = Some((best.tag.clone(), best.delay_ms));
+        if group_best.is_some() {
             break;
         } else {
-            println!("  Подходящих подключений в этой группе нет. Проверяем следующую.");
+            println!("  Проверяем следующую группу.");
         }
         offset = end;
     }

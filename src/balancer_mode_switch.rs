@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 
 use serde_json::{json, Value};
@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::backup::{BackupSession, BackupSource};
 use crate::balancer::{BalancingMode, PROGRAM_BALANCER_TAG};
 use crate::observatory::prepare_observatory_with_interval;
-use crate::terminal::{error, info, success, warning, ProgressBar};
+use crate::terminal::{info, success, warning, ProgressBar};
 use crate::update_apply;
 use crate::update_config::{load_config_documents, ConfigDocument, CONFIG_DIR, OUTBOUND_FILE};
 use crate::update_merge::{collect_selector_tags, collect_tags, ensure_service_outbounds, ArchivePlan};
@@ -121,8 +121,8 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
     outbound_root.insert("outbounds".to_owned(), Value::Array(outbounds.clone()));
 
     let api_tags = crate::update_config::collect_api_tags(docs);
-    let all_tags = collect_tags(&outbounds)?;
-    let tags = collect_selector_tags(&outbounds, &api_tags);
+    let _all_tags = collect_tags(&outbounds)?;
+    let tags = collect_selector_tags(&outbounds, &api_tags)?;
     let protocols: HashMap<String, String> = outbounds.iter().filter_map(|item| Some((
         item.get("tag")?.as_str()?.to_owned(),
         item.get("protocol")?.as_str()?.to_owned()
@@ -136,8 +136,9 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
     }).unwrap_or(routing_indices[0]);
 
     for index in &routing_indices {
+        let config_name = docs[*index].file_name.clone();
         let routing = docs[*index].value.get_mut("routing").and_then(Value::as_object_mut)
-            .ok_or_else(|| format!("Поле routing в {} должно быть объектом.", docs[*index].file_name))?;
+            .ok_or_else(|| format!("Поле routing в {config_name} должно быть объектом."))?;
         let rules = routing.get_mut("rules");
         if let Some(value) = rules {
             let rules = value.as_array_mut().ok_or("Поле routing.rules должно быть массивом.")?;
@@ -158,7 +159,7 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
                 object.insert("balancerTag".to_owned(), Value::String(PROGRAM_BALANCER_TAG.to_owned()));
                 transformed += 1;
             }
-            backup.event("BALANCER", &format!("{}: преобразовано правил маршрутизации: {transformed}.", docs[*index].file_name))?;
+            backup.event("BALANCER", &format!("{config_name}: преобразовано правил маршрутизации: {transformed}."))?;
         }
     }
 

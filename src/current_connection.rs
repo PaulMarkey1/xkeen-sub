@@ -51,12 +51,17 @@ struct ForcedSelection {
 }
 
 pub fn run() -> AppResult<()> {
-    tick()?;
+    if let Err(failure) = tick() {
+        warning(&format!("Не удалось обновить состояние ручного выбора: {failure}"));
+    }
+
     loop {
         println!();
         title("XKEEN-SUB — ТЕКУЩИЙ УЗЕЛ");
-        show_current()?;
-        show_forced_status()?;
+        show_current();
+        if let Err(failure) = show_forced_status() {
+            warning(&format!("Не удалось прочитать состояние ручного выбора: {failure}"));
+        }
         println!();
         menu_item("1", "Повторная проверка");
         menu_item("2", "Сменить подключение");
@@ -64,9 +69,7 @@ pub fn run() -> AppResult<()> {
         menu_item("0", "Назад");
 
         match read_input("Выберите пункт: ")?.as_str() {
-            "1" => {
-                show_current()?;
-            }
+            "1" => show_current(),
             "2" => change_connection()?,
             "3" => settings_menu()?,
             "0" => return Ok(()),
@@ -75,13 +78,61 @@ pub fn run() -> AppResult<()> {
     }
 }
 
-fn show_current() -> AppResult<()> {
+fn show_current() {
+    if let Err(failure) = show_current_inner() {
+        warning(&format!("Не удалось определить текущий узел: {failure}"));
+    }
+}
+
+fn show_current_inner() -> AppResult<()> {
     let configs = load_configs()?;
+    let mode = detect_current_balancing_mode(&configs);
+
+    let balancers: Vec<&str> = match mode {
+        crate::balancer::BalancingMode::Simple => vec!["xkeen-sub-balancer"],
+        crate::balancer::BalancingMode::Advanced => vec![
+            "xkeen-sub-balancer",
+            "xkeen-sub-balancer-rezerve",
+            "xkeen-sub-rest",
+        ],
+        crate::balancer::BalancingMode::Custom => {
+            warning("Используется пользовательская конфигурация. Текущий узел нельзя определить без контекста конкретного правила маршрутизации.");
+            return Ok(());
+        }
+        crate::balancer::BalancingMode::IncompleteAdvanced => {
+            warning("Обнаружена неполная конфигурация продвинутого режима. Текущий узел не определён.");
+            return Ok(());
+        }
+        crate::balancer::BalancingMode::Ambiguous => {
+            warning("Конфигурация балансировщиков неоднозначна. Текущий узел не определён.");
+            return Ok(());
+        }
+        crate::balancer::BalancingMode::NotConfigured => {
+            warning("Балансировщики xkeen-sub не настроены. Текущий узел не определён.");
+            return Ok(());
+        }
+    };
+
     let server = find_api_server(&configs)?;
-    let balancer = find_active_balancer(&configs)?;
-    let selected_tag = query_balancer(&server, &balancer)?;
-    info(&format!("Тэг: {selected_tag}"));
+    for balancer in balancers {
+        match query_balancer(&server, balancer) {
+            Ok(selected_tag) => info(&format!("Текущий узел ({balancer}): {selected_tag}")),
+            Err(failure) => warning(&format!("Не удалось получить текущий узел ({balancer}): {failure}")),
+        }
+    }
     Ok(())
+}
+
+fn detect_current_balancing_mode(configs: &[Value]) -> crate::balancer::BalancingMode {
+    let balancers: Vec<Value> = configs.iter()
+        .filter_map(|config| config.get("routing").and_then(|routing| routing.get("balancers")))
+        .filter_map(Value::as_array)
+        .flatten()
+        .cloned()
+        .collect();
+
+    let synthetic = serde_json::json!({"routing": {"balancers": balancers}});
+    crate::balancer::detect_balancing_mode(&synthetic)
 }
 
 fn show_forced_status() -> AppResult<()> {
@@ -729,4 +780,34 @@ mod tests {
         assert!(is_xray_proxy_cmdline(b"xray\0run\0-config\0/etc/xray/config.json\0"));
         assert!(is_xray_proxy_cmdline(b"xray\0"));
     }
+    #[test]
+    fn current_node_mode_detection_supports_simple_and_advanced_across_config_files() {
+        use super::detect_current_balancing_mode;
+        use crate::balancer::BalancingMode;
+
+        let simple = vec![json!({"routing":{"balancers":[
+            {"tag":"xkeen-sub-balancer"}
+        ]}})];
+        assert_eq!(detect_current_balancing_mode(&simple), BalancingMode::Simple);
+
+        let advanced = vec![
+            json!({"routing":{"balancers":[{"tag":"xkeen-sub-balancer"}]}}),
+            json!({"routing":{"balancers":[{"tag":"xkeen-sub-balancer-rezerve"}]}}),
+            json!({"routing":{"balancers":[{"tag":"xkeen-sub-rest"}]}}),
+        ];
+        assert_eq!(detect_current_balancing_mode(&advanced), BalancingMode::Advanced);
+
+        let custom = vec![json!({"routing":{"balancers":[
+            {"tag":"xkeen-sub-balancer"},
+            {"tag":"user-balancer"}
+        ]}})];
+        assert_eq!(detect_current_balancing_mode(&custom), BalancingMode::Custom);
+
+        let incomplete = vec![json!({"routing":{"balancers":[
+            {"tag":"xkeen-sub-balancer"},
+            {"tag":"xkeen-sub-rest"}
+        ]}})];
+        assert_eq!(detect_current_balancing_mode(&incomplete), BalancingMode::IncompleteAdvanced);
+    }
+
 }

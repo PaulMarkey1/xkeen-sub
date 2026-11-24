@@ -354,11 +354,10 @@ impl BackupSession {
         };
         let Some(stored) = stored else { return Ok(false); };
         let backup_file = self.path.join(stored);
-        let backup_metadata = match fs::symlink_metadata(&backup_file) {
-            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+        match fs::symlink_metadata(&backup_file) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {}
             _ => return Ok(false),
-        };
-        let _ = backup_metadata;
+        }
         let expected = match fs::read(backup_file) {
             Ok(bytes) => bytes,
             Err(_) => return Ok(false),
@@ -1524,7 +1523,8 @@ fn prune_records(settings: &BackupSettings, active_id: &str) -> AppResult<usize>
         }
         let age = ordinal.saturating_sub(date_from_id(&record.id).unwrap_or(i64::MIN));
         if age >= AUTOMATIC_RETENTION_DAYS {
-            if record.id != active_id { fs::remove_dir_all(&record.path)?; removed += 1; }
+            fs::remove_dir_all(&record.path)?;
+            removed += 1;
         } else {
             grouped.entry(record.date.clone()).or_default().push(record);
         }

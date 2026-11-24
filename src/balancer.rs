@@ -5,6 +5,65 @@ use std::error::Error;
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 pub const PROGRAM_BALANCER_TAG: &str = "xkeen-sub-balancer";
+const RESERVE_BALANCER_TAG: &str = "xkeen-sub-balancer-rezerve";
+const REST_BALANCER_TAG: &str = "xkeen-sub-rest";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BalancingMode {
+    NotConfigured,
+    Simple,
+    Advanced,
+    Custom,
+    IncompleteAdvanced,
+    Ambiguous,
+}
+
+/// Detects the active balancing mode from the actual Xray routing configuration.
+pub fn detect_balancing_mode(document: &Value) -> BalancingMode {
+    let Some(balancers) = document.get("routing")
+        .and_then(|routing| routing.get("balancers"))
+        .and_then(Value::as_array) else {
+        return BalancingMode::NotConfigured;
+    };
+    if balancers.is_empty() {
+        return BalancingMode::NotConfigured;
+    }
+
+    let managed_tags = [PROGRAM_BALANCER_TAG, RESERVE_BALANCER_TAG, REST_BALANCER_TAG];
+    let mut found = HashSet::new();
+    let mut has_custom = false;
+    let mut duplicate = false;
+
+    for balancer in balancers {
+        let Some(tag) = balancer.get("tag").and_then(Value::as_str) else {
+            has_custom = true;
+            continue;
+        };
+        if managed_tags.contains(&tag) {
+            if !found.insert(tag) {
+                duplicate = true;
+            }
+        } else {
+            has_custom = true;
+        }
+    }
+
+    if has_custom {
+        return BalancingMode::Custom;
+    }
+    if duplicate {
+        return BalancingMode::Ambiguous;
+    }
+    if !found.contains(PROGRAM_BALANCER_TAG) {
+        return BalancingMode::Custom;
+    }
+    match found.len() {
+        1 => BalancingMode::Simple,
+        3 => BalancingMode::Advanced,
+        2 => BalancingMode::IncompleteAdvanced,
+        _ => BalancingMode::Ambiguous,
+    }
+}
 const PROTECTED_PROTOCOLS: [&str; 4] = ["freedom", "blackhole", "dns", "loopback"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +119,7 @@ pub fn prepare_balancers(
 
     let mut created = false;
     let mut updated_existing = false;
-    let mut effective_tag = PROGRAM_BALANCER_TAG.to_owned();
+    let effective_tag = PROGRAM_BALANCER_TAG.to_owned();
 
     match case {
         BalancerCase::NoExistingBalancers => {
@@ -85,35 +144,11 @@ pub fn prepare_balancers(
                 set_program_balancer(&mut balancers[index], final_tags)?;
                 updated_existing = true;
             } else {
-                let selector = balancers[0].get("selector").and_then(Value::as_array);
-                let working_tags: HashSet<&str> = working_outbounds
-                    .iter()
-                    .filter_map(|outbound| outbound.get("tag").and_then(Value::as_str))
-                    .collect();
-                let selector_prefixes: Vec<&str> = selector
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .collect();
-
-                if selector.is_some()
-                    && working_tags.iter().all(|tag| {
-                        selector_prefixes.iter().any(|prefix| tag.starts_with(prefix))
-                    })
-                {
-                    // Extra selector entries are allowed; the complete selector
-                    // is replaced with the final outbound list.
-                    effective_tag = balancers[0]
-                        .get("tag")
-                        .and_then(Value::as_str)
-                        .ok_or("У существующего балансировщика отсутствует строковый tag.")?
-                        .to_owned();
-                    set_selector(&mut balancers[0], final_tags)?;
-                    updated_existing = true;
-                } else {
-                    balancers.push(new_program_balancer(final_tags));
-                    created = true;
-                }
+                // A balancer without the program-owned tag belongs to the user.
+                // Never repurpose it, even when its selector currently covers all
+                // subscription outbounds: add and maintain our own balancer instead.
+                balancers.push(new_program_balancer(final_tags));
+                created = true;
             }
         }
         BalancerCase::MultipleExistingBalancers => {
@@ -282,11 +317,12 @@ pub(crate) fn filter_blacklisted_selectors(
 
     let mut removed = 0;
     for balancer in balancers {
-        let balancer_tag = balancer
-            .get("tag")
-            .and_then(Value::as_str)
-            .unwrap_or("<без Tag>")
-            .to_owned();
+        // Blacklist maintenance is limited to the selector owned by xkeen-sub.
+        // User-defined balancing policies must remain untouched.
+        if balancer.get("tag").and_then(Value::as_str) != Some(PROGRAM_BALANCER_TAG) {
+            continue;
+        }
+        let balancer_tag = PROGRAM_BALANCER_TAG.to_owned();
         let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else {
             continue;
         };
@@ -360,11 +396,31 @@ mod tests {
     }
 
     #[test]
+    fn detects_simple_advanced_custom_and_incomplete_modes() {
+        use super::{detect_balancing_mode as detect, BalancingMode};
+        assert_eq!(detect(&json!({"routing":{"balancers":[]}})), BalancingMode::NotConfigured);
+        assert_eq!(detect(&json!({"routing":{"balancers":[{"tag":PROGRAM_BALANCER_TAG}]}})), BalancingMode::Simple);
+        assert_eq!(detect(&json!({"routing":{"balancers":[
+            {"tag":PROGRAM_BALANCER_TAG},
+            {"tag":"xkeen-sub-balancer-rezerve"},
+            {"tag":"xkeen-sub-rest"}
+        ]}})), BalancingMode::Advanced);
+        assert_eq!(detect(&json!({"routing":{"balancers":[
+            {"tag":PROGRAM_BALANCER_TAG},
+            {"tag":"xkeen-sub-rest"}
+        ]}})), BalancingMode::IncompleteAdvanced);
+        assert_eq!(detect(&json!({"routing":{"balancers":[{"tag":"user-balancer"}]}})), BalancingMode::Custom);
+        assert_eq!(detect(&json!({"routing":{"balancers":[
+            {"tag":PROGRAM_BALANCER_TAG},{"tag":"user-balancer"}
+        ]}})), BalancingMode::Custom);
+    }
+
+    #[test]
     fn blacklist_rejects_emptying_a_balancer_selector() {
         let mut config = json!({
             "routing": {
                 "balancers": [{
-                    "tag": "user-balancer",
+                    "tag": PROGRAM_BALANCER_TAG,
                     "selector": ["sub1--"]
                 }]
             }
@@ -384,7 +440,7 @@ mod tests {
         let mut config = json!({
             "routing": {
                 "balancers": [{
-                    "tag": "user-balancer",
+                    "tag": PROGRAM_BALANCER_TAG,
                     "selector": ["missing-prefix"]
                 }]
             }
@@ -404,7 +460,7 @@ mod tests {
         let mut config = json!({
             "routing": {
                 "balancers": [{
-                    "tag": "user-balancer",
+                    "tag": PROGRAM_BALANCER_TAG,
                     "selector": ["sub1--node"]
                 }]
             }
@@ -545,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn case_two_updates_existing_selector_when_it_contains_all_working_tags() {
+    fn single_user_balancer_is_preserved_and_program_balancer_is_added() {
         let mut config = json!({
             "routing": {
                 "rules": [],
@@ -556,24 +612,23 @@ mod tests {
                 }]
             }
         });
+        let original = config["routing"]["balancers"][0].clone();
 
         let result =
             prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
 
         assert_eq!(result.case, BalancerCase::OneExistingBalancer);
-        assert_eq!(result.tag, "user-balancer");
-        assert!(!result.created);
-        assert!(result.updated_existing);
-        assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            config["routing"]["balancers"][0]["selector"],
-            json!(["sub1--node", "custom"])
-        );
-        assert_eq!(config["routing"]["balancers"][0]["strategy"]["type"], "random");
+        assert_eq!(result.tag, PROGRAM_BALANCER_TAG);
+        assert!(result.created);
+        assert!(!result.updated_existing);
+        assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 2);
+        assert_eq!(config["routing"]["balancers"][0], original);
+        assert_eq!(config["routing"]["balancers"][1]["tag"], PROGRAM_BALANCER_TAG);
+        assert_eq!(config["routing"]["balancers"][1]["selector"], json!(["sub1--node", "custom"]));
     }
 
     #[test]
-    fn case_two_accepts_selector_prefixes_that_cover_working_tags() {
+    fn user_balancer_prefix_selector_is_not_repurposed() {
         let mut config = json!({
             "routing": {
                 "rules": [],
@@ -584,17 +639,14 @@ mod tests {
                 }]
             }
         });
+        let original = config["routing"]["balancers"][0].clone();
 
         let result =
             prepare_balancers(&mut config, &working(), &tags(), &HashSet::new()).unwrap();
 
-        assert!(!result.created);
-        assert_eq!(result.tag, "user-balancer");
-        assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            config["routing"]["balancers"][0]["selector"],
-            json!(["sub1--node", "custom"])
-        );
+        assert!(result.created);
+        assert_eq!(config["routing"]["balancers"].as_array().unwrap().len(), 2);
+        assert_eq!(config["routing"]["balancers"][0], original);
     }
 
     #[test]
@@ -679,9 +731,22 @@ mod tests {
         assert_eq!(config["routing"]["rules"][0]["outboundTag"], "direct");
     }
     #[test]
+    fn blacklist_does_not_modify_user_defined_balancer_selectors() {
+        let mut config = json!({"routing":{"balancers":[
+            {"tag":"user-balancer","selector":["sub1--"]},
+            {"tag":PROGRAM_BALANCER_TAG,"selector":["sub1--"]}
+        ]}});
+        let blocked = HashSet::from(["sub1--node".to_owned()]);
+        let final_tags = vec!["sub1--allowed".to_owned()];
+        super::filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["sub1--"]));
+        assert_eq!(config["routing"]["balancers"][1]["selector"], json!(["sub1--allowed"]));
+    }
+
+    #[test]
     fn blacklist_removes_exact_tags_and_expands_prefix_selectors() {
         use super::filter_blacklisted_selectors;
-        let mut config = json!({"routing":{"balancers":[{"selector":["sub1--node","sub1--","custom"]}]}});
+        let mut config = json!({"routing":{"balancers":[{"tag":PROGRAM_BALANCER_TAG,"selector":["sub1--node","sub1--","custom"]}]}});
         let blocked: HashSet<String> = ["sub1--node".to_owned(), "sub1--node2".to_owned()].into_iter().collect();
         let final_tags = vec!["sub1--keep".to_owned(), "custom".to_owned()];
         let removed = filter_blacklisted_selectors(&mut config, &final_tags, &blocked).unwrap();

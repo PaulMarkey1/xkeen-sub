@@ -25,7 +25,7 @@ pub fn prepare_observatory(
     prepare_observatory_with_interval(documents, tags, None)
 }
 
-/// Synchronizes selectors and optionally enforces a probe interval.
+/// Synchronizes selectors and uses the optional interval only for a new default template.
 pub fn prepare_observatory_with_interval(
     documents: &mut Vec<(String, Value)>,
     tags: &[String],
@@ -48,9 +48,6 @@ pub fn prepare_observatory_with_interval(
             })?;
 
             object.insert("subjectSelector".to_owned(), selector.clone());
-            if let Some(interval) = probe_interval {
-                object.insert("probeInterval".to_owned(), Value::String(interval.to_owned()));
-            }
             updated.push(ObservatoryUpdate {
                 file_name: file_name.clone(),
                 object_name: key.to_owned(),
@@ -211,13 +208,13 @@ mod tests {
 
 
     #[test]
-    fn advanced_interval_overrides_existing_and_new_observatory() {
+    fn advanced_interval_applies_only_to_new_observatory_template() {
         let mut existing = vec![(
             "observatory.json".to_owned(),
             json!({"observatory": {"probeInterval": "60s"}}),
         )];
         super::prepare_observatory_with_interval(&mut existing, &["node".to_owned()], Some("10s")).unwrap();
-        assert_eq!(existing[0].1["observatory"]["probeInterval"], "10s");
+        assert_eq!(existing[0].1["observatory"]["probeInterval"], "60s");
 
         let mut missing = vec![("routing.json".to_owned(), json!({"routing": {}}))];
         super::prepare_observatory_with_interval(&mut missing, &["node".to_owned()], Some("10s")).unwrap();

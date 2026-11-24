@@ -166,7 +166,7 @@ pub fn prepare_balancers(
     let user_balancer_tags = balancers
         .iter()
         .filter_map(|item| item.get("tag").and_then(Value::as_str))
-        .filter(|tag| *tag != PROGRAM_BALANCER_TAG)
+        .filter(|tag| ![PROGRAM_BALANCER_TAG, RESERVE_BALANCER_TAG, REST_BALANCER_TAG].contains(tag))
         .map(str::to_owned)
         .collect();
     routing.insert("balancers".to_owned(), Value::Array(balancers));

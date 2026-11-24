@@ -261,6 +261,7 @@ fn subscription_is_active(active_numbers: &HashSet<u64>, number: u64, baseline_e
     baseline_exists || active_numbers.contains(&number)
 }
 
+#[cfg(test)]
 fn subscription_is_in_outbounds(outbounds: &[Value], number: u64) -> bool {
     subscription_numbers_in_outbounds(outbounds).contains(&number)
 }

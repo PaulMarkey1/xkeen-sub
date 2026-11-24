@@ -140,6 +140,34 @@ fn prepare_configuration(
         .insert("outbounds".to_owned(), Value::Array(final_outbounds.clone()));
     docs[outbound_index].value = outbound_doc;
 
+    let balancing_mode = crate::balancer::detect_balancing_mode(&docs[routing_index].value);
+    match balancing_mode {
+        crate::balancer::BalancingMode::NotConfigured => {
+            info("Режим балансировки: не настроен. Будет создан простой балансировщик xkeen-sub.");
+            backup.event("BALANCER", "Режим балансировки не настроен; будет создан простой режим.")?;
+        }
+        crate::balancer::BalancingMode::Simple => {
+            info("Режим балансировки: простой.");
+            backup.event("BALANCER", "Обнаружен простой режим балансировки.")?;
+        }
+        crate::balancer::BalancingMode::Advanced => {
+            info("Режим балансировки: продвинутый.");
+            backup.event("BALANCER", "Обнаружен продвинутый режим балансировки.")?;
+        }
+        crate::balancer::BalancingMode::Custom => {
+            info("Режим балансировки: пользовательский. Собственные балансировщики и правила маршрутизации останутся без изменений.");
+            backup.event("BALANCER", "Обнаружен пользовательский режим; пользовательские балансировщики и правила не изменяются.")?;
+        }
+        crate::balancer::BalancingMode::IncompleteAdvanced => {
+            warning("Обнаружен неполный продвинутый режим балансировки. Дополнительные балансировщики не будут автоматически восстанавливаться; обновится только основной балансировщик xkeen-sub.");
+            backup.event("BALANCER", "Обнаружен неполный продвинутый режим; автоматическое восстановление отключено.")?;
+        }
+        crate::balancer::BalancingMode::Ambiguous => {
+            warning("Не удалось однозначно определить режим балансировки: обнаружены повторяющиеся или противоречивые служебные балансировщики.");
+            backup.event("BALANCER", "Режим балансировки неоднозначен; служебные структуры автоматически не исправляются.")?;
+        }
+    }
+
     let balancer = prepare_balancers(
         &mut docs[routing_index].value, &working, &tags, &api_tags
     )?;

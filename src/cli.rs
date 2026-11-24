@@ -64,7 +64,7 @@ fn print_help() -> AppResult<()> {
     command_item("setup edit", "Изменить имя или URL подписки");
     command_item("setup help", "Показать справку по настройке");
     println!();
-    command_item("balancers", "Выбрать режим балансировки (пока только просмотр вариантов)");
+    command_item("balancers", "Выбрать режим балансировки");
     command_item("backup", "Настроить и просмотреть резервные копии");
     command_item("  user-backup", "Создать ручную полную точку восстановления");
     command_item("  limit N", "Установить дневной лимит (минимум 5 точек)");

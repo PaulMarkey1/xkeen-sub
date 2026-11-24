@@ -172,6 +172,7 @@ pub(crate) fn select_advanced_outbounds(
             println!("Найдено одно рабочее подключение: {tag} — {delay} мс. Следующий блоков с результатом нет.");
         }
         [] => println!("Рабочих подключений не найдено."),
+        _ => unreachable!("ranked is truncated to at most two entries"),
     }
 
     Ok(ranked)

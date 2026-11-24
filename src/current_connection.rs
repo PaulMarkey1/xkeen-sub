@@ -780,4 +780,34 @@ mod tests {
         assert!(is_xray_proxy_cmdline(b"xray\0run\0-config\0/etc/xray/config.json\0"));
         assert!(is_xray_proxy_cmdline(b"xray\0"));
     }
+    #[test]
+    fn current_node_mode_detection_supports_simple_and_advanced_across_config_files() {
+        use super::detect_current_balancing_mode;
+        use crate::balancer::BalancingMode;
+
+        let simple = vec![json!({"routing":{"balancers":[
+            {"tag":"xkeen-sub-balancer"}
+        ]}})];
+        assert_eq!(detect_current_balancing_mode(&simple), BalancingMode::Simple);
+
+        let advanced = vec![
+            json!({"routing":{"balancers":[{"tag":"xkeen-sub-balancer"}]}}),
+            json!({"routing":{"balancers":[{"tag":"xkeen-sub-balancer-rezerve"}]}}),
+            json!({"routing":{"balancers":[{"tag":"xkeen-sub-rest"}]}}),
+        ];
+        assert_eq!(detect_current_balancing_mode(&advanced), BalancingMode::Advanced);
+
+        let custom = vec![json!({"routing":{"balancers":[
+            {"tag":"xkeen-sub-balancer"},
+            {"tag":"user-balancer"}
+        ]}})];
+        assert_eq!(detect_current_balancing_mode(&custom), BalancingMode::Custom);
+
+        let incomplete = vec![json!({"routing":{"balancers":[
+            {"tag":"xkeen-sub-balancer"},
+            {"tag":"xkeen-sub-rest"}
+        ]}})];
+        assert_eq!(detect_current_balancing_mode(&incomplete), BalancingMode::IncompleteAdvanced);
+    }
+
 }

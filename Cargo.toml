@@ -1,6 +1,6 @@
 [package]
 name = "xkeen-sub"
-version = "0.0.2"
+version = "0.3.10"
 edition = "2021"
 description = "CLI utility for managing XKeen subscriptions on Keenetic"
 

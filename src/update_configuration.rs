@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::backup::{BackupSession, BackupSource};
 use crate::blacklist::BlacklistStore;
 use crate::balancer::{prepare_balancers, BalancerCase, BalancerPreparation, PROGRAM_BALANCER_TAG};
-use crate::observatory::prepare_observatory;
+use crate::observatory::prepare_observatory_with_interval;
 use crate::subscriptions::{Subscription, SubscriptionStore};
 use crate::terminal::{error, info, success, title, warning, ProgressBar};
 use crate::update_state::{PreparedSubscription, RunState};
@@ -181,7 +181,13 @@ fn prepare_configuration(
 
     let mut obs_docs: Vec<(String, Value)> =
         docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
-    let obs_updates = prepare_observatory(&mut obs_docs, &tags)?;
+    let observatory_interval = if balancing_mode == crate::balancer::BalancingMode::Advanced {
+        Some("10s")
+    } else {
+        None
+    };
+    let obs_updates =
+        prepare_observatory_with_interval(&mut obs_docs, &tags, observatory_interval)?;
     for (name, value) in obs_docs {
         if let Some(index) = docs.iter().position(|doc| doc.file_name == name) {
             docs[index].value = value;

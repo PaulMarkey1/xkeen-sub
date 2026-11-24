@@ -15,7 +15,7 @@ const CONFIG_SOURCE: &str = "/opt/etc/xray/configs";
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
-const MAX_WAIT: Duration = Duration::from_secs(180);
+const MAX_WAIT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_DELAY_MS: u64 = 5000;
 
@@ -107,6 +107,74 @@ pub(crate) fn test_outbounds(
         None => println!("Не найдено подключений с пингом не выше {MAX_DELAY_MS} мс."),
     }
     Ok(())
+}
+
+
+/// Selects up to two fastest successful outbounds, probing in blocks of five.
+/// Remaining outbounds are deliberately left for the caller to place in the rest balancer.
+pub(crate) fn select_advanced_outbounds(
+    documents: &[(String, Value)],
+    tags: &[String],
+) -> AppResult<Vec<(String, u64)>> {
+    let mut successful = BTreeMap::<String, u64>::new();
+
+    for (block_index, group) in tags.chunks(5).enumerate() {
+        let start = block_index * 5 + 1;
+        let end = start + group.len() - 1;
+        println!();
+        println!("Проверка блока {start}–{end} из {} подключений:", tags.len());
+
+        let statuses = probe_group(documents, group)?;
+        for tag in group {
+            let status = statuses.get(tag);
+            let description = match status {
+                Some(status) if status.alive && status.last_try > 0 => {
+                    successful.insert(tag.clone(), status.delay_ms);
+                    format!("{} мс", status.delay_ms)
+                }
+                Some(status) if status.last_try > 0 && !status.error.is_empty() => {
+                    format!("нет ответа ({})", status.error)
+                }
+                Some(status) if status.last_try > 0 => "нет ответа".to_owned(),
+                _ => "результат не получен".to_owned(),
+            };
+            println!("  {tag} — {description}");
+        }
+
+        let mut ranked: Vec<(String, u64)> = successful
+            .iter()
+            .map(|(tag, delay)| (tag.clone(), *delay))
+            .collect();
+        ranked.sort_by_key(|(_, delay)| *delay);
+
+        if ranked.len() >= 2 {
+            println!("Найдены два рабочих подключения. Дальнейшие блоки проверять не требуется.");
+            break;
+        }
+        if block_index + 1 < tags.chunks(5).len() {
+            println!("Пока найдено рабочих подключений: {}. Проверяем следующий блок.", ranked.len());
+        }
+    }
+
+    let mut ranked: Vec<(String, u64)> = successful
+        .into_iter()
+        .collect();
+    ranked.sort_by_key(|(_, delay)| *delay);
+    ranked.truncate(2);
+
+    println!();
+    match ranked.as_slice() {
+        [(tag, delay), (reserve, reserve_delay)] => {
+            println!("Основное подключение: {tag} — {delay} мс.");
+            println!("Резервное подключение: {reserve} — {reserve_delay} мс.");
+        }
+        [(tag, delay)] => {
+            println!("Найдено одно рабочее подключение: {tag} — {delay} мс. Следующий блоков с результатом нет.");
+        }
+        [] => println!("Рабочих подключений не найдено."),
+    }
+
+    Ok(ranked)
 }
 
 fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTreeMap<String, NodeStatus>> {

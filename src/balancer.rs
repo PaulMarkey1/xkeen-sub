@@ -209,6 +209,53 @@ fn set_selector(balancer: &mut Value, tags: &[String]) -> AppResult<()> {
     Ok(())
 }
 
+
+/// Updates selectors of the three managed Advanced-mode balancers without
+/// changing their other settings or any user-defined balancers.
+pub(crate) fn apply_advanced_selectors(
+    document: &mut Value,
+    main: &[String],
+    reserve: &[String],
+    rest: &[String],
+) -> AppResult<()> {
+    let balancers = document
+        .get_mut("routing")
+        .and_then(Value::as_object_mut)
+        .and_then(|routing| routing.get_mut("balancers"))
+        .and_then(Value::as_array_mut)
+        .ok_or("В продвинутом режиме не найден массив routing.balancers.")?;
+
+    let mut found_main = false;
+    let mut found_reserve = false;
+    let mut found_rest = false;
+
+    for balancer in balancers {
+        let Some(tag) = balancer.get("tag").and_then(Value::as_str) else {
+            continue;
+        };
+        match tag {
+            PROGRAM_BALANCER_TAG => {
+                set_selector(balancer, main)?;
+                found_main = true;
+            }
+            RESERVE_BALANCER_TAG => {
+                set_selector(balancer, reserve)?;
+                found_reserve = true;
+            }
+            REST_BALANCER_TAG => {
+                set_selector(balancer, rest)?;
+                found_rest = true;
+            }
+            _ => {}
+        }
+    }
+
+    if !(found_main && found_reserve && found_rest) {
+        return Err("Для продвинутого режима требуются все три служебных балансировщика.".into());
+    }
+    Ok(())
+}
+
 fn normalize_existing_balancer_tags(routing: &mut Map<String, Value>) -> AppResult<usize> {
     let Some(rules_value) = routing.get_mut("rules") else {
         return Ok(0);
@@ -319,10 +366,10 @@ pub(crate) fn filter_blacklisted_selectors(
     for balancer in balancers {
         // Blacklist maintenance is limited to the selector owned by xkeen-sub.
         // User-defined balancing policies must remain untouched.
-        if balancer.get("tag").and_then(Value::as_str) != Some(PROGRAM_BALANCER_TAG) {
+        if ![PROGRAM_BALANCER_TAG, RESERVE_BALANCER_TAG, REST_BALANCER_TAG].contains(&balancer.get("tag").and_then(Value::as_str).unwrap_or_default()) {
             continue;
         }
-        let balancer_tag = PROGRAM_BALANCER_TAG.to_owned();
+        let balancer_tag = balancer.get("tag").and_then(Value::as_str).unwrap_or(PROGRAM_BALANCER_TAG).to_owned();
         let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else {
             continue;
         };

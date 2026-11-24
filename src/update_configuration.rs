@@ -168,40 +168,138 @@ fn prepare_configuration(
         }
     }
 
+
+    let original_routing = docs[routing_index].value.clone();
     let balancer = prepare_balancers(
         &mut docs[routing_index].value, &working, &tags, &api_tags
     )?;
     let blocked_tags = blacklist.blocked_full_tags(subscriptions);
-    let filtered_selectors = crate::balancer::filter_blacklisted_selectors(
-        &mut docs[routing_index].value, &tags, &blocked_tags
-    )?;
-    if filtered_selectors > 0 {
-        backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из селектора xkeen-sub-balancer: {filtered_selectors}."))?;
-    }
 
-    let mut obs_docs: Vec<(String, Value)> =
-        docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
-    let observatory_interval = if balancing_mode == crate::balancer::BalancingMode::Advanced {
-        Some("10s")
+    let mut obs_updates = Vec::new();
+    let mut observatory_tags = tags.clone();
+    let advanced_mode = balancing_mode == crate::balancer::BalancingMode::Advanced;
+    let mut advanced_selectors_applied = false;
+
+    if advanced_mode {
+        // Keep the three existing selectors intact until the helper Xray has
+        // returned enough information to choose the new main/reserve nodes.
+        docs[routing_index].value = original_routing;
+        let initial_validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
+        if initial_validation.is_ok() {
+            let freedom_tags: Vec<String> = final_outbounds.iter()
+                .filter(|outbound| outbound.get("protocol").and_then(Value::as_str) == Some("freedom"))
+                .filter_map(|outbound| outbound.get("tag").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            if freedom_tags.is_empty() {
+                return Err("В итоговом Outbound не найдено ни одного freedom-подключения для безопасного заполнения селекторов.".into());
+            }
+
+            if tags.is_empty() {
+                // No subscription connections exist at all: keep every selector
+                // valid by filling all three managed balancers with freedom.
+                crate::balancer::apply_advanced_selectors(
+                    &mut docs[routing_index].value,
+                    &freedom_tags,
+                    &freedom_tags,
+                    &freedom_tags,
+                )?;
+                observatory_tags = freedom_tags;
+                advanced_selectors_applied = true;
+                backup.event("BALANCER", "Подписочных подключений нет; все три Advanced-селектора заполнены freedom-подключениями.")?;
+            } else {
+                let probe_documents: Vec<(String, Value)> = docs.iter()
+                    .map(|doc| (doc.file_name.clone(), doc.value.clone()))
+                    .collect();
+                match crate::xray_probe::select_advanced_outbounds(&probe_documents, &tags) {
+                    Ok(selected) if !selected.is_empty() => {
+                        let main_tag = selected[0].0.clone();
+                        let main = vec![main_tag.clone()];
+                        let reserve = selected.get(1)
+                            .map(|(tag, _)| vec![tag.clone()])
+                            .unwrap_or_else(|| freedom_tags.clone());
+                        let rest: Vec<String> = if tags.len() <= 2 {
+                            freedom_tags.clone()
+                        } else {
+                            tags.iter()
+                                .filter(|tag| *tag != &main_tag
+                                    && selected.get(1).map(|(reserve_tag, _)| reserve_tag != *tag).unwrap_or(true))
+                                .cloned()
+                                .collect()
+                        };
+                        crate::balancer::apply_advanced_selectors(
+                            &mut docs[routing_index].value,
+                            &main,
+                            &reserve,
+                            &rest,
+                        )?;
+                        observatory_tags = main;
+                        advanced_selectors_applied = true;
+                        backup.event("BALANCER", &format!(
+                            "Advanced: основное подключение {}; резервное {}; подключений в rest: {}.",
+                            selected[0].0,
+                            selected.get(1).map(|item| item.0.as_str()).unwrap_or("freedom"),
+                            rest.len()
+                        ))?;
+                    }
+                    Ok(_) => {
+                        warning("Не найдено ни одного рабочего подключения. Текущие селекторы трёх балансировщиков и Observatory оставлены без изменений.");
+                        backup.event("BALANCER", "Проверка Advanced не нашла рабочих подключений; прежние три балансировщика и Observatory сохранены.")?;
+                    }
+                    Err(error) => {
+                        warning(&format!("Не удалось получить результаты Observatory. Текущие селекторы Advanced оставлены без изменений: {error}"));
+                        backup.event("BALANCER", &format!("Проверка Advanced не завершилась; прежние селекторы сохранены: {error}"))?;
+                    }
+                }
+            }
+        }
     } else {
-        None
-    };
-    let obs_updates =
-        prepare_observatory_with_interval(&mut obs_docs, &tags, observatory_interval)?;
-    for (name, value) in obs_docs {
-        if let Some(index) = docs.iter().position(|doc| doc.file_name == name) {
-            docs[index].value = value;
-        } else {
-            docs.push(ConfigDocument {
-                file_name: name.clone(),
-                path: Path::new(CONFIG_DIR).join(&name),
-                original: String::new(),
-                original_value: Value::Null,
-                value,
-                is_new: true,
-            });
+        let filtered_selectors = crate::balancer::filter_blacklisted_selectors(
+            &mut docs[routing_index].value, &tags, &blocked_tags
+        )?;
+        if filtered_selectors > 0 {
+            backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из селекторов xkeen-sub: {filtered_selectors}."))?;
         }
     }
+
+    if !advanced_mode || advanced_selectors_applied {
+        if advanced_mode {
+            let filtered_selectors = crate::balancer::filter_blacklisted_selectors(
+                &mut docs[routing_index].value, &tags, &blocked_tags
+            )?;
+            if filtered_selectors > 0 {
+                backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из Advanced-селекторов: {filtered_selectors}."))?;
+            }
+        }
+
+        let mut obs_docs: Vec<(String, Value)> =
+            docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
+        let observatory_interval = if advanced_mode { Some("10s") } else { None };
+        obs_updates =
+            prepare_observatory_with_interval(&mut obs_docs, &observatory_tags, observatory_interval)?;
+        for (name, value) in obs_docs {
+            if let Some(index) = docs.iter().position(|doc| doc.file_name == name) {
+                docs[index].value = value;
+            } else {
+                docs.push(ConfigDocument {
+                    file_name: name.clone(),
+                    path: Path::new(CONFIG_DIR).join(&name),
+                    original: String::new(),
+                    original_value: Value::Null,
+                    value,
+                    is_new: true,
+                });
+            }
+        }
+    }
+
+    let validation = if advanced_mode && !advanced_selectors_applied && !tags.is_empty() {
+        // The old selectors and Observatory were deliberately preserved because
+        // no probe result was usable. The original Xray test already passed.
+        validate_all(&docs, &final_outbounds, &all_tags, &balancer)
+    } else {
+        validate_all(&docs, &final_outbounds, &all_tags, &balancer)
+    };
 
     backup.event("MERGE", &format!(
         "Объединение Outbound завершено. Замен пользовательских подключений: {}; конфликтов: {}; новых записей архива: {}.",

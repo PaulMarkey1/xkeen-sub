@@ -126,8 +126,11 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
     outbound_root.insert("outbounds".to_owned(), Value::Array(outbounds.clone()));
 
     let api_tags = crate::update_config::collect_api_tags(docs);
-    let _all_tags = collect_tags(&outbounds)?;
     let tags = collect_selector_tags(&outbounds, &api_tags)?;
+    let freedom_tags: Vec<String> = outbounds.iter()
+        .filter(|item| item.get("protocol").and_then(Value::as_str) == Some("freedom"))
+        .filter_map(|item| item.get("tag").and_then(Value::as_str)).map(str::to_owned).collect();
+    let selector_tags = if tags.is_empty() { freedom_tags.clone() } else { tags.clone() };
     let protocols: HashMap<String, String> = outbounds.iter().filter_map(|item| Some((
         item.get("tag")?.as_str()?.to_owned(),
         item.get("protocol")?.as_str()?.to_owned()
@@ -170,7 +173,7 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
 
     let main_balancer = json!({
         "tag": PROGRAM_BALANCER_TAG,
-        "selector": selector_tags,
+        "selector": selector_tags.clone(),
         "fallbackTag": if target == BalancingMode::Advanced { "loopback-out" } else { "direct" },
         "strategy": { "type": "leastPing" }
     });
@@ -179,8 +182,8 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
     } else {
         json!([
             main_balancer,
-            {"tag":RESERVE_TAG,"selector":tags,"fallbackTag":"loopback-out-rezerve","strategy":{"type":"random"}},
-            {"tag":REST_TAG,"selector":tags,"fallbackTag":"direct","strategy":{"type":"random"}}
+            {"tag":RESERVE_TAG,"selector":selector_tags.clone(),"fallbackTag":"loopback-out-rezerve","strategy":{"type":"random"}},
+            {"tag":REST_TAG,"selector":selector_tags.clone(),"fallbackTag":"direct","strategy":{"type":"random"}}
         ])
     };
     for index in &routing_indices {
@@ -230,8 +233,10 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
         if !selected.is_empty() {
             let main = vec![selected[0].0.clone()];
             let reserve = selected.get(1).map(|item| vec![item.0.clone()]).unwrap_or_else(|| freedom_tags.clone());
+            let mut excluded = vec![selected[0].0.as_str()];
+            if let Some(second) = selected.get(1) { excluded.push(second.0.as_str()); }
             let rest = if tags.len() <= 2 { freedom_tags.clone() } else {
-                tags.iter().filter(|tag| *tag != &selected[0].0 && selected.get(1).map(|item| item.0 != **tag).unwrap_or(true)).cloned().collect()
+                tags.iter().filter(|tag| !excluded.contains(&tag.as_str())).cloned().collect()
             };
             let mut obs_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
             prepare_observatory_with_interval(&mut obs_docs, &main, Some("10s"))?;

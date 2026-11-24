@@ -294,8 +294,8 @@ fn redirect_rules_to_program_balancer(
     Ok(changed)
 }
 
-/// Removes blacklisted outbound tags from every balancer selector. Prefix selectors
-/// covering blocked tags are expanded to the currently available matching tags.
+/// Removes blacklisted outbound tags only from the xkeen-sub-managed selector.
+/// User-defined balancer selectors are intentionally left untouched.
 pub(crate) fn filter_blacklisted_selectors(
     document: &mut Value,
     final_tags: &[String],
@@ -479,7 +479,7 @@ mod tests {
         let mut config = json!({
             "routing": {
                 "balancers": [{
-                    "tag": "user-balancer",
+                    "tag": PROGRAM_BALANCER_TAG,
                     "selector": ["sub1--"]
                 }]
             }

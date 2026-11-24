@@ -4,6 +4,7 @@ mod backup;
 mod blacklist;
 mod balancer;
 mod balancers;
+mod balancer_mode_switch;
 mod cli;
 mod current_connection;
 mod install_config;
@@ -48,8 +49,6 @@ fn configure_timezone() {
             }
         }
     }
-
-    // Fallback for systems where Keenetic's POSIX timezone file is unavailable.
     if std::path::Path::new("/opt/etc/localtime").exists() {
         std::env::set_var("TZ", ":/opt/etc/localtime");
     }

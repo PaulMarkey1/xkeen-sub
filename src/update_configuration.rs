@@ -284,8 +284,6 @@ fn prepare_configuration(
         }
     }
 
-    let validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
-
     backup.event("MERGE", &format!(
         "Объединение Outbound завершено. Замен пользовательских подключений: {}; конфликтов: {}; новых записей архива: {}.",
         replacements.len(), conflicts.len(), archive.added
@@ -302,8 +300,12 @@ fn prepare_configuration(
     ))?;
     backup.event("OBSERVATORY", &format!("Подготовлено обновлений subjectSelector: {}.", obs_updates.len()))?;
 
-    backup.event("CONFIG", "Подготовка конфигураций завершена. Запускается обязательная проверка Xray.")?;
+    backup.event("CONFIG", "Все изменения балансировщиков и Observatory подготовлены. Запускается повторная проверка итоговой конфигурации Xray.")?;
     let validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
+    match &validation {
+        Ok(()) => backup.event("XRAY", "Повторная проверка итоговой конфигурации после обновления балансировщиков и Observatory пройдена.")?,
+        Err(message) => backup.event("XRAY", &format!("Повторная проверка итоговой конфигурации не пройдена. Рабочие файлы не изменялись: {message}"))?,
+    }
 
     print_subscription_summary(&state);
     print_updated_outbound(&state.prepared);
@@ -339,7 +341,7 @@ fn apply_configuration(
     let mut no_file_changes = false;
     if let Err(message) = &validation {
         backup.event("XRAY", &format!("Проверка Xray не пройдена: {message}"))?;
-        backup.set_outcome("ЗАБЛОКИРОВАНО", "Проверка Xray не пройдена. План применения не формировался, резервное копирование файлов не выполнялось.", true);
+        backup.set_outcome("ЗАБЛОКИРОВАНО", "Повторная проверка итоговой конфигурации Xray не пройдена. План применения не формировался; рабочие файлы балансировщиков и Observatory остались без изменений.", true);
     } else {
         backup.event("XRAY", "Проверка Xray завершилась успешно.")?;
         let plan = match (registry, blacklist_override) {

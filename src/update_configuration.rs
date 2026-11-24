@@ -176,7 +176,7 @@ fn prepare_configuration(
         &mut docs[routing_index].value, &tags, &blocked_tags
     )?;
     if filtered_selectors > 0 {
-        backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из пользовательских балансировщиков: {filtered_selectors}."))?;
+        backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из селектора xkeen-sub-balancer: {filtered_selectors}."))?;
     }
 
     let mut obs_docs: Vec<(String, Value)> =

@@ -463,6 +463,31 @@ mod tests {
     }
 
     #[test]
+    fn advanced_selector_update_changes_only_managed_selectors() {
+        let mut config = json!({"routing":{"balancers":[
+            {"tag":PROGRAM_BALANCER_TAG,"selector":["old-main"],"strategy":{"type":"leastPing"}},
+            {"tag":"xkeen-sub-balancer-rezerve","selector":["old-reserve"],"fallbackTag":"direct"},
+            {"tag":"xkeen-sub-rest","selector":["old-rest"],"strategy":{"type":"random"}},
+            {"tag":"user-balancer","selector":["user-prefix"],"strategy":{"type":"random"}}
+        ]}});
+        let user_before = config["routing"]["balancers"][3].clone();
+
+        super::apply_advanced_selectors(
+            &mut config,
+            &["fast".to_owned()],
+            &["backup".to_owned()],
+            &["other-a".to_owned(), "other-b".to_owned()],
+        ).unwrap();
+
+        assert_eq!(config["routing"]["balancers"][0]["selector"], json!(["fast"]));
+        assert_eq!(config["routing"]["balancers"][1]["selector"], json!(["backup"]));
+        assert_eq!(config["routing"]["balancers"][2]["selector"], json!(["other-a", "other-b"]));
+        assert_eq!(config["routing"]["balancers"][3], user_before);
+        assert_eq!(config["routing"]["balancers"][0]["strategy"]["type"], "leastPing");
+        assert_eq!(config["routing"]["balancers"][1]["fallbackTag"], "direct");
+    }
+
+    #[test]
     fn blacklist_rejects_emptying_a_balancer_selector() {
         let mut config = json!({
             "routing": {

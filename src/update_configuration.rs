@@ -263,15 +263,6 @@ fn prepare_configuration(
     }
 
     if !advanced_mode || advanced_selectors_applied {
-        if advanced_mode {
-            let filtered_selectors = crate::balancer::filter_blacklisted_selectors(
-                &mut docs[routing_index].value, &tags, &blocked_tags
-            )?;
-            if filtered_selectors > 0 {
-                backup.event("BLACKLIST", &format!("Исключено заблокированных тегов из Advanced-селекторов: {filtered_selectors}."))?;
-            }
-        }
-
         let mut obs_docs: Vec<(String, Value)> =
             docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
         let observatory_interval = if advanced_mode { Some("10s") } else { None };
@@ -293,13 +284,7 @@ fn prepare_configuration(
         }
     }
 
-    let validation = if advanced_mode && !advanced_selectors_applied && !tags.is_empty() {
-        // The old selectors and Observatory were deliberately preserved because
-        // no probe result was usable. The original Xray test already passed.
-        validate_all(&docs, &final_outbounds, &all_tags, &balancer)
-    } else {
-        validate_all(&docs, &final_outbounds, &all_tags, &balancer)
-    };
+    let validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
 
     backup.event("MERGE", &format!(
         "Объединение Outbound завершено. Замен пользовательских подключений: {}; конфликтов: {}; новых записей архива: {}.",

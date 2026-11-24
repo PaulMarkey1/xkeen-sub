@@ -366,10 +366,10 @@ pub(crate) fn filter_blacklisted_selectors(
     for balancer in balancers {
         // Blacklist maintenance is limited to the selector owned by xkeen-sub.
         // User-defined balancing policies must remain untouched.
-        if ![PROGRAM_BALANCER_TAG, RESERVE_BALANCER_TAG, REST_BALANCER_TAG].contains(&balancer.get("tag").and_then(Value::as_str).unwrap_or_default()) {
+        if balancer.get("tag").and_then(Value::as_str) != Some(PROGRAM_BALANCER_TAG) {
             continue;
         }
-        let balancer_tag = balancer.get("tag").and_then(Value::as_str).unwrap_or(PROGRAM_BALANCER_TAG).to_owned();
+        let balancer_tag = PROGRAM_BALANCER_TAG.to_owned();
         let Some(selector) = balancer.get_mut("selector").and_then(Value::as_array_mut) else {
             continue;
         };

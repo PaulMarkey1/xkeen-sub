@@ -698,6 +698,7 @@ mod tests {
             json!(["sub1--node", "custom"])
         );
         assert_eq!(config["routing"]["balancers"][1]["fallbackTag"], "direct");
+        assert_eq!(result.user_balancer_tags, vec!["user-a"]);
     }
 
     #[test]

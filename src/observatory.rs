@@ -22,6 +22,15 @@ pub fn prepare_observatory(
     documents: &mut Vec<(String, Value)>,
     tags: &[String],
 ) -> AppResult<Vec<ObservatoryUpdate>> {
+    prepare_observatory_with_interval(documents, tags, None)
+}
+
+/// Synchronizes selectors and optionally enforces a probe interval.
+pub fn prepare_observatory_with_interval(
+    documents: &mut Vec<(String, Value)>,
+    tags: &[String],
+    probe_interval: Option<&str>,
+) -> AppResult<Vec<ObservatoryUpdate>> {
     let selector = Value::Array(tags.iter().cloned().map(Value::String).collect());
     let mut updated = Vec::new();
 
@@ -39,6 +48,9 @@ pub fn prepare_observatory(
             })?;
 
             object.insert("subjectSelector".to_owned(), selector.clone());
+            if let Some(interval) = probe_interval {
+                object.insert("probeInterval".to_owned(), Value::String(interval.to_owned()));
+            }
             updated.push(ObservatoryUpdate {
                 file_name: file_name.clone(),
                 object_name: key.to_owned(),
@@ -54,7 +66,7 @@ pub fn prepare_observatory(
     let observatory = json!({
         "subjectSelector": selector,
         "probeUrl": "https://www.google.com/generate_204",
-        "probeInterval": "60s",
+        "probeInterval": probe_interval.unwrap_or("60s"),
         "enableConcurrency": true
     });
 
@@ -195,6 +207,21 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].1["log"]["loglevel"], "warning");
         assert_eq!(docs[0].1["observatory"]["subjectSelector"], json!([]));
+    }
+
+
+    #[test]
+    fn advanced_interval_overrides_existing_and_new_observatory() {
+        let mut existing = vec![(
+            "observatory.json".to_owned(),
+            json!({"observatory": {"probeInterval": "60s"}}),
+        )];
+        super::prepare_observatory_with_interval(&mut existing, &["node".to_owned()], Some("10s")).unwrap();
+        assert_eq!(existing[0].1["observatory"]["probeInterval"], "10s");
+
+        let mut missing = vec![("routing.json".to_owned(), json!({"routing": {}}))];
+        super::prepare_observatory_with_interval(&mut missing, &["node".to_owned()], Some("10s")).unwrap();
+        assert_eq!(missing[1].1["observatory"]["probeInterval"], "10s");
     }
 
     #[test]

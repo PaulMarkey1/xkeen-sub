@@ -42,8 +42,7 @@ fn detect_documents_mode(docs: &[ConfigDocument]) -> AppResult<BalancingMode> {
         .collect();
     if configured.is_empty() { return Ok(BalancingMode::NotConfigured); }
     let mut modes = configured.into_iter().map(|doc| crate::balancer::detect_balancing_mode(&doc.value));
-    let Some(first) = modes.next() else { return Ok(BalancingMode::NotConfigured); };
-    let mut result = first;
+    let mut result = modes.next().unwrap_or(BalancingMode::NotConfigured);
     for mode in modes {
         if mode == BalancingMode::Custom { return Ok(BalancingMode::Custom); }
         if mode != result {

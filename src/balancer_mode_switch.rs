@@ -9,7 +9,7 @@ use crate::observatory::prepare_observatory_with_interval;
 use crate::terminal::{info, success, warning, ProgressBar};
 use crate::update_apply;
 use crate::update_config::{load_config_documents, ConfigDocument, CONFIG_DIR, OUTBOUND_FILE};
-use crate::update_merge::{collect_selector_tags, collect_tags, ensure_service_outbounds, ArchivePlan};
+use crate::update_merge::{collect_selector_tags, ensure_service_outbounds, ArchivePlan};
 use crate::update_plan::build_file_plan;
 use crate::update_state::RunState;
 use crate::xray_test::{test_config_set_detailed, XrayConfigInput};
@@ -32,12 +32,17 @@ pub(crate) fn current_mode_label() -> String {
 }
 
 fn detect_documents_mode(docs: &[ConfigDocument]) -> AppResult<BalancingMode> {
-    let mut modes = docs.iter()
+    let routing_docs: Vec<&ConfigDocument> = docs.iter()
         .filter(|doc| doc.value.get("routing").is_some())
-        .map(|doc| crate::balancer::detect_balancing_mode(&doc.value));
-    let Some(first) = modes.next() else {
-        return Err("Не найдены конфигурации routing.".into());
-    };
+        .collect();
+    if routing_docs.is_empty() { return Err("Не найдены конфигурации routing.".into()); }
+    let configured: Vec<&ConfigDocument> = routing_docs.into_iter()
+        .filter(|doc| doc.value.get("routing").and_then(|r| r.get("balancers"))
+            .and_then(Value::as_array).map(|items| !items.is_empty()).unwrap_or(false))
+        .collect();
+    if configured.is_empty() { return Ok(BalancingMode::NotConfigured); }
+    let mut modes = configured.into_iter().map(|doc| crate::balancer::detect_balancing_mode(&doc.value));
+    let Some(first) = modes.next() else { return Ok(BalancingMode::NotConfigured); };
     let mut result = first;
     for mode in modes {
         if mode == BalancingMode::Custom { return Ok(BalancingMode::Custom); }
@@ -165,7 +170,7 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
 
     let main_balancer = json!({
         "tag": PROGRAM_BALANCER_TAG,
-        "selector": tags,
+        "selector": selector_tags,
         "fallbackTag": if target == BalancingMode::Advanced { "loopback-out" } else { "direct" },
         "strategy": { "type": "leastPing" }
     });
@@ -199,10 +204,7 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
         ensure_loopback_rules(rules);
     }
 
-    let initial_obs_tags = if tags.is_empty() {
-        outbounds.iter().filter(|item| item.get("protocol").and_then(Value::as_str) == Some("freedom"))
-            .filter_map(|item| item.get("tag").and_then(Value::as_str)).map(str::to_owned).collect::<Vec<_>>()
-    } else { tags.clone() };
+    let initial_obs_tags = selector_tags.clone();
     let mut obs_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
     prepare_observatory_with_interval(&mut obs_docs, &initial_obs_tags, if target == BalancingMode::Advanced { Some("10s") } else { None })?;
     for (name, value) in obs_docs {
@@ -226,12 +228,9 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
         let probe_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
         let selected = crate::xray_probe::select_advanced_outbounds(&probe_docs, &tags)?;
         if !selected.is_empty() {
-            let freedom: Vec<String> = outbounds.iter()
-                .filter(|item| item.get("protocol").and_then(Value::as_str) == Some("freedom"))
-                .filter_map(|item| item.get("tag").and_then(Value::as_str)).map(str::to_owned).collect();
             let main = vec![selected[0].0.clone()];
-            let reserve = selected.get(1).map(|item| vec![item.0.clone()]).unwrap_or_else(|| freedom.clone());
-            let rest = if tags.len() <= 2 { freedom } else {
+            let reserve = selected.get(1).map(|item| vec![item.0.clone()]).unwrap_or_else(|| freedom_tags.clone());
+            let rest = if tags.len() <= 2 { freedom_tags.clone() } else {
                 tags.iter().filter(|tag| *tag != &selected[0].0 && selected.get(1).map(|item| item.0 != **tag).unwrap_or(true)).cloned().collect()
             };
             let mut obs_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();

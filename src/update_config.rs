@@ -114,7 +114,7 @@ pub(crate) fn validate_all(
             if details.is_empty() {
                 Err(format!("Xray config test завершился с ошибкой (код {code})."))
             } else {
-                Err(format!("Xray config test завершился с ошибкой (код {code}):\\n{details}"))
+                Err(format!("Xray config test завершился с ошибкой (код {code}):\n{details}"))
             }
         }
         Err(other) => Err(format!("Xray config test: {other}")),

@@ -13,10 +13,9 @@ const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
-const WARMUP_BYTES: u64 = 1_000_000;
 const TEST_SIZES: [u64; 3] = [2_000_000, 5_000_000, 10_000_000];
 const TOP_COUNT: usize = 10;
-const MAX_TIME: u64 = 3;
+const STAGE_TIMEOUTS: [u64; 3] = [3, 4, 5];
 
 /// Selects ten candidates using a staged 2/5/10 MB throughput test.
 /// The active Xray process and its configuration files are never modified.
@@ -36,8 +35,8 @@ pub(crate) fn test_outbounds_speed(
     println!();
     println!("Поэтапный сравнительный замер скорости подключений.");
     println!("Этап 1: все {} подключений — 2 МБ; затем топ-{} — 5 МБ и 10 МБ.", candidates.len(), TOP_COUNT);
-    println!("Тайм-аут каждой загрузки: {} с. Перед каждым этапом для узла выполняется прогрев 1 МБ.", MAX_TIME);
-    println!("В рейтинг попадают только полностью загруженные файлы с HTTP 200 и успешным завершением curl.");
+    println!("Тайм-ауты: 2 МБ — 3 с, 5 МБ — 4 с, 10 МБ — 5 с. Прогрев отключён.");
+    let total_started = Instant::now();
 
     let mut finalists: Vec<CandidateScore> = Vec::new();
 
@@ -45,10 +44,10 @@ pub(crate) fn test_outbounds_speed(
     println!("ЭТАП 1/3 — проверка всех подключений (2 МБ)");
     for (index, tag) in candidates.iter().enumerate() {
         println!("[{}/{}] {}", index + 1, candidates.len(), tag);
-        match measure_stage(documents, tag, TEST_SIZES[0]) {
+        match measure_stage(documents, tag, TEST_SIZES[0], STAGE_TIMEOUTS[0]) {
             Ok(Some(speed)) => finalists.push(CandidateScore { tag: tag.clone(), rates: vec![speed] }),
             Ok(None) => {}
-            Err(error) => println!("  Ошибка замера: {error}"),
+            Err(_) => println!("  Результат не получен."),
         }
     }
 
@@ -57,7 +56,8 @@ pub(crate) fn test_outbounds_speed(
 
     if finalists.is_empty() {
         println!();
-        println!("Не удалось получить ни одного корректного результата на этапе 2 МБ.");
+        println!("Не удалось получить ни одного результата на этапе 2 МБ.");
+        println!("Общее время проверки: {:.2} с.", total_started.elapsed().as_secs_f64());
         return Ok(());
     }
 
@@ -73,7 +73,7 @@ pub(crate) fn test_outbounds_speed(
         let finalist_count = finalists.len();
         for (index, candidate) in finalists.iter_mut().enumerate() {
             println!("[{}/{}] {}", index + 1, finalist_count, candidate.tag);
-            match measure_stage(documents, &candidate.tag, *size) {
+            match measure_stage(documents, &candidate.tag, *size, STAGE_TIMEOUTS[stage_index]) {
                 Ok(Some(speed)) => candidate.rates.push(speed),
                 Ok(None) => {}
                 Err(error) => println!("  Ошибка замера: {error}"),
@@ -108,6 +108,8 @@ pub(crate) fn test_outbounds_speed(
         println!("  {}. {} — {:.2} Мбит/с ({}/3 замеров)", rank + 1, candidate.tag, speed, candidate.rates.len());
     }
 
+    println!();
+    println!("Общее время проверки: {:.2} с.", total_started.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -121,21 +123,21 @@ fn measure_stage(
     documents: &[(String, Value)],
     tag: &str,
     size: u64,
+    timeout_seconds: u64,
 ) -> AppResult<Option<f64>> {
-    let samples = measure_one(documents, tag, &[size])?;
+    let samples = measure_one(documents, tag, &[size], timeout_seconds)?;
     let Some(sample) = samples.iter().find(|sample| sample.size == size) else {
-        println!("  {:>2} МБ: результат curl не получен.", size / 1_000_000);
+        println!("  {:>2} МБ: нет результата.", size / 1_000_000);
         return Ok(None);
     };
 
     if !sample.is_valid() {
-        print_invalid_sample(sample);
+        println!("  {:>2} МБ: загрузка не завершена.", size / 1_000_000);
         return Ok(None);
     }
 
     let speed = sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0;
-    println!("  {:>2} МБ: {:.2} Мбит/с ({:.2} МиБ/с)", size / 1_000_000, speed, speed / 8.388608);
-    print_sample_diagnostics(sample);
+    println!("  {:>2} МБ: {:.2} Мбит/с", size / 1_000_000, speed);
     Ok(Some(speed))
 }
 
@@ -152,75 +154,9 @@ fn median(sorted: &[f64]) -> f64 {
 }
 
 #[derive(Debug)]
-struct Sample {
-    size: u64,
-    bytes: u64,
-    first_byte_seconds: f64,
-    transfer_seconds: f64,
-    total_seconds: f64,
-    connect_seconds: f64,
-    tls_seconds: f64,
-    http_code: u16,
-    curl_exit: i32,
-    error: String,
-    remote_ip: String,
-    http_version: String,
-    new_connections: u64,
-}
-
+struct Sample { size:u64, bytes:u64, transfer_seconds:f64, http_code:u16, curl_exit:i32 }
 impl Sample {
-    fn is_valid(&self) -> bool {
-        self.bytes == self.size
-            && self.http_code == 200
-            && self.curl_exit == 0
-            && self.transfer_seconds > 0.0
-    }
-}
-
-fn print_invalid_sample(sample: &Sample) {
-    let mut reasons = Vec::new();
-    if sample.bytes != sample.size {
-        reasons.push(format!("получено {} из {} байт", sample.bytes, sample.size));
-    }
-    if sample.http_code != 200 {
-        reasons.push(format!("HTTP {}", if sample.http_code == 0 { "000".to_owned() } else { sample.http_code.to_string() }));
-    }
-    if sample.curl_exit != 0 {
-        reasons.push(format!("curl exit {}", sample.curl_exit));
-    }
-    if sample.transfer_seconds <= 0.0 {
-        reasons.push("нет времени передачи".to_owned());
-    }
-    println!(
-        "  {:>2} МБ: НЕКОРРЕКТНО — {}.",
-        sample.size / 1_000_000,
-        reasons.join(", ")
-    );
-    print_sample_diagnostics(sample);
-    if !sample.error.is_empty() {
-        println!("       Ошибка curl: {}", sample.error);
-    }
-}
-
-fn print_sample_diagnostics(sample: &Sample) {
-    println!(
-        "       HTTP {}, curl {}, байты {}/{}, connect {:.3} с, TLS {:.3} с, первый байт {:.3} с, передача {:.3} с, всего {:.3} с",
-        if sample.http_code == 0 { "000".to_owned() } else { sample.http_code.to_string() },
-        sample.curl_exit,
-        sample.bytes,
-        sample.size,
-        sample.connect_seconds,
-        sample.tls_seconds,
-        sample.first_byte_seconds,
-        sample.transfer_seconds,
-        sample.total_seconds
-    );
-    println!(
-        "       IP {}, версия HTTP {}, новых соединений curl: {}",
-        if sample.remote_ip.is_empty() { "—" } else { &sample.remote_ip },
-        if sample.http_version.is_empty() { "—" } else { &sample.http_version },
-        sample.new_connections
-    );
+    fn is_valid(&self)->bool { self.bytes==self.size && self.http_code==200 && self.curl_exit==0 && self.transfer_seconds>0.0 }
 }
 
 fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {
@@ -247,7 +183,7 @@ fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<Str
     result
 }
 
-fn measure_one(documents: &[(String, Value)], tag: &str, sizes: &[u64]) -> AppResult<Vec<Sample>> {
+fn measure_one(documents: &[(String, Value)], tag: &str, sizes: &[u64], timeout_seconds:u64) -> AppResult<Vec<Sample>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let directory = PathBuf::from("/opt/tmp").join(format!("xkeen-sub-speed-{}-{nonce}", std::process::id()));
     fs::create_dir_all("/opt/tmp")?;
@@ -281,17 +217,9 @@ fn measure_one(documents: &[(String, Value)], tag: &str, sizes: &[u64]) -> AppRe
 
         let ready = wait_for_port(port, &mut child, Duration::from_secs(15));
         let samples_result = if ready {
-            download_series(port, sizes)
+            download_series(port, sizes, timeout_seconds)
         } else {
-            let log_text = fs::read_to_string(&log_path).unwrap_or_default();
-            let details = log_text.lines().rev().take(12).collect::<Vec<_>>()
-                .into_iter().rev().collect::<Vec<_>>().join("\n");
-            let message = if details.is_empty() {
-                "HTTP probe inbound не запустился за 15 секунд".to_owned()
-            } else {
-                format!("HTTP probe inbound не запустился за 15 секунд. Лог Xray:\n{details}")
-            };
-            Err(message.into())
+            Err("Не удалось запустить проверку подключения за 15 секунд.".into())
         };
 
         let _ = child.kill();
@@ -335,16 +263,13 @@ fn add_probe_config(documents: &mut Vec<(String, Value)>, tag: &str, port: u16) 
     Ok(())
 }
 
-fn download_series(port: u16, sizes: &[u64]) -> AppResult<Vec<Sample>> {
+fn download_series(port: u16, sizes: &[u64], timeout_seconds:u64) -> AppResult<Vec<Sample>> {
     let proxy = format!("http://127.0.0.1:{port}");
     let mut command = Command::new(CURL_BIN);
-    command.args(["--silent", "--show-error", "--proxy", &proxy, "--max-time", &MAX_TIME.to_string()]);
-    // A single curl process retains its connection cache between requests.
-    command.args(["--output", "/dev/null", "--write-out", "WARMUP\n"]);
-    command.arg(format!("{TEST_HOST}{WARMUP_BYTES}"));
+    command.args(["--silent", "--proxy", &proxy, "--max-time", &timeout_seconds.to_string()]);
 
     let mut expected = Vec::with_capacity(sizes.len());
-    const WRITE_OUT: &str = "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{time_connect}\t%{time_appconnect}\t%{http_code}\t%{exitcode}\t%{errormsg}\t%{remote_ip}\t%{http_version}\t%{num_connects}\n";
+    const WRITE_OUT: &str = "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{http_code}\t%{exitcode}\n";
     for size in sizes {
         command.args(["--output", "/dev/null", "--write-out", WRITE_OUT]);
         command.arg(format!("{TEST_HOST}{size}"));
@@ -354,59 +279,21 @@ fn download_series(port: u16, sizes: &[u64]) -> AppResult<Vec<Sample>> {
     let output = command.stdout(Stdio::piped()).stderr(Stdio::piped()).output()
         .map_err(|e| format!("Не удалось запустить curl: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     let mut lines = stdout.lines();
-    let _warmup = lines.next();
     let mut samples = Vec::with_capacity(expected.len());
 
     for size in expected {
         let line = lines.next().unwrap_or("");
-        let fields: Vec<&str> = line.splitn(11, '\t').collect();
+        let fields: Vec<&str> = line.splitn(5, '\t').collect();
         let parse_u64 = |index: usize| fields.get(index).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        let parse_f64 = |index: usize| fields.get(index).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let bytes = parse_u64(0);
-        let first_byte_seconds = parse_f64(1);
-        let total_seconds = parse_f64(2);
-        let connect_seconds = parse_f64(3);
-        let tls_seconds = parse_f64(4);
-        let http_code = fields.get(5).and_then(|v| v.parse::<u16>().ok()).unwrap_or(0);
-        let curl_exit = fields.get(6).and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
-        let error = fields.get(7).copied().unwrap_or("").to_owned();
-        let remote_ip = fields.get(8).copied().unwrap_or("").to_owned();
-        let http_version = fields.get(9).copied().unwrap_or("").to_owned();
-        let new_connections = parse_u64(10);
-        let transfer_seconds = (total_seconds - first_byte_seconds).max(0.0);
-
-        let error = if error.is_empty() && curl_exit != 0 && !stderr.is_empty() {
-            stderr.clone()
-        } else {
-            error
-        };
-
-        samples.push(Sample {
-            size,
-            bytes,
-            first_byte_seconds,
-            transfer_seconds,
-            total_seconds,
-            connect_seconds,
-            tls_seconds: (tls_seconds - connect_seconds).max(0.0),
-            http_code,
-            curl_exit,
-            error,
-            remote_ip,
-            http_version,
-            new_connections,
-        });
+        let first_byte_seconds=fields.get(1).and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.0);
+        let total_seconds=fields.get(2).and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.0);
+        let http_code=fields.get(3).and_then(|v|v.parse::<u16>().ok()).unwrap_or(0);
+        let curl_exit=fields.get(4).and_then(|v|v.parse::<i32>().ok()).unwrap_or(-1);
+        samples.push(Sample { size, bytes, transfer_seconds:(total_seconds-first_byte_seconds).max(0.0), http_code, curl_exit });
     }
 
-    if output.status.code().is_some_and(|code| code != 0) && samples.iter().all(|sample| sample.curl_exit == -1) {
-        return Err(format!(
-            "curl завершился с кодом {} и не вернул данные. stderr: {}",
-            output.status,
-            if stderr.is_empty() { "пусто" } else { &stderr }
-        ).into());
-    }
     Ok(samples)
 }
 

@@ -350,3 +350,24 @@ fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
 fn safe_config_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::median;
+
+    #[test]
+    fn median_handles_odd_sample_count() {
+        assert_eq!(median(&[30.0, 10.0, 20.0]), Some(20.0));
+    }
+
+    #[test]
+    fn median_averages_even_sample_count() {
+        assert_eq!(median(&[30.0, 10.0]), Some(20.0));
+    }
+
+    #[test]
+    fn median_returns_none_for_empty_samples() {
+        assert_eq!(median(&[]), None);
+    }
+}

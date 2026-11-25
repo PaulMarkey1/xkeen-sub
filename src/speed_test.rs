@@ -13,12 +13,15 @@ const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
-const TEST_SIZES: [u64; 3] = [2_000_000, 5_000_000, 10_000_000];
-const TOP_COUNT: usize = 10;
-const STAGE_TIMEOUTS: [u64; 3] = [3, 4, 5];
+const STAGE_SIZES: [u64; 3] = [512_000, 1_000_000, 2_000_000];
+const STAGE_TIMEOUTS: [u64; 3] = [3, 5, 8];
+const FIRST_STAGE_BATCH: usize = 5;
+const SECOND_STAGE_TOP: usize = 6;
+const FINAL_STAGE_TOP: usize = 3;
+const TOTAL_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Selects ten candidates using a staged 2/5/10 MB throughput test.
-/// The active Xray process and its configuration files are never modified.
+/// Selects one outbound using staged parallel throughput tests.
+/// One temporary Xray instance serves all candidates; active Xray/configs are untouched.
 pub(crate) fn test_outbounds_speed(
     documents: &[(String, Value)],
     tags: &[String],
@@ -33,168 +36,22 @@ pub(crate) fn test_outbounds_speed(
     }
 
     println!();
-    println!("Поэтапный сравнительный замер скорости подключений.");
-    println!("Этап 1: все {} подключений — 2 МБ; затем топ-{} — 5 МБ и 10 МБ.", candidates.len(), TOP_COUNT);
-    println!("Тайм-ауты: 2 МБ — 3 с, 5 МБ — 4 с, 10 МБ — 5 с. Прогрев отключён.");
-    let total_started = Instant::now();
+    println!("Быстрый отбор подключений — лимит 60 секунд.");
+    println!("Этап 1: {} подключений, 512 КБ, группы до {} (тайм-аут 3 с).", candidates.len(), FIRST_STAGE_BATCH);
+    println!("Этап 2: до {} лучших, 1 МБ (тайм-аут 5 с).", SECOND_STAGE_TOP);
+    println!("Этап 3: до {} финалистов, 2 МБ (тайм-аут 8 с).", FINAL_STAGE_TOP);
 
-    let mut finalists: Vec<CandidateScore> = Vec::new();
-
-    println!();
-    println!("ЭТАП 1/3 — проверка всех подключений (2 МБ)");
-    for (index, tag) in candidates.iter().enumerate() {
-        println!("[{}/{}] {}", index + 1, candidates.len(), tag);
-        match measure_stage(documents, tag, TEST_SIZES[0], STAGE_TIMEOUTS[0]) {
-            Ok(Some(speed)) => finalists.push(CandidateScore { tag: tag.clone(), rates: vec![speed] }),
-            Ok(None) => {}
-            Err(_) => println!("  Результат не получен."),
-        }
-    }
-
-    finalists.sort_by(|a, b| b.rates[0].total_cmp(&a.rates[0]));
-    finalists.truncate(TOP_COUNT);
-
-    if finalists.is_empty() {
-        println!();
-        println!("Не удалось получить ни одного результата на этапе 2 МБ.");
-        println!("Общее время проверки: {:.2} с.", total_started.elapsed().as_secs_f64());
-        return Ok(());
-    }
-
-    println!();
-    println!("В следующий этап проходят {} подключений:", finalists.len());
-    for (index, candidate) in finalists.iter().enumerate() {
-        println!("  {}. {} — {:.2} Мбит/с", index + 1, candidate.tag, candidate.rates[0]);
-    }
-
-    for (stage_index, size) in TEST_SIZES.iter().enumerate().skip(1) {
-        println!();
-        println!("ЭТАП {}/3 — проверка финалистов ({} МБ)", stage_index + 1, size / 1_000_000);
-        let finalist_count = finalists.len();
-        for (index, candidate) in finalists.iter_mut().enumerate() {
-            println!("[{}/{}] {}", index + 1, finalist_count, candidate.tag);
-            match measure_stage(documents, &candidate.tag, *size, STAGE_TIMEOUTS[stage_index]) {
-                Ok(Some(speed)) => candidate.rates.push(speed),
-                Ok(None) => {}
-                Err(error) => println!("  Ошибка замера: {error}"),
-            }
-        }
-    }
-
-    let mut by_max: Vec<(&CandidateScore, f64)> = finalists.iter()
-        .filter_map(|candidate| candidate.rates.iter().copied()
-            .max_by(f64::total_cmp).map(|speed| (candidate, speed)))
-        .collect();
-    by_max.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-    let mut by_median: Vec<(&CandidateScore, f64)> = finalists.iter()
-        .filter_map(|candidate| {
-            let mut rates = candidate.rates.clone();
-            rates.sort_by(f64::total_cmp);
-            if rates.is_empty() { None } else { Some((candidate, median(&rates))) }
-        })
-        .collect();
-    by_median.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-    println!();
-    println!("ИТОГОВЫЙ РЕЙТИНГ — максимальная скорость среди замеров 2/5/10 МБ:");
-    for (rank, (candidate, speed)) in by_max.iter().enumerate() {
-        println!("  {}. {} — {:.2} Мбит/с", rank + 1, candidate.tag, speed);
-    }
-
-    println!();
-    println!("ИТОГОВЫЙ РЕЙТИНГ — медиана доступных замеров 2/5/10 МБ:");
-    for (rank, (candidate, speed)) in by_median.iter().enumerate() {
-        println!("  {}. {} — {:.2} Мбит/с ({}/3 замеров)", rank + 1, candidate.tag, speed, candidate.rates.len());
-    }
-
-    println!();
-    println!("Общее время проверки: {:.2} с.", total_started.elapsed().as_secs_f64());
-    Ok(())
-}
-
-#[derive(Debug)]
-struct CandidateScore {
-    tag: String,
-    rates: Vec<f64>,
-}
-
-fn measure_stage(
-    documents: &[(String, Value)],
-    tag: &str,
-    size: u64,
-    timeout_seconds: u64,
-) -> AppResult<Option<f64>> {
-    let samples = measure_one(documents, tag, &[size], timeout_seconds)?;
-    let Some(sample) = samples.iter().find(|sample| sample.size == size) else {
-        println!("  {:>2} МБ: нет результата.", size / 1_000_000);
-        return Ok(None);
-    };
-
-    if !sample.is_valid() {
-        println!("  {:>2} МБ: загрузка не завершена.", size / 1_000_000);
-        return Ok(None);
-    }
-
-    let speed = sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0;
-    println!("  {:>2} МБ: {:.2} Мбит/с", size / 1_000_000, speed);
-    Ok(Some(speed))
-}
-
-fn median(sorted: &[f64]) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
-        (sorted[middle - 1] + sorted[middle]) / 2.0
-    } else {
-        sorted[middle]
-    }
-}
-
-#[derive(Debug)]
-struct Sample { size:u64, bytes:u64, transfer_seconds:f64, http_code:u16, curl_exit:i32 }
-impl Sample {
-    fn is_valid(&self)->bool { self.bytes==self.size && self.http_code==200 && self.curl_exit==0 && self.transfer_seconds>0.0 }
-}
-
-fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {
-    let mut result = Vec::new();
-    for tag in requested {
-        let mut eligible = false;
-        for (_, document) in documents {
-            if let Some(outbounds) = document.get("outbounds").and_then(Value::as_array) {
-                for outbound in outbounds {
-                    if outbound.get("tag").and_then(Value::as_str) != Some(tag.as_str()) {
-                        continue;
-                    }
-                    let protocol = outbound.get("protocol").and_then(Value::as_str).unwrap_or("");
-                    if !matches!(protocol, "freedom" | "blackhole" | "dns" | "loopback") && tag != "api" {
-                        eligible = true;
-                    }
-                }
-            }
-        }
-        if eligible && !result.contains(tag) {
-            result.push(tag.clone());
-        }
-    }
-    result
-}
-
-fn measure_one(documents: &[(String, Value)], tag: &str, sizes: &[u64], timeout_seconds:u64) -> AppResult<Vec<Sample>> {
+    let started = Instant::now();
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let directory = PathBuf::from("/opt/tmp").join(format!("xkeen-sub-speed-{}-{nonce}", std::process::id()));
+    let log_path = PathBuf::from("/tmp").join(format!("xkeen-sub-speed-{}-{nonce}.log", std::process::id()));
     fs::create_dir_all("/opt/tmp")?;
     fs::create_dir(&directory)?;
-    let log_path = PathBuf::from("/tmp").join(format!("xkeen-sub-speed-{}-{nonce}.log", std::process::id()));
 
-    let result = (|| -> AppResult<Vec<Sample>> {
-        let port = reserve_port()?;
+    let result = (|| -> AppResult<()> {
+        let ports = candidates.iter().map(|_| reserve_port()).collect::<AppResult<Vec<_>>>()?;
         let mut helper_documents = documents.to_vec();
-        add_probe_config(&mut helper_documents, tag, port)?;
-
+        add_probe_configs(&mut helper_documents, &candidates, &ports)?;
         for (name, value) in &helper_documents {
             if !safe_config_name(name) {
                 return Err(format!("Недопустимое имя конфигурационного файла: {name}").into());
@@ -215,37 +72,178 @@ fn measure_one(documents: &[(String, Value)], tag: &str, sizes: &[u64], timeout_
             .spawn()
             .map_err(|e| format!("Не удалось запустить вспомогательный Xray: {e}"))?;
 
-        let ready = wait_for_port(port, &mut child, Duration::from_secs(15));
-        let samples_result = if ready {
-            download_series(port, sizes, timeout_seconds)
-        } else {
-            Err("Не удалось запустить проверку подключения за 15 секунд.".into())
-        };
+        if !wait_for_ports(&ports, &mut child, Duration::from_secs(15)) {
+            finish_child(&mut child);
+            return Err("Вспомогательный Xray не запустился за 15 секунд.".into());
+        }
 
-        let _ = child.kill();
-        let _ = child.wait();
-        samples_result
+        println!();
+        println!("ЭТАП 1/3 — быстрый отсев");
+        let mut current: Vec<(usize, f64)> = Vec::new();
+        for (batch_index, batch) in candidates.chunks(FIRST_STAGE_BATCH).enumerate() {
+            let remaining = remaining_seconds(started);
+            if remaining == 0 { break; }
+            let offset = batch_index * FIRST_STAGE_BATCH;
+            let results = run_parallel_batch(
+                batch,
+                &ports[offset..offset + batch.len()],
+                STAGE_SIZES[0],
+                STAGE_TIMEOUTS[0].min(remaining),
+            );
+            for (local_index, speed) in results.into_iter().enumerate() {
+                let index = offset + local_index;
+                if let Some(speed) = speed {
+                    println!("  {} — {:.2} Мбит/с", candidates[index], speed);
+                    current.push((index, speed));
+                } else {
+                    println!("  {} — нет результата", candidates[index]);
+                }
+            }
+        }
+        current.sort_by(|a, b| b.1.total_cmp(&a.1));
+        current.truncate(SECOND_STAGE_TOP);
+        if current.is_empty() {
+            println!("На первом этапе не получено успешных результатов.");
+            finish_child(&mut child);
+            return Ok(());
+        }
+
+        println!();
+        println!("ЭТАП 2/3 — уточнение ({} подключений)", current.len());
+        let indices: Vec<usize> = current.iter().map(|v| v.0).collect();
+        let tags: Vec<String> = indices.iter().map(|&i| candidates[i].clone()).collect();
+        let stage_ports: Vec<u16> = indices.iter().map(|&i| ports[i]).collect();
+        let remaining = remaining_seconds(started);
+        let results = if remaining > 0 {
+            run_parallel_batch(&tags, &stage_ports, STAGE_SIZES[1], STAGE_TIMEOUTS[1].min(remaining))
+        } else { vec![None; tags.len()] };
+        current = indices.into_iter().zip(results)
+            .filter_map(|(i, speed)| speed.map(|s| (i, s))).collect();
+        current.sort_by(|a, b| b.1.total_cmp(&a.1));
+        current.truncate(FINAL_STAGE_TOP);
+        if current.is_empty() {
+            println!("На втором этапе не осталось успешных результатов.");
+            finish_child(&mut child);
+            return Ok(());
+        }
+
+        println!();
+        println!("ЭТАП 3/3 — финальный выбор ({} подключения)", current.len());
+        let indices: Vec<usize> = current.iter().map(|v| v.0).collect();
+        let tags: Vec<String> = indices.iter().map(|&i| candidates[i].clone()).collect();
+        let stage_ports: Vec<u16> = indices.iter().map(|&i| ports[i]).collect();
+        let remaining = remaining_seconds(started);
+        let results = if remaining > 0 {
+            run_parallel_batch(&tags, &stage_ports, STAGE_SIZES[2], STAGE_TIMEOUTS[2].min(remaining))
+        } else { vec![None; tags.len()] };
+        let mut ranking: Vec<(usize, f64)> = indices.into_iter().zip(results)
+            .filter_map(|(i, speed)| speed.map(|s| (i, s))).collect();
+        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        println!();
+        println!("ИТОГОВЫЙ РЕЙТИНГ — финальная скорость (2 МБ):");
+        for (rank, (index, speed)) in ranking.iter().enumerate() {
+            println!("  {}. {} — {:.2} Мбит/с", rank + 1, candidates[*index], speed);
+        }
+        if let Some((index, speed)) = ranking.first() {
+            println!();
+            println!("Победитель: {} — {:.2} Мбит/с", candidates[*index], speed);
+        } else {
+            println!("Финальный этап не дал успешных результатов.");
+        }
+        finish_child(&mut child);
+        Ok(())
     })();
 
     if let Err(error) = fs::remove_dir_all(&directory) {
         eprintln!("Не удалось удалить временный каталог {}: {error}", directory.display());
     }
     let _ = fs::remove_file(&log_path);
+    println!();
+    println!("Общее время проверки: {:.2} с.", started.elapsed().as_secs_f64());
     result
 }
 
-fn add_probe_config(documents: &mut Vec<(String, Value)>, tag: &str, port: u16) -> AppResult<()> {
+fn remaining_seconds(started: Instant) -> u64 {
+    TOTAL_DEADLINE.saturating_sub(started.elapsed()).as_secs()
+}
+
+fn finish_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_parallel_batch(tags: &[String], ports: &[u16], size: u64, timeout_seconds: u64) -> Vec<Option<f64>> {
+    thread::scope(|scope| {
+        let handles: Vec<_> = tags.iter().zip(ports.iter()).map(|(tag, port)| {
+            scope.spawn(move || measure_candidate(tag, *port, size, timeout_seconds))
+        }).collect();
+        handles.into_iter().map(|handle| handle.join().ok().flatten()).collect()
+    })
+}
+
+fn measure_candidate(_tag: &str, port: u16, size: u64, timeout_seconds: u64) -> Option<f64> {
+    let proxy = format!("http://127.0.0.1:{port}");
+    let timeout = timeout_seconds.to_string();
+    let output = Command::new(CURL_BIN)
+        .args([
+            "--silent", "--show-error", "--proxy", &proxy, "--max-time", &timeout,
+            "--output", "/dev/null", "--write-out",
+            "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}\\t%{exitcode}",
+        ])
+        .arg(format!("{TEST_HOST}{size}"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = stdout.split('\t').map(str::trim).collect();
+    if fields.len() != 5 { return None; }
+    let bytes = fields[0].parse::<u64>().ok()?;
+    let first_byte = fields[1].parse::<f64>().ok()?;
+    let total = fields[2].parse::<f64>().ok()?;
+    let http_code = fields[3].parse::<u16>().ok()?;
+    let curl_exit = fields[4].parse::<i32>().ok()?;
+    let transfer = total - first_byte;
+    if bytes != size || http_code != 200 || curl_exit != 0 || transfer <= 0.0 { return None; }
+    Some(bytes as f64 * 8.0 / transfer / 1_000_000.0)
+}
+
+fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for tag in requested {
+        let mut eligible = false;
+        for (_, document) in documents {
+            if let Some(outbounds) = document.get("outbounds").and_then(Value::as_array) {
+                for outbound in outbounds {
+                    if outbound.get("tag").and_then(Value::as_str) != Some(tag.as_str()) { continue; }
+                    let protocol = outbound.get("protocol").and_then(Value::as_str).unwrap_or("");
+                    if !matches!(protocol, "freedom" | "blackhole" | "dns" | "loopback") && tag != "api" {
+                        eligible = true;
+                    }
+                }
+            }
+        }
+        if eligible && !result.contains(tag) { result.push(tag.clone()); }
+    }
+    result
+}
+
+fn add_probe_configs(documents: &mut Vec<(String, Value)>, tags: &[String], ports: &[u16]) -> AppResult<()> {
     let routing_index = documents.iter().position(|(_, doc)| doc.get("routing").is_some())
         .ok_or("В рабочей конфигурации не найден объект routing.")?;
     let routing = documents[routing_index].1.get_mut("routing")
         .and_then(Value::as_object_mut).ok_or("Объект routing должен быть JSON-объектом.")?;
     let rules = routing.entry("rules").or_insert_with(|| json!([]))
         .as_array_mut().ok_or("routing.rules должен быть массивом.")?;
-    rules.insert(0, json!({
-        "type": "field",
-        "inboundTag": ["xkeen-sub-speed-probe"],
-        "outboundTag": tag
-    }));
+    let mut probe_rules = Vec::with_capacity(tags.len());
+    for (index, tag) in tags.iter().enumerate() {
+        probe_rules.push(json!({
+            "type": "field",
+            "inboundTag": [format!("xkeen-sub-speed-probe-{index}")],
+            "outboundTag": tag
+        }));
+    }
+    for rule in probe_rules.into_iter().rev() { rules.insert(0, rule); }
 
     let inbound_index = documents.iter().position(|(_, doc)| doc.get("inbounds").is_some())
         .unwrap_or(routing_index);
@@ -253,48 +251,16 @@ fn add_probe_config(documents: &mut Vec<(String, Value)>, tag: &str, port: u16) 
         .ok_or("Корень конфигурации должен быть JSON-объектом.")?;
     let inbounds = root.entry("inbounds").or_insert_with(|| json!([]))
         .as_array_mut().ok_or("inbounds должен быть массивом.")?;
-    inbounds.push(json!({
-        "tag": "xkeen-sub-speed-probe",
-        "listen": "127.0.0.1",
-        "port": port,
-        "protocol": "http",
-        "settings": {}
-    }));
+    for (index, port) in ports.iter().enumerate() {
+        inbounds.push(json!({
+            "tag": format!("xkeen-sub-speed-probe-{index}"),
+            "listen": "127.0.0.1",
+            "port": port,
+            "protocol": "http",
+            "settings": {}
+        }));
+    }
     Ok(())
-}
-
-fn download_series(port: u16, sizes: &[u64], timeout_seconds:u64) -> AppResult<Vec<Sample>> {
-    let proxy = format!("http://127.0.0.1:{port}");
-    let mut command = Command::new(CURL_BIN);
-    command.args(["--silent", "--proxy", &proxy, "--max-time", &timeout_seconds.to_string()]);
-
-    let mut expected = Vec::with_capacity(sizes.len());
-    const WRITE_OUT: &str = "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{http_code}\t%{exitcode}\n";
-    for size in sizes {
-        command.args(["--output", "/dev/null", "--write-out", WRITE_OUT]);
-        command.arg(format!("{TEST_HOST}{size}"));
-        expected.push(*size);
-    }
-
-    let output = command.stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-        .map_err(|e| format!("Не удалось запустить curl: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines = stdout.lines();
-    let mut samples = Vec::with_capacity(expected.len());
-
-    for size in expected {
-        let line = lines.next().unwrap_or("");
-        let fields: Vec<&str> = line.splitn(5, '\t').collect();
-        let parse_u64 = |index: usize| fields.get(index).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        let bytes = parse_u64(0);
-        let first_byte_seconds=fields.get(1).and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.0);
-        let total_seconds=fields.get(2).and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.0);
-        let http_code=fields.get(3).and_then(|v|v.parse::<u16>().ok()).unwrap_or(0);
-        let curl_exit=fields.get(4).and_then(|v|v.parse::<i32>().ok()).unwrap_or(-1);
-        samples.push(Sample { size, bytes, transfer_seconds:(total_seconds-first_byte_seconds).max(0.0), http_code, curl_exit });
-    }
-
-    Ok(samples)
 }
 
 fn reserve_port() -> AppResult<u16> {
@@ -304,16 +270,12 @@ fn reserve_port() -> AppResult<u16> {
     Ok(port)
 }
 
-fn wait_for_port(port: u16, child: &mut Child, timeout: Duration) -> bool {
+fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if child.try_wait().ok().flatten().is_some() {
-            return false;
-        }
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(250));
+        if child.try_wait().ok().flatten().is_some() { return false; }
+        if ports.iter().all(|port| TcpStream::connect(("127.0.0.1", *port)).is_ok()) { return true; }
+        thread::sleep(Duration::from_millis(100));
     }
     false
 }

@@ -98,8 +98,6 @@ struct Sample {
     size: u64,
     bytes: u64,
     transfer_seconds: f64,
-    total_seconds: f64,
-    first_byte_seconds: f64,
     http_code: u16,
     timed_out: bool,
 }
@@ -258,7 +256,7 @@ fn download_series(port: u16) -> AppResult<Vec<Sample>> {
         let transfer_seconds = (total_seconds - first_byte_seconds).max(0.0);
         let timed_out = curl_exit == 28 && bytes > 0 && http_code == 200;
         samples.push(Sample {
-            size, bytes, transfer_seconds, total_seconds, first_byte_seconds, http_code, timed_out,
+            size, bytes, transfer_seconds, http_code, timed_out,
         });
     }
     Ok(samples)

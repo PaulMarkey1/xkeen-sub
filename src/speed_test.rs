@@ -196,7 +196,7 @@ fn measure_candidate(_tag: &str, port: u16, size: u64, timeout_seconds: u64) -> 
         .stderr(Stdio::null())
         .output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<&str> = stdout.split('\\t').map(str::trim).collect();
+    let fields: Vec<&str> = stdout.split('\t').map(str::trim).collect();
     if fields.len() != 5 { return None; }
     let bytes = fields[0].parse::<u64>().ok()?;
     let first_byte = fields[1].parse::<f64>().ok()?;

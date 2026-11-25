@@ -58,21 +58,22 @@ pub(crate) fn test_outbounds_speed(
                         .map(|sample| sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0)
                         .collect();
                     rates.sort_by(f64::total_cmp);
-                    let median = median(&rates);
-                    all_rates.push(median);
-                    let partial = values.iter().filter(|sample| sample.timed_out).count();
+                    let median_speed = median(&rates);
+                    all_rates.push((size, median_speed));
+                    let individual = values.iter().map(|sample| {
+                        let speed = sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0;
+                        format!("{speed:.2}{}", if sample.timed_out { "*" } else { "" })
+                    }).collect::<Vec<_>>().join(" / ");
                     println!(
-                        "  {:>2} МБ: медиана {:.2} Мбит/с ({:.2} МиБ/с), замеры: {}{}",
+                        "  {:>2} МБ: {} Мбит/с; медиана {:.2} Мбит/с ({:.2} МиБ/с)",
                         size / 1_000_000,
-                        median,
-                        median / 8.388608,
-                        rates.len(),
-                        if partial > 0 { ", есть загрузки по тайм-ауту" } else { "" }
+                        individual,
+                        median_speed,
+                        median_speed / 8.388608
                     );
                 }
-                if !all_rates.is_empty() {
-                    all_rates.sort_by(f64::total_cmp);
-                    rankings.push((tag.clone(), median(&all_rates)));
+                if let Some((_, sustained_speed)) = all_rates.iter().find(|(size, _)| *size == 50_000_000) {
+                    rankings.push((tag.clone(), *sustained_speed));
                 }
             }
             Err(error) => println!("  Ошибка замера: {error}"),
@@ -81,7 +82,7 @@ pub(crate) fn test_outbounds_speed(
 
     rankings.sort_by(|a, b| b.1.total_cmp(&a.1));
     println!();
-    println!("Сводный рейтинг (медиана результатов по четырём размерам):");
+    println!("Рейтинг по медиане загрузки 50 МБ (устойчивая скорость):");
     if rankings.is_empty() {
         println!("  Не удалось получить корректные результаты.");
     } else {
@@ -233,7 +234,7 @@ fn download_series(port: u16) -> AppResult<Vec<Sample>> {
         for size in TEST_SIZES {
             command.args([
                 "--output", "/dev/null",
-                "--write-out", "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{http_code}\n",
+                "--write-out", "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{http_code}\t%{exitcode}\n",
             ]);
             command.arg(format!("{TEST_HOST}{size}"));
             expected.push(size);
@@ -253,8 +254,9 @@ fn download_series(port: u16) -> AppResult<Vec<Sample>> {
         let first_byte_seconds = fields.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
         let total_seconds = fields.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
         let http_code = fields.next().unwrap_or("000").parse::<u16>().unwrap_or(0);
+        let curl_exit = fields.next().unwrap_or("0").parse::<i32>().unwrap_or(-1);
         let transfer_seconds = (total_seconds - first_byte_seconds).max(0.0);
-        let timed_out = !output.status.success() && bytes > 0 && http_code == 200;
+        let timed_out = curl_exit == 28 && bytes > 0 && http_code == 200;
         samples.push(Sample {
             size, bytes, transfer_seconds, total_seconds, first_byte_seconds, http_code, timed_out,
         });

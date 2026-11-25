@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use crate::terminal::{error, info, menu_item, read_input, success, title, warning};
+use crate::terminal::{error, info, menu_item, read_input, success, title};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 const CONFIG: &str = "/opt/etc/xkeen-sub/speed-monitor.json";

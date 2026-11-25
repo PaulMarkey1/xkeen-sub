@@ -174,7 +174,7 @@ fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Vec<Sample
         let samples = if ready {
             download_series(port)?
         } else {
-            Err("HTTP probe inbound не запустился за 15 секунд".into())
+            return Err("HTTP probe inbound не запустился за 15 секунд".into());
         };
 
         let _ = child.kill();

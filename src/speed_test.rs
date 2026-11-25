@@ -70,8 +70,9 @@ pub(crate) fn test_outbounds_speed(
     for (stage_index, size) in TEST_SIZES.iter().enumerate().skip(1) {
         println!();
         println!("ЭТАП {}/3 — проверка финалистов ({} МБ)", stage_index + 1, size / 1_000_000);
+        let finalist_count = finalists.len();
         for (index, candidate) in finalists.iter_mut().enumerate() {
-            println!("[{}/{}] {}", index + 1, finalists.len(), candidate.tag);
+            println!("[{}/{}] {}", index + 1, finalist_count, candidate.tag);
             match measure_stage(documents, &candidate.tag, *size) {
                 Ok(Some(speed)) => candidate.rates.push(speed),
                 Ok(None) => {}
@@ -220,18 +221,6 @@ fn print_sample_diagnostics(sample: &Sample) {
         if sample.http_version.is_empty() { "—" } else { &sample.http_version },
         sample.new_connections
     );
-}
-
-fn median(sorted: &[f64]) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
-        (sorted[middle - 1] + sorted[middle]) / 2.0
-    } else {
-        sorted[middle]
-    }
 }
 
 fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {

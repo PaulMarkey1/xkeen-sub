@@ -10,10 +10,9 @@ use crate::update_subscription::prepare_subscriptions;
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
 const UPDATE_LOCK: &str = "/opt/var/run/xkeen-sub-update.lock";
-const MAX_DELAY_MS: u64 = 5000;
 
-/// Runs the normal subscription preparation and merge pipeline, then probes
-/// the resulting outbound selector without creating a backup or applying files.
+/// Prepares subscriptions in memory, then measures real download throughput
+/// through each resulting outbound using an isolated helper Xray.
 pub fn run() -> AppResult<()> {
     let _lock = crate::update_lock::FileLock::acquire(UPDATE_LOCK)?
         .ok_or("Обновление уже выполняется. Дождитесь его завершения и повторите тест.")?;
@@ -91,12 +90,12 @@ pub fn run() -> AppResult<()> {
         tags.len()
     ));
     journal.event("TEST", &format!("Подготовлено итоговых подключений: {}.", tags.len()))?;
-    crate::xray_probe::test_outbounds(&documents, &tags)?;
+    crate::speed_test::test_outbounds_speed(&documents, &tags)?;
 
     journal.set_outcome(
         "ТЕСТ ЗАВЕРШЁН",
         &format!(
-            "Проверены подключения итоговой конфигурации группами по три; порог пинга — {MAX_DELAY_MS} мс. Рабочие файлы не применялись."
+            "Измерена фактическая скорость всех доступных подписочных подключений через отдельный probe Xray. Рабочие файлы не применялись."
         ),
         false,
     );

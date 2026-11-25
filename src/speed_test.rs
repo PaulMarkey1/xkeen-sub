@@ -14,11 +14,11 @@ const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
 const WARMUP_BYTES: u64 = 1_000_000;
-const TEST_SIZES: [u64; 4] = [2_000_000, 5_000_000, 10_000_000, 50_000_000];
-const REPEATS: usize = 1;
-const MAX_TIME: u64 = 60;
+const TEST_SIZES: [u64; 3] = [2_000_000, 5_000_000, 10_000_000];
+const TOP_COUNT: usize = 10;
+const MAX_TIME: u64 = 3;
 
-/// Measures every requested active outbound using an isolated helper Xray.
+/// Selects ten candidates using a staged 2/5/10 MB throughput test.
 /// The active Xray process and its configuration files are never modified.
 pub(crate) fn test_outbounds_speed(
     documents: &[(String, Value)],
@@ -34,74 +34,120 @@ pub(crate) fn test_outbounds_speed(
     }
 
     println!();
-    println!("Сравнительный замер скорости подключений.");
-    println!("Размеры: 2, 5, 10 и 50 МБ; повторов каждого размера: {REPEATS}.");
-    println!("Перед замерами выполняется прогревочное скачивание 1 МБ; тайм-аут одной загрузки: {MAX_TIME} с.");
-    println!("Запросы идут через один процесс curl. Для каждой загрузки фиксируются HTTP, curl и сетевые тайминги.");
+    println!("Поэтапный сравнительный замер скорости подключений.");
+    println!("Этап 1: все {} подключений — 2 МБ; затем топ-{} — 5 МБ и 10 МБ.", candidates.len(), TOP_COUNT);
+    println!("Тайм-аут каждой загрузки: {} с. Перед каждым этапом для узла выполняется прогрев 1 МБ.", MAX_TIME);
+    println!("В рейтинг попадают только полностью загруженные файлы с HTTP 200 и успешным завершением curl.");
 
-    let mut rankings: Vec<(String, f64)> = Vec::new();
+    let mut finalists: Vec<CandidateScore> = Vec::new();
+
+    println!();
+    println!("ЭТАП 1/3 — проверка всех подключений (2 МБ)");
     for (index, tag) in candidates.iter().enumerate() {
-        println!();
         println!("[{}/{}] {}", index + 1, candidates.len(), tag);
-        match measure_one(documents, tag) {
-            Ok(samples) => {
-                let mut all_rates = Vec::new();
-                for size in TEST_SIZES {
-                    let values: Vec<&Sample> = samples.iter()
-                        .filter(|sample| sample.size == size)
-                        .collect();
-                    if values.is_empty() {
-                        println!("  {:>2} МБ: результат curl не получен.", size / 1_000_000);
-                        continue;
-                    }
-
-                    let valid: Vec<&Sample> = values.iter().copied()
-                        .filter(|sample| sample.is_valid())
-                        .collect();
-
-                    if valid.is_empty() {
-                        for sample in values {
-                            print_invalid_sample(sample);
-                        }
-                        continue;
-                    }
-
-                    let mut rates: Vec<f64> = valid.iter()
-                        .map(|sample| sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0)
-                        .collect();
-                    rates.sort_by(f64::total_cmp);
-                    let median_speed = median(&rates);
-                    all_rates.push((size, median_speed));
-                    println!(
-                        "  {:>2} МБ: {:.2} Мбит/с; медиана {:.2} Мбит/с ({:.2} МиБ/с)",
-                        size / 1_000_000,
-                        median_speed,
-                        median_speed,
-                        median_speed / 8.388608
-                    );
-                    for sample in valid {
-                        print_sample_diagnostics(sample);
-                    }
-                }
-                if let Some((_, sustained_speed)) = all_rates.iter().find(|(size, _)| *size == 50_000_000) {
-                    rankings.push((tag.clone(), *sustained_speed));
-                }
-            }
+        match measure_stage(documents, tag, TEST_SIZES[0]) {
+            Ok(Some(speed)) => finalists.push(CandidateScore { tag: tag.clone(), rates: vec![speed] }),
+            Ok(None) => {}
             Err(error) => println!("  Ошибка замера: {error}"),
         }
     }
 
-    rankings.sort_by(|a, b| b.1.total_cmp(&a.1));
+    finalists.sort_by(|a, b| b.rates[0].total_cmp(&a.rates[0]));
+    finalists.truncate(TOP_COUNT);
+
+    if finalists.is_empty() {
+        println!();
+        println!("Не удалось получить ни одного корректного результата на этапе 2 МБ.");
+        return Ok(());
+    }
+
     println!();
-    println!("Рейтинг по скорости загрузки 50 МБ:");
-    if rankings.is_empty() {
-        println!("  Не удалось получить корректные результаты.");
-    } else {
-        for (rank, (tag, speed)) in rankings.iter().enumerate() {
-            println!("  {}. {} — {:.2} Мбит/с", rank + 1, tag, speed);
+    println!("В следующий этап проходят {} подключений:", finalists.len());
+    for (index, candidate) in finalists.iter().enumerate() {
+        println!("  {}. {} — {:.2} Мбит/с", index + 1, candidate.tag, candidate.rates[0]);
+    }
+
+    for (stage_index, size) in TEST_SIZES.iter().enumerate().skip(1) {
+        println!();
+        println!("ЭТАП {}/3 — проверка финалистов ({} МБ)", stage_index + 1, size / 1_000_000);
+        for (index, candidate) in finalists.iter_mut().enumerate() {
+            println!("[{}/{}] {}", index + 1, finalists.len(), candidate.tag);
+            match measure_stage(documents, &candidate.tag, *size) {
+                Ok(Some(speed)) => candidate.rates.push(speed),
+                Ok(None) => {}
+                Err(error) => println!("  Ошибка замера: {error}"),
+            }
         }
     }
+
+    let mut by_max: Vec<(&CandidateScore, f64)> = finalists.iter()
+        .filter_map(|candidate| candidate.rates.iter().copied()
+            .max_by(f64::total_cmp).map(|speed| (candidate, speed)))
+        .collect();
+    by_max.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut by_median: Vec<(&CandidateScore, f64)> = finalists.iter()
+        .filter_map(|candidate| {
+            let mut rates = candidate.rates.clone();
+            rates.sort_by(f64::total_cmp);
+            if rates.is_empty() { None } else { Some((candidate, median(&rates))) }
+        })
+        .collect();
+    by_median.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    println!();
+    println!("ИТОГОВЫЙ РЕЙТИНГ — максимальная скорость среди замеров 2/5/10 МБ:");
+    for (rank, (candidate, speed)) in by_max.iter().enumerate() {
+        println!("  {}. {} — {:.2} Мбит/с", rank + 1, candidate.tag, speed);
+    }
+
+    println!();
+    println!("ИТОГОВЫЙ РЕЙТИНГ — медиана доступных замеров 2/5/10 МБ:");
+    for (rank, (candidate, speed)) in by_median.iter().enumerate() {
+        println!("  {}. {} — {:.2} Мбит/с ({}/3 замеров)", rank + 1, candidate.tag, speed, candidate.rates.len());
+    }
+
     Ok(())
+}
+
+#[derive(Debug)]
+struct CandidateScore {
+    tag: String,
+    rates: Vec<f64>,
+}
+
+fn measure_stage(
+    documents: &[(String, Value)],
+    tag: &str,
+    size: u64,
+) -> AppResult<Option<f64>> {
+    let samples = measure_one(documents, tag, &[size])?;
+    let Some(sample) = samples.iter().find(|sample| sample.size == size) else {
+        println!("  {:>2} МБ: результат curl не получен.", size / 1_000_000);
+        return Ok(None);
+    };
+
+    if !sample.is_valid() {
+        print_invalid_sample(sample);
+        return Ok(None);
+    }
+
+    let speed = sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0;
+    println!("  {:>2} МБ: {:.2} Мбит/с ({:.2} МиБ/с)", size / 1_000_000, speed, speed / 8.388608);
+    print_sample_diagnostics(sample);
+    Ok(Some(speed))
+}
+
+fn median(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
+    }
 }
 
 #[derive(Debug)]
@@ -212,7 +258,7 @@ fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<Str
     result
 }
 
-fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Vec<Sample>> {
+fn measure_one(documents: &[(String, Value)], tag: &str, sizes: &[u64]) -> AppResult<Vec<Sample>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let directory = PathBuf::from("/opt/tmp").join(format!("xkeen-sub-speed-{}-{nonce}", std::process::id()));
     fs::create_dir_all("/opt/tmp")?;
@@ -246,7 +292,7 @@ fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Vec<Sample
 
         let ready = wait_for_port(port, &mut child, Duration::from_secs(15));
         let samples_result = if ready {
-            download_series(port)
+            download_series(port, sizes)
         } else {
             let log_text = fs::read_to_string(&log_path).unwrap_or_default();
             let details = log_text.lines().rev().take(12).collect::<Vec<_>>()
@@ -300,7 +346,7 @@ fn add_probe_config(documents: &mut Vec<(String, Value)>, tag: &str, port: u16) 
     Ok(())
 }
 
-fn download_series(port: u16) -> AppResult<Vec<Sample>> {
+fn download_series(port: u16, sizes: &[u64]) -> AppResult<Vec<Sample>> {
     let proxy = format!("http://127.0.0.1:{port}");
     let mut command = Command::new(CURL_BIN);
     command.args(["--silent", "--show-error", "--proxy", &proxy, "--max-time", &MAX_TIME.to_string()]);
@@ -308,14 +354,12 @@ fn download_series(port: u16) -> AppResult<Vec<Sample>> {
     command.args(["--output", "/dev/null", "--write-out", "WARMUP\n"]);
     command.arg(format!("{TEST_HOST}{WARMUP_BYTES}"));
 
-    let mut expected = Vec::with_capacity(TEST_SIZES.len() * REPEATS);
+    let mut expected = Vec::with_capacity(sizes.len());
     const WRITE_OUT: &str = "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{time_connect}\t%{time_appconnect}\t%{http_code}\t%{exitcode}\t%{errormsg}\t%{remote_ip}\t%{http_version}\t%{num_connects}\n";
-    for _ in 0..REPEATS {
-        for size in TEST_SIZES {
-            command.args(["--output", "/dev/null", "--write-out", WRITE_OUT]);
-            command.arg(format!("{TEST_HOST}{size}"));
-            expected.push(size);
-        }
+    for size in sizes {
+        command.args(["--output", "/dev/null", "--write-out", WRITE_OUT]);
+        command.arg(format!("{TEST_HOST}{size}"));
+        expected.push(*size);
     }
 
     let output = command.stdout(Stdio::piped()).stderr(Stdio::piped()).output()

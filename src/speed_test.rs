@@ -179,7 +179,7 @@ fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Vec<Sample
 
         let _ = child.kill();
         let _ = child.wait();
-        samples
+        Ok(samples)
     })();
 
     if let Err(error) = fs::remove_dir_all(&directory) {

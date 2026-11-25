@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, test, update};
+use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, speed_monitor, test, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -33,6 +33,7 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run().map(|_| ()),
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
+        [action] if action == "speed-monitor" => speed_monitor::run_menu(),
         [action] if action == "test" => test::run(),
         [action] if action == "update" => update::run(None),
         [action, target] if action == "update" => update::run(Some(target)),
@@ -72,6 +73,7 @@ fn print_help() -> AppResult<()> {
     command_item("  clear", "Удалить все точки восстановления после подтверждения");
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
     command_item("test", "Проверить подключения без изменения рабочих файлов");
+    command_item("speed-monitor", "Настроить почасовые проверки скорости и просмотреть журнал");
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");
     command_item("auto-update", "Настроить автоматическое обновление подписок");

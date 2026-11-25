@@ -9,17 +9,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-const CONFIG_SOURCE: &str = "/opt/etc/xray/configs";
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
-const TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=10000000";
+const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
+const WARMUP_BYTES: u64 = 1_000_000;
+const TEST_SIZES: [u64; 4] = [2_000_000, 5_000_000, 10_000_000, 50_000_000];
+const REPEATS: usize = 3;
 const MAX_TIME: u64 = 8;
 
-/// Measures real download throughput through each final subscription outbound.
-/// Each candidate gets an isolated helper Xray and an HTTP-proxy probe inbound;
-/// a temporary first routing rule pins only probe traffic to that outbound.
-/// The live Xray, config files and routing API are never modified.
+/// Measures download throughput after warming up one reusable HTTP/TLS connection.
+/// Each candidate gets an isolated helper Xray; live Xray and configuration are untouched.
 pub(crate) fn test_outbounds_speed(
     documents: &[(String, Value)],
     tags: &[String],
@@ -34,50 +34,85 @@ pub(crate) fn test_outbounds_speed(
     }
 
     println!();
-    println!("Замер фактической скорости всех подключений.");
-    println!("Размер загрузки: 10 МБ; тайм-аут одного подключения: {MAX_TIME} с.");
-    println!("Каждое подключение проверяется отдельно, последовательно.");
+    println!("Сравнительный замер скорости подключений.");
+    println!("Размеры: 2, 5, 10 и 50 МБ; повторов каждого размера: {REPEATS}.");
+    println!("Перед замерами выполняется прогрев соединения; тайм-аут одной загрузки: {MAX_TIME} с.");
+    println!("Запросы идут через один процесс curl, чтобы повторно использовать TCP/TLS-соединение.");
 
-    let mut results = Vec::with_capacity(candidates.len());
+    let mut rankings: Vec<(String, f64)> = Vec::new();
     for (index, tag) in candidates.iter().enumerate() {
-        print!("[{}/{}] {}: ", index + 1, candidates.len(), tag);
+        println!();
+        println!("[{}/{}] {}", index + 1, candidates.len(), tag);
         match measure_one(documents, tag) {
-            Ok(sample) if sample.http_code == 200 && sample.bytes > 0 && sample.seconds > 0.0 => {
-                let mbps = sample.bytes as f64 * 8.0 / sample.seconds / 1_000_000.0;
-                let mib_s = sample.bytes as f64 / sample.seconds / 1_048_576.0;
-                if sample.timed_out {
-                    println!("{:.2} Мбит/с ({:.2} МиБ/с, частичная загрузка за тайм-аут)", mbps, mib_s);
-                } else {
-                    println!("{:.2} Мбит/с ({:.2} МиБ/с)", mbps, mib_s);
+            Ok(samples) => {
+                let mut all_rates = Vec::new();
+                for size in TEST_SIZES {
+                    let values: Vec<&Sample> = samples.iter()
+                        .filter(|sample| sample.size == size && sample.bytes > 0 && sample.transfer_seconds > 0.0 && sample.http_code == 200)
+                        .collect();
+                    if values.is_empty() {
+                        println!("  {:>2} МБ: нет корректных результатов", size / 1_000_000);
+                        continue;
+                    }
+                    let mut rates: Vec<f64> = values.iter()
+                        .map(|sample| sample.bytes as f64 * 8.0 / sample.transfer_seconds / 1_000_000.0)
+                        .collect();
+                    rates.sort_by(f64::total_cmp);
+                    let median = median(&rates);
+                    all_rates.push(median);
+                    let partial = values.iter().filter(|sample| sample.timed_out).count();
+                    println!(
+                        "  {:>2} МБ: медиана {:.2} Мбит/с ({:.2} МиБ/с), замеры: {}{}",
+                        size / 1_000_000,
+                        median,
+                        median / 8.388608,
+                        rates.len(),
+                        if partial > 0 { ", есть загрузки по тайм-ауту" } else { "" }
+                    );
                 }
-                results.push((tag.clone(), mbps));
+                if !all_rates.is_empty() {
+                    all_rates.sort_by(f64::total_cmp);
+                    rankings.push((tag.clone(), median(&all_rates)));
+                }
             }
-            Ok(sample) => println!("замер не удался (HTTP {}, получено {} байт)", sample.http_code, sample.bytes),
-            Err(error) => println!("ошибка: {error}"),
+            Err(error) => println!("  Ошибка замера: {error}"),
         }
     }
 
-    results.sort_by(|a, b| b.1.total_cmp(&a.1));
+    rankings.sort_by(|a, b| b.1.total_cmp(&a.1));
     println!();
-    println!("Рейтинг по измеренной скорости:");
-    if results.is_empty() {
-        println!("  Не удалось получить ни одного корректного результата.");
+    println!("Сводный рейтинг (медиана результатов по четырём размерам):");
+    if rankings.is_empty() {
+        println!("  Не удалось получить корректные результаты.");
     } else {
-        for (rank, (tag, mbps)) in results.iter().enumerate() {
-            println!("  {}. {} — {:.2} Мбит/с", rank + 1, tag, mbps);
+        for (rank, (tag, speed)) in rankings.iter().enumerate() {
+            println!("  {}. {} — {:.2} Мбит/с", rank + 1, tag, speed);
         }
-        println!();
-        println!("Самое быстрое подключение: {} — {:.2} Мбит/с.", results[0].0, results[0].1);
     }
     Ok(())
 }
 
 #[derive(Debug)]
 struct Sample {
+    size: u64,
     bytes: u64,
-    seconds: f64,
+    transfer_seconds: f64,
+    total_seconds: f64,
+    first_byte_seconds: f64,
     http_code: u16,
     timed_out: bool,
+}
+
+fn median(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
+    }
 }
 
 fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {
@@ -91,9 +126,7 @@ fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<Str
                         continue;
                     }
                     let protocol = outbound.get("protocol").and_then(Value::as_str).unwrap_or("");
-                    if !matches!(protocol, "freedom" | "blackhole" | "dns" | "loopback")
-                        && tag != "api"
-                    {
+                    if !matches!(protocol, "freedom" | "blackhole" | "dns" | "loopback") && tag != "api" {
                         eligible = true;
                     }
                 }
@@ -106,14 +139,14 @@ fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<Str
     result
 }
 
-fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Sample> {
+fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Vec<Sample>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let directory = PathBuf::from("/opt/tmp").join(format!("xkeen-sub-speed-{}-{nonce}", std::process::id()));
     fs::create_dir_all("/opt/tmp")?;
     fs::create_dir(&directory)?;
     let log_path = PathBuf::from("/tmp").join(format!("xkeen-sub-speed-{}-{nonce}.log", std::process::id()));
 
-    let result = (|| -> AppResult<Sample> {
+    let result = (|| -> AppResult<Vec<Sample>> {
         let port = reserve_port()?;
         let mut helper_documents = documents.to_vec();
         add_probe_config(&mut helper_documents, tag, port)?;
@@ -139,15 +172,15 @@ fn measure_one(documents: &[(String, Value)], tag: &str) -> AppResult<Sample> {
             .map_err(|e| format!("Не удалось запустить вспомогательный Xray: {e}"))?;
 
         let ready = wait_for_port(port, &mut child, Duration::from_secs(15));
-        let sample = if ready {
-            download_through_probe(port)?
+        let samples = if ready {
+            download_series(port)?
         } else {
             Err("HTTP probe inbound не запустился за 15 секунд".into())
         };
 
         let _ = child.kill();
         let _ = child.wait();
-        sample
+        samples
     })();
 
     if let Err(error) = fs::remove_dir_all(&directory) {
@@ -186,31 +219,47 @@ fn add_probe_config(documents: &mut Vec<(String, Value)>, tag: &str, port: u16) 
     Ok(())
 }
 
-fn download_through_probe(port: u16) -> AppResult<Sample> {
-    let output = Command::new(CURL_BIN)
-        .args([
-            "--silent", "--show-error",
-            "--proxy", &format!("http://127.0.0.1:{port}"),
-            "--output", "/dev/null",
-            "--max-time", &MAX_TIME.to_string(),
-            "--write-out", "%{size_download}\n%{time_total}\n%{http_code}\n",
-            TEST_URL
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
+fn download_series(port: u16) -> AppResult<Vec<Sample>> {
+    let proxy = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(CURL_BIN);
+    command.args(["--silent", "--show-error", "--proxy", &proxy, "--max-time", &MAX_TIME.to_string()]);
+    // The warm-up and all measured requests run in one curl process. curl keeps
+    // its connection cache, allowing subsequent requests to reuse TCP/TLS.
+    command.args(["--output", "/dev/null", "--write-out", "WARMUP\n"]);
+    command.arg(format!("{TEST_HOST}{WARMUP_BYTES}"));
+
+    let mut expected = Vec::with_capacity(TEST_SIZES.len() * REPEATS);
+    for _ in 0..REPEATS {
+        for size in TEST_SIZES {
+            command.args([
+                "--output", "/dev/null",
+                "--write-out", "%{size_download}\t%{time_starttransfer}\t%{time_total}\t%{http_code}\n",
+            ]);
+            command.arg(format!("{TEST_HOST}{size}"));
+            expected.push(size);
+        }
+    }
+
+    let output = command.stdout(Stdio::piped()).stderr(Stdio::null()).output()
         .map_err(|e| format!("Не удалось запустить curl: {e}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     let mut lines = text.lines();
-    let bytes = lines.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
-    let seconds = lines.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let http_code = lines.next().unwrap_or("000").parse::<u16>().unwrap_or(0);
-    Ok(Sample {
-        bytes,
-        seconds,
-        http_code,
-        timed_out: !output.status.success() && bytes > 0 && http_code == 200,
-    })
+    let _warmup = lines.next();
+    let mut samples = Vec::with_capacity(expected.len());
+    for size in expected {
+        let line = lines.next().unwrap_or("");
+        let mut fields = line.split('\t');
+        let bytes = fields.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
+        let first_byte_seconds = fields.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+        let total_seconds = fields.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+        let http_code = fields.next().unwrap_or("000").parse::<u16>().unwrap_or(0);
+        let transfer_seconds = (total_seconds - first_byte_seconds).max(0.0);
+        let timed_out = !output.status.success() && bytes > 0 && http_code == 200;
+        samples.push(Sample {
+            size, bytes, transfer_seconds, total_seconds, first_byte_seconds, http_code, timed_out,
+        });
+    }
+    Ok(samples)
 }
 
 fn reserve_port() -> AppResult<u16> {

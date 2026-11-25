@@ -17,7 +17,6 @@ const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const MAX_WAIT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_DELAY_MS: u64 = 5000;
 
 #[derive(Debug, Clone, Default)]
 struct NodeStatus {
@@ -27,88 +26,6 @@ struct NodeStatus {
     last_try: u64,
     error: String,
 }
-
-/// Probes final subscription outbounds in groups of three using an isolated
-/// Xray process. No active Xray process or live config file is modified.
-pub(crate) fn test_outbounds(
-    documents: &[(String, Value)],
-    tags: &[String],
-) -> AppResult<()> {
-    if tags.is_empty() {
-        println!("В итоговой конфигурации нет подключений для проверки.");
-        return Ok(());
-    }
-    if !Path::new(ASSET_DIR).is_dir() {
-        return Err(format!("Каталог данных Xray не найден: {ASSET_DIR}").into());
-    }
-    if !Path::new(CONFIG_SOURCE).is_dir() {
-        return Err(format!("Каталог конфигурации Xray не найден: {CONFIG_SOURCE}").into());
-    }
-
-    println!();
-    println!("Проверка подключений группами по 3. Максимальный приемлемый пинг: {MAX_DELAY_MS} мс.");
-    println!("Для каждой группы будут показаны все результаты и лучший доступный узел.");
-
-    let mut offset = 0usize;
-    let mut selected: Option<(String, u64)> = None;
-    while offset < tags.len() {
-        let end = (offset + 3).min(tags.len());
-        let group = &tags[offset..end];
-        println!();
-        println!("Группа {}–{} из {}:", offset + 1, end, tags.len());
-        for tag in group {
-            println!("  • {tag}");
-        }
-
-        let statuses = probe_group(documents, group)?;
-        let group_minimum = group.iter()
-            .filter_map(|tag| statuses.get(tag))
-            .filter(|status| status.alive && status.last_try > 0)
-            .min_by_key(|status| status.delay_ms);
-
-        if let Some(best) = group_minimum {
-            println!("  Минимальный пинг в группе: {} — {} мс", best.tag, best.delay_ms);
-            if best.delay_ms <= MAX_DELAY_MS {
-                println!("  Подключение подходит по порогу.");
-                selected = Some((best.tag.clone(), best.delay_ms));
-            } else {
-                println!("  Пинг выше {MAX_DELAY_MS} мс. Проверяем следующую группу.");
-            }
-        } else {
-            println!("  В группе нет успешно проверенных подключений. Проверяем следующую группу.");
-        }
-
-        for tag in group {
-            let status = statuses.get(tag).cloned().unwrap_or_else(|| NodeStatus {
-                tag: tag.clone(),
-                ..NodeStatus::default()
-            });
-            let ping = if status.last_try == 0 {
-                "нет результата".to_owned()
-            } else if status.alive {
-                format!("{} мс{}", status.delay_ms, if status.delay_ms > MAX_DELAY_MS { " (выше порога)" } else { "" })
-            } else if !status.error.is_empty() {
-                format!("недоступен ({})", status.error)
-            } else {
-                "недоступен".to_owned()
-            };
-            println!("  {} — {}", status.tag, ping);
-        }
-
-        if selected.is_some() {
-            break;
-        }
-        offset = end;
-    }
-
-    println!();
-    match selected {
-        Some((tag, delay)) => println!("Выбран лучший узел первой подходящей группы: {tag} — {delay} мс."),
-        None => println!("Не найдено подключений с пингом не выше {MAX_DELAY_MS} мс."),
-    }
-    Ok(())
-}
-
 
 /// Selects up to two fastest successful outbounds, probing in blocks of five.
 /// Remaining outbounds are deliberately left for the caller to place in the rest balancer.

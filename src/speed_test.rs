@@ -16,7 +16,7 @@ const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
 const WARMUP_BYTES: u64 = 1_000_000;
 const TEST_SIZES: [u64; 4] = [2_000_000, 5_000_000, 10_000_000, 50_000_000];
 const REPEATS: usize = 3;
-const MAX_TIME: u64 = 8;
+const MAX_TIME: u64 = 60;
 
 /// Measures download throughput after warming up one reusable HTTP/TLS connection.
 /// Each candidate gets an isolated helper Xray; live Xray and configuration are untouched.

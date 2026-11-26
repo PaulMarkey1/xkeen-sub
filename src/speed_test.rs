@@ -171,7 +171,7 @@ pub(crate) fn test_outbounds_speed(
             round += 1;
         }
 
-        // Feed the reliability-adjusted score back to Advanced selection, not raw speed.
+        // Advanced balancing receives the reliability-adjusted score rather than raw throughput.
         let mut ranking: Vec<(String, f64, f64, f64, usize, usize, f64)> = measurements.iter().filter_map(|(tag, values)| {
             let med = median(values)?;
             let min = values.iter().copied().min_by(f64::total_cmp)?;

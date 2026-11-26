@@ -34,8 +34,8 @@ pub(crate) fn test_outbounds_speed(
     println!();
     println!("ЭТАП 1 — быстрый отсев: {} подключений, 512 КБ, группы до 5, тайм-аут 3 с.", candidates.len());
     println!("ЭТАП 2 — прогрев 10 лучших: 2 МБ / 5 с; затем один замер 10 МБ / 10 с.");
-    println!("ЭТАП 3 — повторные замеры 10 МБ / 10 с для трёх финалистов до превышения 60 секунд.");
-    println!("Итоговые места определяются по медиане успешных замеров этапа 3.");
+    println!("ЭТАП 3 — последовательные повторные замеры 10 МБ / 10 с с чередованием порядка; окно 60 секунд.");
+    println!("Рейтинг учитывает медианную скорость и долю успешных попыток.");
 
     let started = Instant::now();
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -107,35 +107,21 @@ pub(crate) fn test_outbounds_speed(
         let selected_tags: Vec<String> = selected_indices.iter().map(|&i| candidates[i].clone()).collect();
         let selected_ports: Vec<u16> = selected_indices.iter().map(|&i| ports[i]).collect();
 
-        // Stage 2a: warm-up. These measurements are deliberately not ranked.
+        // Stage 2: sequential checks avoid candidates competing for the same WAN link.
         println!();
-        println!("ЭТАП 2 — прогрев 2 МБ для {} подключений (тайм-аут 5 с).", selected_tags.len());
-        let warmup = run_parallel_batch(
-            &selected_tags,
-            &selected_ports,
-            2_000_000,
-            Duration::from_secs(5),
-        );
-        for (index, result) in warmup.iter().enumerate() {
-            println!("  {} — {}", selected_tags[index], if result.is_some() { "прогрев завершён" } else { "прогрев не пройден" });
-        }
-
-        // Stage 2b: one 10 MB measurement chooses the three finalists.
-        println!();
-        println!("ЭТАП 2 — основной замер 10 МБ для {} подключений (тайм-аут 10 с).", selected_tags.len());
-        let stage2 = run_parallel_batch(
-            &selected_tags,
-            &selected_ports,
-            10_000_000,
-            Duration::from_secs(10),
-        );
+        println!("ЭТАП 2 — последовательная проверка {} подключений: прогрев 2 МБ / 5 с, затем 10 МБ / 10 с.", selected_tags.len());
         let mut finalists: Vec<(usize, f64)> = Vec::new();
-        for (index, speed) in stage2.into_iter().enumerate() {
-            if let Some(speed) = speed {
-                println!("  {} — {:.2} Мбит/с", selected_tags[index], speed);
-                finalists.push((index, speed));
-            } else {
-                println!("  {} — нет результата", selected_tags[index]);
+        for index in 0..selected_tags.len() {
+            match measure_candidate(&selected_tags[index], selected_ports[index], 2_000_000, Duration::from_secs(5)) {
+                Measurement::Success { .. } => println!("  {} — прогрев завершён", selected_tags[index]),
+                Measurement::Failure(reason) => println!("  {} — прогрев не пройден: {}", selected_tags[index], reason),
+            }
+            match measure_candidate(&selected_tags[index], selected_ports[index], 10_000_000, Duration::from_secs(10)) {
+                Measurement::Success { speed_mbps, .. } => {
+                    println!("  {} — {:.2} Мбит/с", selected_tags[index], speed_mbps);
+                    finalists.push((index, speed_mbps));
+                }
+                Measurement::Failure(reason) => println!("  {} — нет результата: {}", selected_tags[index], reason),
             }
         }
         finalists.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -154,44 +140,52 @@ pub(crate) fn test_outbounds_speed(
             println!("  {}. {}", place + 1, tag);
         }
 
-        // Stage 3: repeat 10 MB rounds until a complete round ends at or beyond 60 s.
+        // Stage 3: sequential rounds, rotating the first candidate to reduce order bias.
+        // The 60-second window starts here, not during helper startup or earlier stages.
+        let stage3_started = Instant::now();
         let mut measurements: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+        let mut failures: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         let mut round = 1usize;
         loop {
             println!();
-            println!("ЭТАП 3 — повторный замер 10 МБ, раунд {round}.");
-            let results = run_parallel_batch(
-                &finalist_tags,
-                &finalist_ports,
-                10_000_000,
-                Duration::from_secs(10),
-            );
-            for (index, speed) in results.into_iter().enumerate() {
-                match speed {
-                    Some(speed) => {
-                        println!("  {} — {:.2} Мбит/с", finalist_tags[index], speed);
-                        measurements.entry(finalist_tags[index].clone()).or_default().push(speed);
+            println!("ЭТАП 3 — последовательный повторный замер 10 МБ, раунд {round}.");
+            let shift = (round - 1) % finalist_tags.len();
+            for offset in 0..finalist_tags.len() {
+                let index = (shift + offset) % finalist_tags.len();
+                let tag = &finalist_tags[index];
+                match measure_candidate(tag, finalist_ports[index], 10_000_000, Duration::from_secs(10)) {
+                    Measurement::Success { speed_mbps, .. } => {
+                        println!("  {} — {:.2} Мбит/с", tag, speed_mbps);
+                        measurements.entry(tag.clone()).or_default().push(speed_mbps);
                     }
-                    None => println!("  {} — нет результата", finalist_tags[index]),
+                    Measurement::Failure(reason) => {
+                        println!("  {} — ошибка: {}", tag, reason);
+                        *failures.entry(tag.clone()).or_default() += 1;
+                    }
                 }
             }
-            let elapsed = started.elapsed();
-            println!("Общее время проверки: {:.2} с.", elapsed.as_secs_f64());
-            if elapsed >= TOTAL_DEADLINE {
-                break;
-            }
+            let elapsed = stage3_started.elapsed();
+            println!("Время этапа 3: {:.2} с.", elapsed.as_secs_f64());
+            if elapsed >= TOTAL_DEADLINE { break; }
             round += 1;
         }
 
-        let mut ranking: Vec<(String, f64)> = measurements.iter()
-            .filter_map(|(tag, values)| median(values).map(|value| (tag.clone(), value)))
-            .collect();
-        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut ranking: Vec<(String, f64, f64, f64, usize, usize, f64)> = measurements.iter().filter_map(|(tag, values)| {
+            let med = median(values)?;
+            let min = values.iter().copied().min_by(f64::total_cmp)?;
+            let max = values.iter().copied().max_by(f64::total_cmp)?;
+            let failed = *failures.get(tag).unwrap_or(&0);
+            let attempts = values.len() + failed;
+            let reliability = values.len() as f64 / attempts.max(1) as f64;
+            Some((tag.clone(), med, min, max, values.len(), attempts, med * reliability))
+        }).collect();
+        ranking.sort_by(|a, b| b.6.total_cmp(&a.6).then_with(|| b.1.total_cmp(&a.1)));
 
         println!();
-        println!("ИТОГОВЫЙ РЕЙТИНГ — медиана успешных замеров 10 МБ:");
-        for (rank, (tag, value)) in ranking.iter().enumerate() {
-            println!("  {}. {} — {:.2} Мбит/с ({} замеров)", rank + 1, tag, value, measurements[tag].len());
+        println!("ИТОГОВЫЙ РЕЙТИНГ — медиана с поправкой на успешность:");
+        for (rank, (tag, med, min, max, success, attempts, score)) in ranking.iter().enumerate() {
+            println!("  {}. {} — медиана {:.2}, мин. {:.2}, макс. {:.2} Мбит/с; успешно {}/{}; итоговый балл {:.2}",
+                rank + 1, tag, med, min, max, success, attempts, score);
         }
         finish_child(&mut child);
         Ok(ranking)
@@ -223,39 +217,67 @@ fn finish_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[derive(Debug)]
+enum Measurement {
+    Success { speed_mbps: f64, elapsed: f64 },
+    Failure(String),
+}
+
 fn run_parallel_batch(tags: &[String], ports: &[u16], size: u64, timeout: Duration) -> Vec<Option<f64>> {
     thread::scope(|scope| {
         let handles: Vec<_> = tags.iter().zip(ports.iter()).map(|(tag, port)| {
-            scope.spawn(move || measure_candidate(tag, *port, size, timeout))
+            scope.spawn(move || match measure_candidate(tag, *port, size, timeout) {
+                Measurement::Success { speed_mbps, .. } => Some(speed_mbps),
+                Measurement::Failure(_) => None,
+            })
         }).collect();
         handles.into_iter().map(|handle| handle.join().ok().flatten()).collect()
     })
 }
 
-fn measure_candidate(_tag: &str, port: u16, size: u64, timeout: Duration) -> Option<f64> {
+fn measure_candidate(_tag: &str, port: u16, size: u64, timeout: Duration) -> Measurement {
     let proxy = format!("http://127.0.0.1:{port}");
-    let timeout = format!("{:.3}", timeout.as_secs_f64());
-    let output = Command::new(CURL_BIN)
+    let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
+    let output = match Command::new(CURL_BIN)
         .args([
-            "--silent", "--show-error", "--proxy", &proxy, "--max-time", &timeout,
+            "--silent", "--show-error", "--proxy", &proxy, "--max-time", &timeout_arg,
             "--output", "/dev/null", "--write-out",
             "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}\\t%{exitcode}",
         ])
         .arg(format!("{TEST_HOST}{size}"))
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output().ok()?;
+        .stderr(Stdio::piped())
+        .output() {
+            Ok(output) => output,
+            Err(error) => return Measurement::Failure(format!("не удалось запустить curl: {error}")),
+        };
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     let fields: Vec<&str> = stdout.split('\t').map(str::trim).collect();
-    if fields.len() != 5 { return None; }
-    let bytes = fields[0].parse::<u64>().ok()?;
-    let first_byte = fields[1].parse::<f64>().ok()?;
-    let total = fields[2].parse::<f64>().ok()?;
-    let http_code = fields[3].parse::<u16>().ok()?;
-    let curl_exit = fields[4].parse::<i32>().ok()?;
+    if fields.len() != 5 {
+        return Measurement::Failure(if stderr.is_empty() { "curl не вернул статистику".into() } else { stderr });
+    }
+    let bytes = match fields[0].parse::<u64>() { Ok(v) => v, Err(_) => return Measurement::Failure("не удалось разобрать объём загрузки".into()) };
+    let first_byte = match fields[1].parse::<f64>() { Ok(v) => v, Err(_) => return Measurement::Failure("не удалось разобрать время первого байта".into()) };
+    let total = match fields[2].parse::<f64>() { Ok(v) => v, Err(_) => return Measurement::Failure("не удалось разобрать время загрузки".into()) };
+    let http_code = fields[3].parse::<u16>().unwrap_or(0);
+    let curl_exit = fields[4].parse::<i32>().unwrap_or(-1);
+    if curl_exit != 0 {
+        let reason = match curl_exit {
+            5 | 6 => "ошибка DNS/прокси",
+            7 => "не удалось подключиться к прокси или серверу",
+            28 => "превышен тайм-аут",
+            35 | 60 => "ошибка TLS/сертификата",
+            52 | 56 => "соединение закрыто или потеряно",
+            _ => "ошибка curl",
+        };
+        return Measurement::Failure(format!("{reason} (curl {curl_exit}, получено {bytes}/{size} байт)"));
+    }
+    if http_code != 200 { return Measurement::Failure(format!("HTTP {http_code}")); }
+    if bytes != size { return Measurement::Failure(format!("неполная загрузка: {bytes}/{size} байт")); }
     let transfer = total - first_byte;
-    if bytes != size || http_code != 200 || curl_exit != 0 || transfer <= 0.0 { return None; }
-    Some(bytes as f64 * 8.0 / transfer / 1_000_000.0)
+    if transfer <= 0.0 { return Measurement::Failure("некорректное время передачи данных".into()); }
+    Measurement::Success { speed_mbps: bytes as f64 * 8.0 / transfer / 1_000_000.0, elapsed: total }
 }
 
 fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {

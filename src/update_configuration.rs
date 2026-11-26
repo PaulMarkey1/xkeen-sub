@@ -211,44 +211,37 @@ fn prepare_configuration(
                 let probe_documents: Vec<(String, Value)> = docs.iter()
                     .map(|doc| (doc.file_name.clone(), doc.value.clone()))
                     .collect();
-                match crate::xray_probe::select_advanced_outbounds(&probe_documents, &tags) {
+                match crate::speed_test::test_outbounds_speed(&probe_documents, &tags) {
                     Ok(selected) if !selected.is_empty() => {
-                        let main_tag = selected[0].0.clone();
-                        let main = vec![main_tag.clone()];
+                        let main = vec![selected[0].0.clone()];
                         let reserve = selected.get(1)
                             .map(|(tag, _)| vec![tag.clone()])
                             .unwrap_or_else(|| freedom_tags.clone());
-                        let rest: Vec<String> = if tags.len() <= 2 {
-                            freedom_tags.clone()
-                        } else {
-                            tags.iter()
-                                .filter(|tag| *tag != &main_tag
-                                    && selected.get(1).map(|(reserve_tag, _)| reserve_tag != *tag).unwrap_or(true))
-                                .cloned()
-                                .collect()
-                        };
+                        let last = selected.get(2)
+                            .map(|(tag, _)| vec![tag.clone()])
+                            .unwrap_or_else(|| freedom_tags.clone());
                         crate::balancer::apply_advanced_selectors(
                             &mut docs[routing_index].value,
                             &main,
                             &reserve,
-                            &rest,
+                            &last,
                         )?;
-                        observatory_tags = main;
+                        observatory_tags = selected.iter().map(|(tag, _)| tag.clone()).collect();
                         advanced_selectors_applied = true;
                         backup.event("BALANCER", &format!(
-                            "Advanced: основное подключение {}; резервное {}; подключений в rest: {}.",
-                            selected[0].0,
-                            selected.get(1).map(|item| item.0.as_str()).unwrap_or("freedom"),
-                            rest.len()
+                            "Advanced: main={}, reserve={}, last={}.",
+                            main[0],
+                            reserve.first().map(String::as_str).unwrap_or("freedom"),
+                            last.first().map(String::as_str).unwrap_or("freedom")
                         ))?;
                     }
                     Ok(_) => {
-                        warning("Не найдено ни одного рабочего подключения. Текущие селекторы трёх балансировщиков и Observatory оставлены без изменений.");
-                        backup.event("BALANCER", "Проверка Advanced не нашла рабочих подключений; прежние три балансировщика и Observatory сохранены.")?;
+                        warning("Не удалось определить ни одного рабочего подключения. Текущие селекторы Advanced и Observatory оставлены без изменений.");
+                        backup.event("BALANCER", "Проверка пропускной способности не нашла рабочих подключений; прежние селекторы сохранены.")?;
                     }
                     Err(error) => {
-                        warning(&format!("Не удалось получить результаты Observatory. Текущие селекторы Advanced оставлены без изменений: {error}"));
-                        backup.event("BALANCER", &format!("Проверка Advanced не завершилась; прежние селекторы сохранены: {error}"))?;
+                        warning(&format!("Проверка пропускной способности не завершилась. Текущие селекторы Advanced оставлены без изменений: {error}"));
+                        backup.event("BALANCER", &format!("Проверка пропускной способности не завершилась; прежние селекторы сохранены: {error}"))?;
                     }
                 }
             }

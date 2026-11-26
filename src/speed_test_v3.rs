@@ -94,7 +94,6 @@ fn run(variant: Variant) -> AppResult<()> {
 
     let total_started = Instant::now();
     let hard_budget = match variant { Variant::Original => Duration::from_secs(65), Variant::Coach => Duration::from_secs(65) };
-    let deadline = Instant::now() + hard_budget;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     fs::create_dir_all(LOG_DIR)?;
     let dir = PathBuf::from(LOG_DIR).join(format!("xkeen-sub-v3-{}-{nonce}", std::process::id()));
@@ -120,10 +119,12 @@ fn run(variant: Variant) -> AppResult<()> {
             finish_child(&mut child);
             return Err("Вспомогательный Xray не запустился за 15 секунд.".into());
         }
+        // The algorithm budget starts after helper startup; wall-clock startup is reported separately.
+        let deadline = Instant::now() + hard_budget;
 
-        let (warmup, stage1, top_stage1, stage2, top_stage2, rounds, stage3, retry_429) = match variant {
-            Variant::Original => (Duration::from_millis(500), Duration::from_millis(1500), 6usize, Duration::from_millis(2500), 6usize, 3usize, Duration::from_millis(2500), true),
-            Variant::Coach => (Duration::from_millis(500), Duration::from_secs(2), 10usize, Duration::from_millis(1500), 10usize, 3usize, Duration::from_millis(2500), false),
+        let (warmup, stage1, top_stage1, stage2, rounds, stage3, retry_429) = match variant {
+            Variant::Original => (Duration::from_millis(500), Duration::from_millis(1500), 6usize, Duration::from_millis(2500), 3usize, Duration::from_millis(2500), true),
+            Variant::Coach => (Duration::from_millis(500), Duration::from_secs(2), 10usize, Duration::from_millis(1500), 3usize, Duration::from_millis(2500), false),
         };
         println!("Подключений: {}. Бюджет: {} с. Тестовый источник: Cloudflare speed.cloudflare.com.", candidates.len(), hard_budget.as_secs());
         println!("Этап 1: все подключения, конкурентность 6, прогрев 0,5 с + замер {} с.", stage1.as_secs_f64());
@@ -222,7 +223,7 @@ fn run(variant: Variant) -> AppResult<()> {
         if ranking.is_empty() { println!("Недостаточно данных для рейтинга."); }
         for (n, (tag, score, spread, k, errors)) in ranking.iter().enumerate() {
             println!("  {}. {} — {} {:.2} Мбит/с; MAD {:.2}; успешных {}; ошибок узла {}",
-                n+1, tag, if variant == Variant::Original { "медиана" } else { "нижняя оценка" }, score, spread, k, errors);
+                n+1, tag, "медиана", score, spread, k, errors);
         }
         println!("Примечание: доля ошибок узла и серверные отказы разделены; 429/5xx не ухудшают рейтинг узла.");
         finish_child(&mut child);

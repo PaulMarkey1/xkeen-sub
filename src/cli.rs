@@ -33,7 +33,8 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "list" => setup::list::run(),
         [root, action] if root == "setup" && action == "del" => setup::del::run().map(|_| ()),
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
-        [action] if action == "speed-monitor" => speed_monitor::run_menu(),
+        [action] if action == "speed-monitor" => test::run(),
+        [action] if action == "speed-monitor-menu" => speed_monitor::run_menu(),
         [action] if action == "test" => test::run(),
         [action] if action == "update" => update::run(None),
         [action, target] if action == "update" => update::run(Some(target)),
@@ -73,7 +74,8 @@ fn print_help() -> AppResult<()> {
     command_item("  clear", "Удалить все точки восстановления после подтверждения");
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
     command_item("test", "Проверить подключения без изменения рабочих файлов");
-    command_item("speed-monitor", "Настроить почасовые проверки скорости и просмотреть журнал");
+    command_item("speed-monitor", "Запустить поэтапную проверку скорости подключений");
+    command_item("speed-monitor-menu", "Настроить почасовые проверки и просмотреть журнал");
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");
     command_item("auto-update", "Настроить автоматическое обновление подписок");

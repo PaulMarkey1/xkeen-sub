@@ -2,9 +2,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,7 +21,7 @@ const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
 const LOCK: &str = "/opt/var/run/xkeen-sub-update.lock";
 const LOG_DIR: &str = "/opt/tmp";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Variant { Original, Coach }
 
 #[derive(Clone, Debug)]
@@ -122,7 +121,7 @@ fn run(variant: Variant) -> AppResult<()> {
 
         let (warmup, stage1, top_stage1, stage2, top_stage2, rounds, stage3, retry_429) = match variant {
             Variant::Original => (Duration::from_millis(500), Duration::from_millis(1500), 6usize, Duration::from_millis(2500), 6usize, 3usize, Duration::from_millis(2500), true),
-            Variant::Coach => (Duration::from_millis(500), Duration::from_secs(2), 10usize, Duration::from_millis(2500), 10usize, 3usize, Duration::from_millis(2500), false),
+            Variant::Coach => (Duration::from_millis(500), Duration::from_secs(2), 10usize, Duration::from_millis(1500), 10usize, 3usize, Duration::from_millis(2500), false),
         };
         println!("Подключений: {}. Бюджет: {} с. Тестовый источник: Cloudflare speed.cloudflare.com.", candidates.len(), hard_budget.as_secs());
         println!("Этап 1: все подключения, конкурентность 6, прогрев 0,5 с + замер {} с.", stage1.as_secs_f64());
@@ -181,7 +180,7 @@ fn run(variant: Variant) -> AppResult<()> {
                 if Instant::now() >= deadline { break; }
                 let pos = (shift + offset) % finalists.len();
                 let idx = finalists[pos];
-                let s = measure_with_policy(&candidates[idx], ports[idx], "stage3", Duration::ZERO, stage3, &gate, deadline, retry_429);
+                let s = measure_with_policy(&candidates[idx], ports[idx], "stage3", Duration::from_millis(500), stage3, &gate, deadline, retry_429);
                 if let Some(v) = s.mbps {
                     println!("  {} — {:.2} Мбит/с", s.tag, v);
                     stage3_values.entry(s.tag.clone()).or_default().push(v);
@@ -191,15 +190,14 @@ fn run(variant: Variant) -> AppResult<()> {
         }
 
         // A separate 4-second control measurement of the provisional winner.
-        let provisional = match variant {
-            Variant::Original => stage3_values.iter().max_by(|a,b| median(&a.1).total_cmp(&median(&b.1))).map(|(t,_)| t.clone()),
-            Variant::Coach => stage3_values.iter().max_by(|a,b| lower_score(&a.1).total_cmp(&lower_score(&b.1))).map(|(t,_)| t.clone()),
-        };
+        let provisional = stage3_values.iter().filter(|(_, v)| variant == Variant::Original || v.len() >= 3)
+            .max_by(|a,b| median(&a.1).total_cmp(&median(&b.1)).then_with(|| mad(&b.1, median(&b.1).unwrap_or(0.0)).total_cmp(&mad(&a.1, median(&a.1).unwrap_or(0.0)))))
+            .map(|(t,_)| t.clone());
         if let Some(tag) = provisional {
             if let Some(idx) = candidates.iter().position(|x| x == &tag) {
                 if Instant::now() < deadline {
                     println!("\nКОНТРОЛЬНЫЙ ЗАМЕР ПОБЕДИТЕЛЯ — {tag}, 4 с.");
-                    let s = measure_with_policy(&tag, ports[idx], "control", Duration::ZERO, Duration::from_secs(4), &gate, deadline, retry_429);
+                    let s = measure_with_policy(&tag, ports[idx], "control", Duration::from_millis(500), Duration::from_secs(4), &gate, deadline, retry_429);
                     if let Some(v) = s.mbps { println!("  Контрольная скорость: {:.2} Мбит/с", v); }
                     else { println!("  Контрольный замер: {}", s.status); }
                     journal.push(s);
@@ -214,11 +212,11 @@ fn run(variant: Variant) -> AppResult<()> {
             let mad = mad(vals, med);
             let node_errors = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status.starts_with("node_")).count();
             let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status != "server_limit" && s.status != "server_error").count();
-            let reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
-            let score = if variant == Variant::Original { med } else { lower_score(vals) };
+            let _reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
+            let score = med;
             Some((tag.clone(), score, mad, vals.len(), node_errors))
         }).collect();
-        ranking.sort_by(|a,b| b.1.total_cmp(&a.1));
+        ranking.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(|| a.2.total_cmp(&b.2)));
         if ranking.is_empty() { println!("Недостаточно данных для рейтинга."); }
         for (n, (tag, score, spread, k, errors)) in ranking.iter().enumerate() {
             println!("  {}. {} — {} {:.2} Мбит/с; MAD {:.2}; успешных {}; ошибок узла {}",
@@ -253,7 +251,6 @@ fn measure_with_policy(tag: &str, port: u16, stage: &'static str, warmup: Durati
         let delay = s.retry_after.unwrap_or_else(|| Duration::from_millis(500u64.saturating_mul(2u64.pow(attempt))));
         gate.throttle(delay);
         if Instant::now() + delay >= deadline { return s; }
-        thread::sleep(delay);
         attempt += 1;
     }
 }
@@ -263,7 +260,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let id = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let headers = format!("/tmp/xkeen-sub-v3-{}-{id}.headers", std::process::id());
     let warm_secs = warmup.as_secs_f64().max(0.01);
-    let measure_secs = sample.as_secs_f64().max(0.01) + 1.0;
+    let measure_secs = sample.as_secs_f64().max(0.01) + 0.5;
     let warm_timeout = format!("{warm_secs:.3}");
     let measure_timeout = format!("{measure_secs:.3}");
     let warm_write = "W|%{size_download}|%{time_starttransfer}|%{time_total}|%{http_code}|%{exitcode}\\n";
@@ -331,10 +328,6 @@ fn mad(v: &[f64], med: f64) -> f64 {
     let mut d: Vec<f64> = v.iter().map(|x| (x-med).abs()).collect(); d.sort_by(f64::total_cmp);
     median(&d).unwrap_or(0.0)
 }
-fn lower_score(v: &[f64]) -> f64 {
-    let Some(m) = median(v) else { return 0.0; };
-    let spread = mad(v,m);
-    m - 1.5 * spread / (v.len() as f64).sqrt()
-}
+
 fn csv_field(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }
 

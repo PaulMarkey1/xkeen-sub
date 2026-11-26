@@ -191,7 +191,7 @@ fn run(variant: Variant) -> AppResult<()> {
                 if let Some(v) = s.mbps {
                     println!("  {} — {:.2} Мбит/с", s.tag, v);
                     stage3_values.entry(s.tag.clone()).or_default().push(v);
-                } else { println!("  {} — {}", s.tag, s.status); }
+                } else { print_sample_failure(&s); }
                 journal.push(s);
             }
         }
@@ -206,7 +206,7 @@ fn run(variant: Variant) -> AppResult<()> {
                     println!("\nКОНТРОЛЬНЫЙ ЗАМЕР ПОБЕДИТЕЛЯ — {tag}, 4 с.");
                     let s = measure_with_policy(&tag, ports[idx], "control", Duration::from_millis(500), Duration::from_secs(4), &gate, deadline, retry_429);
                     if let Some(v) = s.mbps { println!("  Контрольная скорость: {:.2} Мбит/с", v); }
-                    else { println!("  Контрольный замер: {}", s.status); }
+                    else { print_sample_failure(&s); }
                     journal.push(s);
                 }
             }
@@ -218,7 +218,7 @@ fn run(variant: Variant) -> AppResult<()> {
             let med = median(vals)?;
             let mad = mad(vals, med);
             let node_errors = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status.starts_with("node_")).count();
-            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status != "server_limit" && s.status != "server_error" && s.status != "deadline").count();
+            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && (s.status == "ok" || s.status.starts_with("node_"))).count();
             let reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
             let score = ranking_score(vals, variant);
             Some((tag.clone(), score, mad, vals.len(), node_errors, reliability))

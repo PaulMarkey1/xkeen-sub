@@ -85,13 +85,14 @@ pub(crate) fn test_outbounds_speed(
                 512_000,
                 Duration::from_secs(3),
             );
-            for (local_index, speed) in results.into_iter().enumerate() {
+            for (local_index, measurement) in results.into_iter().enumerate() {
                 let index = offset + local_index;
-                if let Some(speed) = speed {
-                    println!("  {} — {:.2} Мбит/с", candidates[index], speed);
-                    first_stage.push((index, speed));
-                } else {
-                    println!("  {} — нет результата", candidates[index]);
+                match measurement {
+                    Measurement::Success { speed_mbps } => {
+                        println!("  {} — {:.2} Мбит/с", candidates[index], speed_mbps);
+                        first_stage.push((index, speed_mbps));
+                    }
+                    Measurement::Failure(reason) => println!("  {} — нет результата: {}", candidates[index], reason),
                 }
             }
         }
@@ -223,15 +224,14 @@ enum Measurement {
     Failure(String),
 }
 
-fn run_parallel_batch(tags: &[String], ports: &[u16], size: u64, timeout: Duration) -> Vec<Option<f64>> {
+fn run_parallel_batch(tags: &[String], ports: &[u16], size: u64, timeout: Duration) -> Vec<Measurement> {
     thread::scope(|scope| {
         let handles: Vec<_> = tags.iter().zip(ports.iter()).map(|(tag, port)| {
-            scope.spawn(move || match measure_candidate(tag, *port, size, timeout) {
-                Measurement::Success { speed_mbps, .. } => Some(speed_mbps),
-                Measurement::Failure(_) => None,
-            })
+            scope.spawn(move || measure_candidate(tag, *port, size, timeout))
         }).collect();
-        handles.into_iter().map(|handle| handle.join().ok().flatten()).collect()
+        handles.into_iter().map(|handle| {
+            handle.join().unwrap_or_else(|_| Measurement::Failure("поток проверки завершился аварийно".into()))
+        }).collect()
     })
 }
 

@@ -219,7 +219,7 @@ fn finish_child(child: &mut Child) {
 
 #[derive(Debug)]
 enum Measurement {
-    Success { speed_mbps: f64, elapsed: f64 },
+    Success { speed_mbps: f64 },
     Failure(String),
 }
 
@@ -277,7 +277,7 @@ fn measure_candidate(_tag: &str, port: u16, size: u64, timeout: Duration) -> Mea
     if bytes != size { return Measurement::Failure(format!("неполная загрузка: {bytes}/{size} байт")); }
     let transfer = total - first_byte;
     if transfer <= 0.0 { return Measurement::Failure("некорректное время передачи данных".into()); }
-    Measurement::Success { speed_mbps: bytes as f64 * 8.0 / transfer / 1_000_000.0, elapsed: total }
+    Measurement::Success { speed_mbps: bytes as f64 * 8.0 / transfer / 1_000_000.0 }
 }
 
 fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {

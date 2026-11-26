@@ -183,7 +183,7 @@ fn prepare_configuration(
     if advanced_mode {
         // Keep the three existing selectors intact until the helper Xray has
         // returned enough information to choose the new main/reserve nodes.
-        docs[routing_index].value = original_routing;
+        docs[routing_index].value = original_routing.clone();
         let initial_validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
         if initial_validation.is_ok() {
             let freedom_tags: Vec<String> = final_outbounds.iter()

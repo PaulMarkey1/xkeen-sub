@@ -13,8 +13,6 @@ const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
-const STAGE_SIZES: [u64; 3] = [512_000, 2_000_000, 10_000_000];
-const STAGE_TIMEOUTS: [u64; 3] = [3, 8, 12];
 const FIRST_STAGE_BATCH: usize = 5;
 const SECOND_STAGE_TOP: usize = 6;
 const FINAL_STAGE_TOP: usize = 3;
@@ -159,7 +157,6 @@ pub(crate) fn test_outbounds_speed(
         }
 
         // Stage 3: repeat 10 MB rounds until a complete round ends at or beyond 60 s.
-        let final_stage_started = Instant::now();
         let mut measurements: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
         let mut round = 1usize;
         loop {
@@ -180,8 +177,8 @@ pub(crate) fn test_outbounds_speed(
                     None => println!("  {} — нет результата", finalist_tags[index]),
                 }
             }
-            let elapsed = final_stage_started.elapsed();
-            println!("Время этапа 3: {:.2} с.", elapsed.as_secs_f64());
+            let elapsed = started.elapsed();
+            println!("Общее время проверки: {:.2} с.", elapsed.as_secs_f64());
             if elapsed >= TOTAL_DEADLINE {
                 break;
             }

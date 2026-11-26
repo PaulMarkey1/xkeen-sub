@@ -79,7 +79,7 @@ pub(crate) fn select_advanced_outbounds(
             .unwrap_or_else(|| PathBuf::from(XRAY_DEFAULT));
         let log = fs::File::create(&log_path)?;
         let stderr = log.try_clone()?;
-        let mut child = Command::new(&xray_bin)
+        let child = Command::new(&xray_bin)
             .arg("run")
             .env("XRAY_LOCATION_CONFDIR", &directory)
             .env("XRAY_LOCATION_ASSET", ASSET_DIR)
@@ -87,6 +87,7 @@ pub(crate) fn select_advanced_outbounds(
             .stderr(Stdio::from(stderr))
             .spawn()
             .map_err(|error| format!("Не удалось запустить вспомогательный Xray: {error}"))?;
+        let mut child = HelperProcess(child);
 
         if !wait_for_ports(&ports, &mut child, HELPER_START_LIMIT.min(remaining(deadline))) {
             finish_child(&mut child);
@@ -428,10 +429,10 @@ fn reserve_port() -> AppResult<u16> {
     Ok(port)
 }
 
-fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
+fn wait_for_ports(ports: &[u16], child: &mut HelperProcess, timeout: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if child.try_wait().ok().flatten().is_some() { return false; }
+        if child.0.try_wait().ok().flatten().is_some() { return false; }
         if ports.iter().all(|port| TcpStream::connect(("127.0.0.1", *port)).is_ok()) {
             return true;
         }
@@ -440,9 +441,18 @@ fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
     false
 }
 
-fn finish_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn finish_child(child: &mut HelperProcess) {
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+}
+
+struct HelperProcess(Child);
+
+impl Drop for HelperProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn safe_config_name(name: &str) -> bool {

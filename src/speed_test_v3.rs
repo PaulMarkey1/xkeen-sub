@@ -122,9 +122,9 @@ fn run(variant: Variant) -> AppResult<()> {
         // The algorithm budget starts after helper startup; wall-clock startup is reported separately.
         let deadline = Instant::now() + hard_budget;
 
-        let (warmup, stage1, top_stage1, stage2, rounds, stage3, retry_429) = match variant {
-            Variant::Original => (Duration::from_millis(500), Duration::from_millis(1500), 6usize, Duration::from_millis(2500), 3usize, Duration::from_millis(2500), true),
-            Variant::Coach => (Duration::from_millis(500), Duration::from_secs(2), 10usize, Duration::from_millis(1500), 3usize, Duration::from_millis(2500), false),
+        let (warmup, stage1, top_stage1, stage2_warmup, stage2, rounds, stage3, retry_429) = match variant {
+            Variant::Original => (Duration::from_millis(500), Duration::from_millis(1500), 6usize, Duration::from_secs(1), Duration::from_millis(2500), 3usize, Duration::from_millis(2500), true),
+            Variant::Coach => (Duration::from_millis(500), Duration::from_secs(2), 10usize, Duration::from_millis(500), Duration::from_millis(1500), 3usize, Duration::from_millis(2500), false),
         };
         println!("Подключений: {}. Бюджет: {} с. Тестовый источник: Cloudflare speed.cloudflare.com.", candidates.len(), hard_budget.as_secs());
         println!("Этап 1: все подключения, конкурентность 6, прогрев 0,5 с + замер {} с.", stage1.as_secs_f64());
@@ -163,7 +163,7 @@ fn run(variant: Variant) -> AppResult<()> {
         let mut second: Vec<(usize, f64)> = Vec::new();
         for (idx, _) in &first {
             if Instant::now() >= deadline { break; }
-            let s = measure_with_policy(&candidates[*idx], ports[*idx], "stage2", warmup, stage2, &gate, deadline, retry_429);
+            let s = measure_with_policy(&candidates[*idx], ports[*idx], "stage2", stage2_warmup, stage2, &gate, deadline, retry_429);
             if let Some(v) = s.mbps { println!("  {} — {:.2} Мбит/с", s.tag, v); second.push((*idx, v)); }
             else { println!("  {} — {}", s.tag, s.status); }
             journal.push(s);
@@ -193,8 +193,8 @@ fn run(variant: Variant) -> AppResult<()> {
         }
 
         // A separate 4-second control measurement of the provisional winner.
-        let provisional = stage3_values.iter().filter(|(_, v)| variant == Variant::Original || v.len() >= 3)
-            .max_by(|a,b| median(&a.1).total_cmp(&median(&b.1)).then_with(|| mad(&b.1, median(&b.1).unwrap_or(0.0)).total_cmp(&mad(&a.1, median(&a.1).unwrap_or(0.0)))))
+        let provisional = stage3_values.iter().filter(|(_, v)| v.len() >= 3)
+            .max_by(|a,b| ranking_score(&a.1, variant).total_cmp(&ranking_score(&b.1, variant)).then_with(|| mad(&b.1, median(&b.1).unwrap_or(0.0)).total_cmp(&mad(&a.1, median(&a.1).unwrap_or(0.0)))))
             .map(|(t,_)| t.clone());
         if let Some(tag) = provisional {
             if let Some(idx) = candidates.iter().position(|x| x == &tag) {
@@ -210,20 +210,20 @@ fn run(variant: Variant) -> AppResult<()> {
 
         println!("\nИТОГОВЫЙ РЕЙТИНГ");
         let mut ranking: Vec<(String, f64, f64, usize, usize)> = stage3_values.iter().filter_map(|(tag, vals)| {
-            if variant == Variant::Coach && vals.len() < 3 { return None; }
+            if vals.len() < 3 { return None; }
             let med = median(vals)?;
             let mad = mad(vals, med);
             let node_errors = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status.starts_with("node_")).count();
-            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status != "server_limit" && s.status != "server_error").count();
-            let _reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
-            let score = med;
-            Some((tag.clone(), score, mad, vals.len(), node_errors))
+            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status != "server_limit" && s.status != "server_error" && s.status != "deadline").count();
+            let reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
+            let score = ranking_score(vals, variant);
+            Some((tag.clone(), score, mad, vals.len(), node_errors, reliability))
         }).collect();
         ranking.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(|| a.2.total_cmp(&b.2)));
         if ranking.is_empty() { println!("Недостаточно данных для рейтинга."); }
-        for (n, (tag, score, spread, k, errors)) in ranking.iter().enumerate() {
-            println!("  {}. {} — {} {:.2} Мбит/с; MAD {:.2}; успешных {}; ошибок узла {}",
-                n+1, tag, "медиана", score, spread, k, errors);
+        for (n, (tag, score, spread, k, errors, reliability)) in ranking.iter().enumerate() {
+            println!("  {}. {} — оценка {:.2} Мбит/с; MAD {:.2}; успешных {}; ошибок узла {}; надёжность {:.0}%",
+                n+1, tag, score, spread, k, errors, reliability * 100.0);
         }
         println!("Примечание: доля ошибок узла и серверные отказы разделены; 429/5xx не ухудшают рейтинг узла.");
         finish_child(&mut child);
@@ -373,6 +373,10 @@ fn parse_retry_after(headers: &str) -> Option<Duration> {
 fn failed_sample(tag: &str) -> Sample { failed_sample_for(tag, "stage1", "thread_panic") }
 fn failed_sample_for(tag: &str, stage: &'static str, status: &str) -> Sample {
     Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None }
+}
+fn ranking_score(v: &[f64], variant: Variant) -> f64 {
+    let med = median(v).unwrap_or(0.0);
+    if variant == Variant::Original { med - 1.5 * mad(v, med) / (v.len() as f64).sqrt() } else { med }
 }
 fn median(v: &[f64]) -> Option<f64> {
     if v.is_empty() { return None; }

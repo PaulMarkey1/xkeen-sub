@@ -218,9 +218,18 @@ fn run_inner(
         ));
     }
 
+    // Advanced mode performs node selection independently of subscription
+    // changes, so it must pass through configuration preparation even when
+    // every downloaded subscription is byte-for-byte unchanged.
+    let advanced_mode = crate::update_config::load_config_documents()?
+        .iter()
+        .filter(|doc| doc.value.get("routing").is_some())
+        .any(|doc| crate::balancer::detect_balancing_mode(&doc.value)
+            == crate::balancer::BalancingMode::Advanced);
+
     let result = if removed_blacklist_entries > 0 {
         update_configuration_with_blacklist(&store.subscriptions, &state, backup, &blacklist)
-    } else if state.prepared.is_empty() {
+    } else if state.prepared.is_empty() && !advanced_mode {
         apply_baseline_only(&state, backup)
     } else {
         update_configuration(&store.subscriptions, &state, backup)

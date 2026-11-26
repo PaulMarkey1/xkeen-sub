@@ -245,7 +245,8 @@ fn run(variant: Variant) -> AppResult<()> {
             s.retry_after.map(|d| d.as_secs_f64().to_string()).unwrap_or_default()));
     }
     fs::write(&log_path, csv)?;
-    if result.is_ok() {
+    let has_successful_measurement = journal.iter().any(|sample| sample.mbps.is_some());
+    if result.is_ok() && has_successful_measurement {
         if let Err(e) = fs::remove_dir_all(&dir) { eprintln!("Не удалось удалить временный каталог: {e}"); }
     } else {
         eprintln!("Диагностика сохранена: {}", dir.display());

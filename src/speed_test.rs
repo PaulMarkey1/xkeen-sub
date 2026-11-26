@@ -189,7 +189,7 @@ pub(crate) fn test_outbounds_speed(
                 rank + 1, tag, med, min, max, success, attempts, score);
         }
         finish_child(&mut child);
-        Ok(ranking)
+        Ok(ranking.into_iter().map(|(tag, _median, _min, _max, _success, _attempts, score)| (tag, score)).collect())
     })();
 
     if let Err(error) = fs::remove_dir_all(&directory) {

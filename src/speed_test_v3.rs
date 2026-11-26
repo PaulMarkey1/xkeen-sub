@@ -215,7 +215,7 @@ fn run(variant: Variant) -> AppResult<()> {
             let med = median(vals)?;
             let mad = mad(vals, med);
             let node_errors = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status.starts_with("node_")).count();
-            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status != "server_limit" && s.status != "server_error" && s.status != "deadline").count();
+            let attempts = vals.len() + node_errors;
             let reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
             let score = ranking_score(vals, variant);
             Some((tag.clone(), score, mad, vals.len(), node_errors, reliability))

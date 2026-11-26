@@ -1,6 +1,8 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::Read;
+use std::sync::mpsc;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -245,7 +247,7 @@ fn measure_with_policy(tag: &str, port: u16, stage: &'static str, warmup: Durati
     let mut attempt = 0u32;
     loop {
         if !gate.acquire(deadline) { return failed_sample_for(tag, stage, "deadline"); }
-        let mut s = measure_once(tag, port, stage, warmup, sample);
+        let mut s = measure_once(tag, port, stage, warmup, sample, deadline);
         if s.status != "server_limit" { return s; }
         if !retry_429 || attempt >= 1 { gate.throttle(Duration::from_secs(2)); return s; }
         let delay = s.retry_after.unwrap_or_else(|| Duration::from_millis(500u64.saturating_mul(2u64.pow(attempt))));
@@ -255,55 +257,107 @@ fn measure_with_policy(tag: &str, port: u16, stage: &'static str, warmup: Durati
     }
 }
 
-fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sample: Duration) -> Sample {
+fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sample: Duration, deadline: Instant) -> Sample {
     let proxy = format!("http://127.0.0.1:{port}");
     let id = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let headers = format!("/tmp/xkeen-sub-v3-{}-{id}.headers", std::process::id());
-    let warm_secs = warmup.as_secs_f64().max(0.01);
-    let measure_secs = sample.as_secs_f64().max(0.01) + 0.5;
-    let warm_timeout = format!("{warm_secs:.3}");
-    let measure_timeout = format!("{measure_secs:.3}");
-    let warm_write = "W|%{size_download}|%{time_starttransfer}|%{time_total}|%{http_code}|%{exitcode}\\n";
-    let measure_write = "M|%{size_download}|%{time_starttransfer}|%{time_total}|%{http_code}|%{exitcode}\\n";
-    let output = Command::new(CURL_BIN)
-        .args(["--silent","--show-error","--proxy",&proxy,"--max-time",&warm_timeout,"--output","/dev/null","--dump-header",&headers,"--write-out",warm_write])
-        .arg(format!("{TEST_HOST}256000"))
-        .args(["--next","--silent","--show-error","--proxy",&proxy,"--max-time",&measure_timeout,"--output","/dev/null","--dump-header",&headers,"--write-out",measure_write])
+    let request_started = Instant::now();
+    let mut child = match Command::new(CURL_BIN)
+        .args(["--silent", "--show-error", "--proxy", &proxy, "--output", "-", "--dump-header", &headers, "--max-time", "30"])
         .arg(format!("{TEST_HOST}1000000000"))
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-    let output = match output {
-        Ok(v) => v,
-        Err(e) => { let _ = fs::remove_file(&headers); return failed_sample_for(tag, stage, &format!("measure_tool:{e}")); }
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+            Ok(c) => c,
+            Err(e) => { let _ = fs::remove_file(&headers); return failed_sample_for(tag, stage, &format!("measure_tool:{e}")); }
+        };
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill(); let _ = child.wait(); let _ = fs::remove_file(&headers);
+        return failed_sample_for(tag, stage, "measure_tool_no_stdout");
     };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let lines: Vec<&str> = stdout.lines().collect();
-    let fields = lines.iter().find(|l| l.starts_with("M|")).unwrap_or(&"").split('|').collect::<Vec<_>>();
-    let bytes = fields.get(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let ttfb = fields.get(2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-    let elapsed = fields.get(3).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-    let code = fields.get(4).and_then(|v| v.parse::<u16>().ok()).unwrap_or(0);
-    let exit = fields.get(5).and_then(|v| v.parse::<i32>().ok()).unwrap_or(-1);
+    let (tx, rx) = mpsc::channel::<(Instant, usize)>();
+    let reader = thread::spawn(move || {
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => if tx.send((Instant::now(), n)).is_err() { break; },
+            }
+        }
+    });
+
+    let mut first_byte: Option<Instant> = None;
+    let mut sample_start: Option<Instant> = None;
+    let mut sample_end: Option<Instant> = None;
+    let mut bytes = 0u64;
+    let mut completed_window = false;
+    let mut exited_early = false;
+    loop {
+        let now = Instant::now();
+        if now >= deadline { break; }
+        if let Some(end) = sample_end {
+            if now >= end { completed_window = true; break; }
+        }
+        let wait = sample_end.map(|end| end.saturating_duration_since(now).min(Duration::from_millis(50)))
+            .unwrap_or(Duration::from_millis(50));
+        match rx.recv_timeout(wait) {
+            Ok((at, n)) => {
+                if first_byte.is_none() {
+                    first_byte = Some(at);
+                    let begin = at + warmup;
+                    sample_start = Some(begin);
+                    sample_end = Some(begin + sample);
+                }
+                if let (Some(begin), Some(end)) = (sample_start, sample_end) {
+                    if at >= begin && at < end { bytes = bytes.saturating_add(n as u64); }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                exited_early = true;
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    exited_early = true;
+                    break;
+                }
+            }
+        }
+    }
+    let _ = child.kill();
+    let exit_status = child.wait().ok();
+    let _ = reader.join();
     let header_text = fs::read_to_string(&headers).unwrap_or_default();
     let _ = fs::remove_file(&headers);
+    let code = header_text.lines().filter(|l| l.starts_with("HTTP/"))
+        .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u16>().ok()).last().unwrap_or(0);
     let retry_after = parse_retry_after(&header_text);
+    let ttfb = first_byte.map(|t| t.duration_since(request_started).as_secs_f64()).unwrap_or(0.0);
+    let elapsed = if completed_window { sample.as_secs_f64() }
+        else if let (Some(begin), Some(end)) = (sample_start, sample_end) {
+            Instant::now().saturating_duration_since(begin).min(end.duration_since(begin)).as_secs_f64()
+        } else { 0.0 };
+
     let (status, mbps) = if code == 429 {
         ("server_limit".to_owned(), None)
     } else if (500..600).contains(&code) {
         ("server_error".to_owned(), None)
     } else if code != 200 {
-        (if code == 0 { format!("node_http_or_transport_{exit}") } else { format!("http_{code}") }, None)
-    } else if bytes == 0 || elapsed <= ttfb {
-        (if exit == 28 { "node_timeout_no_payload".into() } else { "node_no_payload".into() }, None)
-    } else if exit != 0 && exit != 28 {
-        (format!("node_curl_{exit}"), None)
+        let exit = exit_status.and_then(|s| s.code()).unwrap_or(-1);
+        let class = match exit {
+            5 | 6 => "node_dns",
+            7 => "node_connect",
+            28 => "node_timeout",
+            35 | 60 => "node_tls",
+            52 | 56 => "node_connection_lost",
+            _ => "node_http_or_transport",
+        };
+        (format!("{class}_{exit}"), None)
+    } else if !completed_window || elapsed < sample.as_secs_f64() * 0.95 {
+        (if exited_early { "node_incomplete".into() } else { "deadline".into() }, None)
+    } else if bytes == 0 {
+        ("node_no_payload".into(), None)
     } else {
-        // curl's max-time bounds the sample; partial body on exit 28 is a valid timed sample.
-        ("ok".to_owned(), Some(bytes as f64 * 8.0 / (elapsed - ttfb) / 1_000_000.0))
+        ("ok".to_owned(), Some(bytes as f64 * 8.0 / sample.as_secs_f64() / 1_000_000.0))
     };
-    if !stderr.trim().is_empty() && status != "ok" && status != "server_limit" && status != "server_error" {
-        return Sample { tag: tag.into(), stage, status: format!("{status}:{}", stderr.trim().replace(',', ";")), bytes, ttfb, elapsed, mbps, retry_after };
-    }
     Sample { tag: tag.into(), stage, status, bytes, ttfb, elapsed, mbps, retry_after }
 }
 

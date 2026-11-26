@@ -36,6 +36,9 @@ struct Sample {
     elapsed: f64,
     mbps: Option<f64>,
     retry_after: Option<Duration>,
+    http_status: Option<u16>,
+    curl_exit: Option<i32>,
+    curl_stderr: String,
 }
 
 struct GateState { tokens: f64, updated: Instant, blocked_until: Instant }
@@ -230,15 +233,23 @@ fn run(variant: Variant) -> AppResult<()> {
         Ok(())
     })();
 
-    let mut csv = String::from("tag,stage,status,bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
+    let mut csv = String::from("tag,stage,status,http_status,curl_exit,curl_stderr,bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
     for s in &journal {
         csv.push_str(&format!("{},{},{},{},{:.4},{:.4},{},{}\n",
-            csv_field(&s.tag), s.stage, s.status, s.bytes, s.ttfb, s.elapsed,
+            csv_field(&s.tag), s.stage, s.status,
+            s.http_status.map(|v| v.to_string()).unwrap_or_default(),
+            s.curl_exit.map(|v| v.to_string()).unwrap_or_default(),
+            csv_field(&s.curl_stderr), s.bytes, s.ttfb, s.elapsed,
             s.mbps.map(|v| format!("{v:.4}")).unwrap_or_default(),
             s.retry_after.map(|d| d.as_secs_f64().to_string()).unwrap_or_default()));
     }
     fs::write(&log_path, csv)?;
-    if let Err(e) = fs::remove_dir_all(&dir) { eprintln!("Не удалось удалить временный каталог: {e}"); }
+    if result.is_ok() {
+        if let Err(e) = fs::remove_dir_all(&dir) { eprintln!("Не удалось удалить временный каталог: {e}"); }
+    } else {
+        eprintln!("Диагностика сохранена: {}", dir.display());
+        eprintln!("Лог вспомогательного Xray: {}", dir.join("xray.log").display());
+    }
     println!("\nЖурнал измерений: {}", log_path.display());
     println!("Общее время: {:.2} с.", total_started.elapsed().as_secs_f64());
     result
@@ -266,7 +277,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let mut child = match Command::new(CURL_BIN)
         .args(["--silent", "--show-error", "--proxy", &proxy, "--output", "-", "--dump-header", &headers, "--max-time", "30"])
         .arg(format!("{TEST_HOST}1000000000"))
-        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => { let _ = fs::remove_file(&headers); return failed_sample_for(tag, stage, &format!("measure_tool:{e}")); }
         };
@@ -274,6 +285,11 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
         let _ = child.kill(); let _ = child.wait(); let _ = fs::remove_file(&headers);
         return failed_sample_for(tag, stage, "measure_tool_no_stdout");
     };
+    let stderr_reader = child.stderr.take().map(|mut stderr| thread::spawn(move || {
+        let mut captured = Vec::new();
+        let _ = stderr.read_to_end(&mut captured);
+        String::from_utf8_lossy(&captured).trim().to_owned()
+    }));
     let (tx, rx) = mpsc::channel::<(Instant, usize)>();
     let reader = thread::spawn(move || {
         let mut buf = [0u8; 64 * 1024];
@@ -326,6 +342,8 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let _ = child.kill();
     let exit_status = child.wait().ok();
     let _ = reader.join();
+    let curl_stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    let curl_exit = exit_status.as_ref().and_then(|s| s.code());
     let header_text = fs::read_to_string(&headers).unwrap_or_default();
     let _ = fs::remove_file(&headers);
     let code = header_text.lines().filter(|l| l.starts_with("HTTP/"))
@@ -337,21 +355,27 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
             Instant::now().saturating_duration_since(begin).min(end.duration_since(begin)).as_secs_f64()
         } else { 0.0 };
 
+    let curl_error = curl_exit.filter(|code| *code != 0);
     let (status, mbps) = if code == 429 {
         ("server_limit".to_owned(), None)
     } else if (500..600).contains(&code) {
-        ("server_error".to_owned(), None)
-    } else if code != 200 {
-        let exit = exit_status.and_then(|s| s.code()).unwrap_or(-1);
+        (format!("server_error_{code}"), None)
+    } else if let Some(exit) = curl_error {
         let class = match exit {
             5 | 6 => "node_dns",
             7 => "node_connect",
             28 => "node_timeout",
             35 | 60 => "node_tls",
             52 | 56 => "node_connection_lost",
-            _ => "node_http_or_transport",
+            _ => "node_curl",
         };
         (format!("{class}_{exit}"), None)
+    } else if code == 0 {
+        ("http_status_missing".to_owned(), None)
+    } else if (300..500).contains(&code) {
+        (format!("http_{code}"), None)
+    } else if code != 200 {
+        (format!("unexpected_http_{code}"), None)
     } else if !completed_window || elapsed < sample.as_secs_f64() * 0.95 {
         (if exited_early { "node_incomplete".into() } else { "deadline".into() }, None)
     } else if bytes == 0 {
@@ -359,7 +383,8 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     } else {
         ("ok".to_owned(), Some(bytes as f64 * 8.0 / sample.as_secs_f64() / 1_000_000.0))
     };
-    Sample { tag: tag.into(), stage, status, bytes, ttfb, elapsed, mbps, retry_after }
+    Sample { tag: tag.into(), stage, status, bytes, ttfb, elapsed, mbps, retry_after,
+        http_status: if code == 0 { None } else { Some(code) }, curl_exit, curl_stderr }
 }
 
 fn parse_retry_after(headers: &str) -> Option<Duration> {
@@ -372,7 +397,7 @@ fn parse_retry_after(headers: &str) -> Option<Duration> {
 }
 fn failed_sample(tag: &str) -> Sample { failed_sample_for(tag, "stage1", "thread_panic") }
 fn failed_sample_for(tag: &str, stage: &'static str, status: &str) -> Sample {
-    Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None }
+    Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None, http_status: None, curl_exit: None, curl_stderr: String::new() }
 }
 fn ranking_score(v: &[f64], variant: Variant) -> f64 {
     let med = median(v).unwrap_or(0.0);

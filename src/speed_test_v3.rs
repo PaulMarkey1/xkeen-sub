@@ -32,6 +32,7 @@ struct Sample {
     stage: &'static str,
     status: String,
     bytes: u64,
+    received_bytes: u64,
     ttfb: f64,
     elapsed: f64,
     mbps: Option<f64>,
@@ -153,7 +154,7 @@ fn run(variant: Variant) -> AppResult<()> {
             });
             for (i, sample) in results.into_iter().enumerate() {
                 if let Some(v) = sample.mbps { println!("  {} — {:.2} Мбит/с", sample.tag, v); first.push((start + i, v)); }
-                else { println!("  {} — {}", sample.tag, sample.status); }
+                else { print_sample_failure(&sample); }
                 journal.push(sample);
             }
         }
@@ -168,7 +169,7 @@ fn run(variant: Variant) -> AppResult<()> {
             if Instant::now() >= deadline { break; }
             let s = measure_with_policy(&candidates[*idx], ports[*idx], "stage2", stage2_warmup, stage2, &gate, deadline, retry_429);
             if let Some(v) = s.mbps { println!("  {} — {:.2} Мбит/с", s.tag, v); second.push((*idx, v)); }
-            else { println!("  {} — {}", s.tag, s.status); }
+            else { print_sample_failure(&s); }
             journal.push(s);
         }
         second.sort_by(|a,b| b.1.total_cmp(&a.1));
@@ -233,13 +234,13 @@ fn run(variant: Variant) -> AppResult<()> {
         Ok(())
     })();
 
-    let mut csv = String::from("tag,stage,status,http_status,curl_exit,curl_stderr,bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
+    let mut csv = String::from("tag,stage,status,http_status,curl_exit,curl_stderr,sample_bytes,received_bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
     for s in &journal {
         csv.push_str(&format!("{},{},{},{},{:.4},{:.4},{},{}\n",
             csv_field(&s.tag), s.stage, s.status,
             s.http_status.map(|v| v.to_string()).unwrap_or_default(),
             s.curl_exit.map(|v| v.to_string()).unwrap_or_default(),
-            csv_field(&s.curl_stderr), s.bytes, s.ttfb, s.elapsed,
+            csv_field(&s.curl_stderr), s.bytes, s.received_bytes, s.ttfb, s.elapsed,
             s.mbps.map(|v| format!("{v:.4}")).unwrap_or_default(),
             s.retry_after.map(|d| d.as_secs_f64().to_string()).unwrap_or_default()));
     }
@@ -305,6 +306,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let mut sample_start: Option<Instant> = None;
     let mut sample_end: Option<Instant> = None;
     let mut bytes = 0u64;
+    let mut received_bytes = 0u64;
     let mut completed_window = false;
     let mut exited_early = false;
     loop {
@@ -317,6 +319,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
             .unwrap_or(Duration::from_millis(50));
         match rx.recv_timeout(wait) {
             Ok((at, n)) => {
+                received_bytes = received_bytes.saturating_add(n as u64);
                 if first_byte.is_none() {
                     first_byte = Some(at);
                     let begin = at + warmup;
@@ -383,7 +386,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     } else {
         ("ok".to_owned(), Some(bytes as f64 * 8.0 / sample.as_secs_f64() / 1_000_000.0))
     };
-    Sample { tag: tag.into(), stage, status, bytes, ttfb, elapsed, mbps, retry_after,
+    Sample { tag: tag.into(), stage, status, bytes, received_bytes, ttfb, elapsed, mbps, retry_after,
         http_status: if code == 0 { None } else { Some(code) }, curl_exit, curl_stderr }
 }
 
@@ -397,7 +400,7 @@ fn parse_retry_after(headers: &str) -> Option<Duration> {
 }
 fn failed_sample(tag: &str) -> Sample { failed_sample_for(tag, "stage1", "thread_panic") }
 fn failed_sample_for(tag: &str, stage: &'static str, status: &str) -> Sample {
-    Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None, http_status: None, curl_exit: None, curl_stderr: String::new() }
+    Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, received_bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None, http_status: None, curl_exit: None, curl_stderr: String::new() }
 }
 fn ranking_score(v: &[f64], variant: Variant) -> f64 {
     let med = median(v).unwrap_or(0.0);
@@ -411,6 +414,17 @@ fn median(v: &[f64]) -> Option<f64> {
 fn mad(v: &[f64], med: f64) -> f64 {
     let mut d: Vec<f64> = v.iter().map(|x| (x-med).abs()).collect(); d.sort_by(f64::total_cmp);
     median(&d).unwrap_or(0.0)
+}
+
+fn print_sample_failure(sample: &Sample) {
+    println!("  {} — {} (HTTP: {}; curl exit: {}; принято: {} байт; время: {:.2} с)",
+        sample.tag, sample.status,
+        sample.http_status.map(|v| v.to_string()).unwrap_or_else(|| "нет".into()),
+        sample.curl_exit.map(|v| v.to_string()).unwrap_or_else(|| "нет".into()),
+        sample.received_bytes, sample.elapsed);
+    if !sample.curl_stderr.is_empty() {
+        println!("    curl: {}", sample.curl_stderr.replace('\n', " "));
+    }
 }
 
 fn csv_field(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }

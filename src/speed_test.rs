@@ -214,7 +214,7 @@ fn median(values: &[f64]) -> Option<f64> {
     }
 }
 
-fn finish_child(child: &mut Child) {
+pub(crate) fn finish_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -281,7 +281,7 @@ fn measure_candidate(_tag: &str, port: u16, size: u64, timeout: Duration) -> Mea
     Measurement::Success { speed_mbps: bytes as f64 * 8.0 / transfer / 1_000_000.0 }
 }
 
-fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {
+pub(crate) fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     for tag in requested {
         let mut eligible = false;
@@ -301,7 +301,7 @@ fn eligible_tags(documents: &[(String, Value)], requested: &[String]) -> Vec<Str
     result
 }
 
-fn add_probe_configs(documents: &mut Vec<(String, Value)>, tags: &[String], ports: &[u16]) -> AppResult<()> {
+pub(crate) fn add_probe_configs(documents: &mut Vec<(String, Value)>, tags: &[String], ports: &[u16]) -> AppResult<()> {
     let routing_index = documents.iter().position(|(_, doc)| doc.get("routing").is_some())
         .ok_or("В рабочей конфигурации не найден объект routing.")?;
     let routing = documents[routing_index].1.get_mut("routing")
@@ -336,14 +336,14 @@ fn add_probe_configs(documents: &mut Vec<(String, Value)>, tags: &[String], port
     Ok(())
 }
 
-fn reserve_port() -> AppResult<u16> {
+pub(crate) fn reserve_port() -> AppResult<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
 }
 
-fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
+pub(crate) fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
         if child.try_wait().ok().flatten().is_some() { return false; }
@@ -353,7 +353,7 @@ fn wait_for_ports(ports: &[u16], child: &mut Child, timeout: Duration) -> bool {
     false
 }
 
-fn safe_config_name(name: &str) -> bool {
+pub(crate) fn safe_config_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
 }
 

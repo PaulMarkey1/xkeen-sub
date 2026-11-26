@@ -225,29 +225,7 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
     }
 
     validate_documents(docs)?;
-    if target == BalancingMode::Advanced && !tags.is_empty() {
-        info("Проверяем подключения для Advanced блоками по пять...");
-        let probe_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
-        let selected = crate::xray_probe::select_advanced_outbounds(&probe_docs, &tags)?;
-        if !selected.is_empty() {
-            let main = vec![selected[0].0.clone()];
-            let reserve = selected.get(1).map(|item| vec![item.0.clone()]).unwrap_or_else(|| freedom_tags.clone());
-            let mut excluded = vec![selected[0].0.as_str()];
-            if let Some(second) = selected.get(1) { excluded.push(second.0.as_str()); }
-            let rest = if tags.len() <= 2 { freedom_tags.clone() } else {
-                tags.iter().filter(|tag| !excluded.contains(&tag.as_str())).cloned().collect()
-            };
-            let mut obs_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
-            prepare_observatory_with_interval(&mut obs_docs, &main, Some("10s"))?;
-            for (name, value) in obs_docs {
-                if let Some(index) = docs.iter().position(|doc| doc.file_name == name) { docs[index].value = value; }
-            }
-            backup.event("BALANCER", &format!("Advanced selectors: main={}, reserve={}, rest={}.", main[0], reserve.first().map(String::as_str).unwrap_or("freedom"), rest.len()))?;
-            apply_advanced_selectors(&mut docs[owner].value, &main, &reserve, &rest)?;
-        } else {
-            warning("Не удалось получить успешные результаты Observatory. В селекторах оставлены все доступные подключения.");
-        }
-    }
+
 
     validate_documents(docs)?;
     let state = RunState::default();

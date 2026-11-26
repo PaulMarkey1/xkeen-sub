@@ -209,7 +209,7 @@ fn run(variant: Variant) -> AppResult<()> {
         }
 
         println!("\nИТОГОВЫЙ РЕЙТИНГ");
-        let mut ranking: Vec<(String, f64, f64, usize, usize)> = stage3_values.iter().filter_map(|(tag, vals)| {
+        let mut ranking: Vec<(String, f64, f64, usize, usize, f64)> = stage3_values.iter().filter_map(|(tag, vals)| {
             if vals.len() < 3 { return None; }
             let med = median(vals)?;
             let mad = mad(vals, med);

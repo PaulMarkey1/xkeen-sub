@@ -151,7 +151,7 @@ fn run(variant: Variant) -> AppResult<()> {
             });
             for (i, sample) in results.into_iter().enumerate() {
                 if let Some(v) = sample.mbps { println!("  {} — {:.2} Мбит/с", sample.tag, v); first.push((start + i, v)); }
-                else { println!("  {} — {}", sample.tag, sample.status); }
+                else { println!("  {} — {} [{}]", sample.tag, sample.status, sample.diagnostics); }
                 journal.push(sample);
             }
         }
@@ -166,7 +166,7 @@ fn run(variant: Variant) -> AppResult<()> {
             if Instant::now() >= deadline { break; }
             let s = measure_with_policy(&candidates[*idx], ports[*idx], "stage2", stage2_warmup, stage2, &gate, deadline, retry_429);
             if let Some(v) = s.mbps { println!("  {} — {:.2} Мбит/с", s.tag, v); second.push((*idx, v)); }
-            else { println!("  {} — {}", s.tag, s.status); }
+            else { println!("  {} — {} [{}]", s.tag, s.status, s.diagnostics); }
             journal.push(s);
         }
         second.sort_by(|a,b| b.1.total_cmp(&a.1));
@@ -188,7 +188,7 @@ fn run(variant: Variant) -> AppResult<()> {
                 if let Some(v) = s.mbps {
                     println!("  {} — {:.2} Мбит/с", s.tag, v);
                     stage3_values.entry(s.tag.clone()).or_default().push(v);
-                } else { println!("  {} — {}", s.tag, s.status); }
+                } else { println!("  {} — {} [{}]", s.tag, s.status, s.diagnostics); }
                 journal.push(s);
             }
         }
@@ -203,7 +203,7 @@ fn run(variant: Variant) -> AppResult<()> {
                     println!("\nКОНТРОЛЬНЫЙ ЗАМЕР ПОБЕДИТЕЛЯ — {tag}, 4 с.");
                     let s = measure_with_policy(&tag, ports[idx], "control", Duration::from_millis(500), Duration::from_secs(4), &gate, deadline, retry_429);
                     if let Some(v) = s.mbps { println!("  Контрольная скорость: {:.2} Мбит/с", v); }
-                    else { println!("  Контрольный замер: {}", s.status); }
+                    else { println!("  Контрольный замер: {} [{}]", s.status, s.diagnostics); }
                     journal.push(s);
                 }
             }
@@ -233,7 +233,7 @@ fn run(variant: Variant) -> AppResult<()> {
 
     let mut csv = String::from("tag,stage,status,bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds,diagnostics\n");
     for s in &journal {
-        csv.push_str(&format!("{},{},{},{},{:.4},{:.4},{},{}\n",
+        csv.push_str(&format!("{},{},{},{},{:.4},{:.4},{},{},{}\n",
             csv_field(&s.tag), s.stage, s.status, s.bytes, s.ttfb, s.elapsed,
             s.mbps.map(|v| format!("{v:.4}")).unwrap_or_default(),
             s.retry_after.map(|d| d.as_secs_f64().to_string()).unwrap_or_default(), csv_field(&s.diagnostics)));

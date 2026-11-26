@@ -236,7 +236,7 @@ fn run(variant: Variant) -> AppResult<()> {
 
     let mut csv = String::from("tag,stage,status,http_status,curl_exit,curl_stderr,sample_bytes,received_bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
     for s in &journal {
-        csv.push_str(&format!("{},{},{},{},{},{},{},{},{:.4},{:.4},{},{}\\n",
+        csv.push_str(&format!("{},{},{},{},{},{},{},{},{:.4},{:.4},{},{}\n",
             csv_field(&s.tag), s.stage, s.status,
             s.http_status.map(|v| v.to_string()).unwrap_or_default(),
             s.curl_exit.map(|v| v.to_string()).unwrap_or_default(),

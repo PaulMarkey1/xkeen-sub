@@ -294,31 +294,35 @@ fn configure_probe_inbounds(
 ) -> AppResult<()> {
     let routing_index = documents.iter().position(|(_, doc)| doc.get("routing").is_some())
         .ok_or("В конфигурации Xray не найден объект routing.")?;
-    let routing = documents[routing_index].1.get_mut("routing")
-        .and_then(Value::as_object_mut).ok_or("Объект routing должен быть JSON-объектом.")?;
-    let rules = routing.entry("rules").or_insert_with(|| json!([]))
-        .as_array_mut().ok_or("routing.rules должен быть массивом.")?;
+    {
+        let routing = documents[routing_index].1.get_mut("routing")
+            .and_then(Value::as_object_mut).ok_or("Объект routing должен быть JSON-объектом.")?;
+        let rules = routing.entry("rules").or_insert_with(|| json!([]))
+            .as_array_mut().ok_or("routing.rules должен быть массивом.")?;
+        for (index, tag) in tags.iter().enumerate() {
+            rules.insert(0, json!({
+                "type": "field",
+                "inboundTag": [format!("xkeen-sub-speed-probe-{index}")],
+                "outboundTag": tag
+            }));
+        }
+    }
     let inbound_index = documents.iter().position(|(_, doc)| doc.get("inbounds").is_some())
         .unwrap_or(routing_index);
-    let root = documents[inbound_index].1.as_object_mut()
-        .ok_or("Корень конфигурации должен быть JSON-объектом.")?;
-    let inbounds = root.entry("inbounds").or_insert_with(|| json!([]))
-        .as_array_mut().ok_or("inbounds должен быть массивом.")?;
-
-    for (index, (tag, port)) in tags.iter().zip(ports.iter()).enumerate() {
-        let inbound_tag = format!("xkeen-sub-speed-probe-{index}");
-        rules.insert(0, json!({
-            "type": "field",
-            "inboundTag": [inbound_tag],
-            "outboundTag": tag
-        }));
-        inbounds.push(json!({
-            "tag": inbound_tag,
-            "listen": "127.0.0.1",
-            "port": port,
-            "protocol": "http",
-            "settings": {}
-        }));
+    {
+        let root = documents[inbound_index].1.as_object_mut()
+            .ok_or("Корень конфигурации должен быть JSON-объектом.")?;
+        let inbounds = root.entry("inbounds").or_insert_with(|| json!([]))
+            .as_array_mut().ok_or("inbounds должен быть массивом.")?;
+        for (index, port) in ports.iter().enumerate() {
+            inbounds.push(json!({
+                "tag": format!("xkeen-sub-speed-probe-{index}"),
+                "listen": "127.0.0.1",
+                "port": port,
+                "protocol": "http",
+                "settings": {}
+            }));
+        }
     }
     Ok(())
 }

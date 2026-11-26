@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, speed_monitor, test, update};
+use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, test, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;

@@ -25,7 +25,6 @@ mod temp_counter;
 mod xray_test;
 mod xray_probe;
 mod speed_test;
-mod speed_test_v3;
 mod speed_monitor;
 mod test;
 mod update;

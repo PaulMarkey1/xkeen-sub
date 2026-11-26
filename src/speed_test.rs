@@ -14,8 +14,6 @@ const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
 const FIRST_STAGE_BATCH: usize = 5;
-const SECOND_STAGE_TOP: usize = 6;
-const FINAL_STAGE_TOP: usize = 3;
 const TOTAL_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Runs the staged throughput selection used by Advanced balancing.
@@ -99,7 +97,7 @@ pub(crate) fn test_outbounds_speed(
         }
         first_stage.sort_by(|a, b| b.1.total_cmp(&a.1));
         first_stage.truncate(10);
-        println!("После этапа 1 отобрано: {} из 10.", first_stage.len());
+        println!("После этапа 1 отобрано подключений: {} (максимум 10).", first_stage.len());
         if first_stage.is_empty() {
             finish_child(&mut child);
             return Ok(Vec::new());

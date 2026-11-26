@@ -32,10 +32,14 @@ struct Sample {
     stage: &'static str,
     status: String,
     bytes: u64,
+    received_bytes: u64,
     ttfb: f64,
     elapsed: f64,
     mbps: Option<f64>,
     retry_after: Option<Duration>,
+    http_status: Option<u16>,
+    curl_exit: Option<i32>,
+    curl_stderr: String,
 }
 
 struct GateState { tokens: f64, updated: Instant, blocked_until: Instant }
@@ -150,7 +154,7 @@ fn run(variant: Variant) -> AppResult<()> {
             });
             for (i, sample) in results.into_iter().enumerate() {
                 if let Some(v) = sample.mbps { println!("  {} — {:.2} Мбит/с", sample.tag, v); first.push((start + i, v)); }
-                else { println!("  {} — {}", sample.tag, sample.status); }
+                else { print_sample_failure(&sample); }
                 journal.push(sample);
             }
         }
@@ -165,7 +169,7 @@ fn run(variant: Variant) -> AppResult<()> {
             if Instant::now() >= deadline { break; }
             let s = measure_with_policy(&candidates[*idx], ports[*idx], "stage2", stage2_warmup, stage2, &gate, deadline, retry_429);
             if let Some(v) = s.mbps { println!("  {} — {:.2} Мбит/с", s.tag, v); second.push((*idx, v)); }
-            else { println!("  {} — {}", s.tag, s.status); }
+            else { print_sample_failure(&s); }
             journal.push(s);
         }
         second.sort_by(|a,b| b.1.total_cmp(&a.1));
@@ -187,7 +191,7 @@ fn run(variant: Variant) -> AppResult<()> {
                 if let Some(v) = s.mbps {
                     println!("  {} — {:.2} Мбит/с", s.tag, v);
                     stage3_values.entry(s.tag.clone()).or_default().push(v);
-                } else { println!("  {} — {}", s.tag, s.status); }
+                } else { print_sample_failure(&s); }
                 journal.push(s);
             }
         }
@@ -202,7 +206,7 @@ fn run(variant: Variant) -> AppResult<()> {
                     println!("\nКОНТРОЛЬНЫЙ ЗАМЕР ПОБЕДИТЕЛЯ — {tag}, 4 с.");
                     let s = measure_with_policy(&tag, ports[idx], "control", Duration::from_millis(500), Duration::from_secs(4), &gate, deadline, retry_429);
                     if let Some(v) = s.mbps { println!("  Контрольная скорость: {:.2} Мбит/с", v); }
-                    else { println!("  Контрольный замер: {}", s.status); }
+                    else { print_sample_failure(&s); }
                     journal.push(s);
                 }
             }
@@ -214,7 +218,7 @@ fn run(variant: Variant) -> AppResult<()> {
             let med = median(vals)?;
             let mad = mad(vals, med);
             let node_errors = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status.starts_with("node_")).count();
-            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && s.status != "server_limit" && s.status != "server_error" && s.status != "deadline").count();
+            let attempts = journal.iter().filter(|s| &s.tag == tag && s.stage == "stage3" && (s.status == "ok" || s.status.starts_with("node_"))).count();
             let reliability = if attempts == 0 { 0.0 } else { (vals.len() as f64 / attempts as f64).min(1.0) };
             let score = ranking_score(vals, variant);
             Some((tag.clone(), score, mad, vals.len(), node_errors, reliability))
@@ -230,15 +234,24 @@ fn run(variant: Variant) -> AppResult<()> {
         Ok(())
     })();
 
-    let mut csv = String::from("tag,stage,status,bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
+    let mut csv = String::from("tag,stage,status,http_status,curl_exit,curl_stderr,sample_bytes,received_bytes,ttfb_seconds,elapsed_seconds,mbps,retry_after_seconds\n");
     for s in &journal {
-        csv.push_str(&format!("{},{},{},{},{:.4},{:.4},{},{}\n",
-            csv_field(&s.tag), s.stage, s.status, s.bytes, s.ttfb, s.elapsed,
+        csv.push_str(&format!("{},{},{},{},{},{},{},{},{:.4},{:.4},{},{}\n",
+            csv_field(&s.tag), s.stage, s.status,
+            s.http_status.map(|v| v.to_string()).unwrap_or_default(),
+            s.curl_exit.map(|v| v.to_string()).unwrap_or_default(),
+            csv_field(&s.curl_stderr), s.bytes, s.received_bytes, s.ttfb, s.elapsed,
             s.mbps.map(|v| format!("{v:.4}")).unwrap_or_default(),
             s.retry_after.map(|d| d.as_secs_f64().to_string()).unwrap_or_default()));
     }
     fs::write(&log_path, csv)?;
-    if let Err(e) = fs::remove_dir_all(&dir) { eprintln!("Не удалось удалить временный каталог: {e}"); }
+    let has_successful_measurement = journal.iter().any(|sample| sample.mbps.is_some());
+    if result.is_ok() && has_successful_measurement {
+        if let Err(e) = fs::remove_dir_all(&dir) { eprintln!("Не удалось удалить временный каталог: {e}"); }
+    } else {
+        eprintln!("Диагностика сохранена: {}", dir.display());
+        eprintln!("Лог вспомогательного Xray: {}", dir.join("xray.log").display());
+    }
     println!("\nЖурнал измерений: {}", log_path.display());
     println!("Общее время: {:.2} с.", total_started.elapsed().as_secs_f64());
     result
@@ -266,7 +279,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let mut child = match Command::new(CURL_BIN)
         .args(["--silent", "--show-error", "--proxy", &proxy, "--output", "-", "--dump-header", &headers, "--max-time", "30"])
         .arg(format!("{TEST_HOST}1000000000"))
-        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => { let _ = fs::remove_file(&headers); return failed_sample_for(tag, stage, &format!("measure_tool:{e}")); }
         };
@@ -274,6 +287,11 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
         let _ = child.kill(); let _ = child.wait(); let _ = fs::remove_file(&headers);
         return failed_sample_for(tag, stage, "measure_tool_no_stdout");
     };
+    let stderr_reader = child.stderr.take().map(|mut stderr| thread::spawn(move || {
+        let mut captured = Vec::new();
+        let _ = stderr.read_to_end(&mut captured);
+        String::from_utf8_lossy(&captured).trim().to_owned()
+    }));
     let (tx, rx) = mpsc::channel::<(Instant, usize)>();
     let reader = thread::spawn(move || {
         let mut buf = [0u8; 64 * 1024];
@@ -289,6 +307,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let mut sample_start: Option<Instant> = None;
     let mut sample_end: Option<Instant> = None;
     let mut bytes = 0u64;
+    let mut received_bytes = 0u64;
     let mut completed_window = false;
     let mut exited_early = false;
     loop {
@@ -301,6 +320,7 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
             .unwrap_or(Duration::from_millis(50));
         match rx.recv_timeout(wait) {
             Ok((at, n)) => {
+                received_bytes = received_bytes.saturating_add(n as u64);
                 if first_byte.is_none() {
                     first_byte = Some(at);
                     let begin = at + warmup;
@@ -326,6 +346,8 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     let _ = child.kill();
     let exit_status = child.wait().ok();
     let _ = reader.join();
+    let curl_stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+    let curl_exit = exit_status.as_ref().and_then(|s| s.code());
     let header_text = fs::read_to_string(&headers).unwrap_or_default();
     let _ = fs::remove_file(&headers);
     let code = header_text.lines().filter(|l| l.starts_with("HTTP/"))
@@ -337,21 +359,27 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
             Instant::now().saturating_duration_since(begin).min(end.duration_since(begin)).as_secs_f64()
         } else { 0.0 };
 
+    let curl_error = curl_exit.filter(|code| *code != 0);
     let (status, mbps) = if code == 429 {
         ("server_limit".to_owned(), None)
     } else if (500..600).contains(&code) {
-        ("server_error".to_owned(), None)
-    } else if code != 200 {
-        let exit = exit_status.and_then(|s| s.code()).unwrap_or(-1);
+        (format!("server_error_{code}"), None)
+    } else if let Some(exit) = curl_error {
         let class = match exit {
             5 | 6 => "node_dns",
             7 => "node_connect",
             28 => "node_timeout",
             35 | 60 => "node_tls",
             52 | 56 => "node_connection_lost",
-            _ => "node_http_or_transport",
+            _ => "node_curl",
         };
         (format!("{class}_{exit}"), None)
+    } else if code == 0 {
+        ("http_status_missing".to_owned(), None)
+    } else if (300..500).contains(&code) {
+        (format!("http_{code}"), None)
+    } else if code != 200 {
+        (format!("unexpected_http_{code}"), None)
     } else if !completed_window || elapsed < sample.as_secs_f64() * 0.95 {
         (if exited_early { "node_incomplete".into() } else { "deadline".into() }, None)
     } else if bytes == 0 {
@@ -359,7 +387,8 @@ fn measure_once(tag: &str, port: u16, stage: &'static str, warmup: Duration, sam
     } else {
         ("ok".to_owned(), Some(bytes as f64 * 8.0 / sample.as_secs_f64() / 1_000_000.0))
     };
-    Sample { tag: tag.into(), stage, status, bytes, ttfb, elapsed, mbps, retry_after }
+    Sample { tag: tag.into(), stage, status, bytes, received_bytes, ttfb, elapsed, mbps, retry_after,
+        http_status: if code == 0 { None } else { Some(code) }, curl_exit, curl_stderr }
 }
 
 fn parse_retry_after(headers: &str) -> Option<Duration> {
@@ -372,7 +401,7 @@ fn parse_retry_after(headers: &str) -> Option<Duration> {
 }
 fn failed_sample(tag: &str) -> Sample { failed_sample_for(tag, "stage1", "thread_panic") }
 fn failed_sample_for(tag: &str, stage: &'static str, status: &str) -> Sample {
-    Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None }
+    Sample { tag: tag.into(), stage, status: status.into(), bytes: 0, received_bytes: 0, ttfb: 0.0, elapsed: 0.0, mbps: None, retry_after: None, http_status: None, curl_exit: None, curl_stderr: String::new() }
 }
 fn ranking_score(v: &[f64], variant: Variant) -> f64 {
     let med = median(v).unwrap_or(0.0);
@@ -386,6 +415,17 @@ fn median(v: &[f64]) -> Option<f64> {
 fn mad(v: &[f64], med: f64) -> f64 {
     let mut d: Vec<f64> = v.iter().map(|x| (x-med).abs()).collect(); d.sort_by(f64::total_cmp);
     median(&d).unwrap_or(0.0)
+}
+
+fn print_sample_failure(sample: &Sample) {
+    println!("  {} — {} (HTTP: {}; curl exit: {}; принято: {} байт; время: {:.2} с)",
+        sample.tag, sample.status,
+        sample.http_status.map(|v| v.to_string()).unwrap_or_else(|| "нет".into()),
+        sample.curl_exit.map(|v| v.to_string()).unwrap_or_else(|| "нет".into()),
+        sample.received_bytes, sample.elapsed);
+    if !sample.curl_stderr.is_empty() {
+        println!("    curl: {}", sample.curl_stderr.replace('\n', " "));
+    }
 }
 
 fn csv_field(s: &str) -> String { format!("\"{}\"", s.replace('"', "\"\"")) }

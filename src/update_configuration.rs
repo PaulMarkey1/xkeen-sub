@@ -183,7 +183,7 @@ fn prepare_configuration(
     if advanced_mode {
         // Keep the three existing selectors intact until the helper Xray has
         // returned enough information to choose the new main/reserve nodes.
-        docs[routing_index].value = original_routing;
+        docs[routing_index].value = original_routing.clone();
         let initial_validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
         if initial_validation.is_ok() {
             let freedom_tags: Vec<String> = final_outbounds.iter()
@@ -212,7 +212,33 @@ fn prepare_configuration(
                     .map(|doc| (doc.file_name.clone(), doc.value.clone()))
                     .collect();
                 match crate::xray_probe::select_advanced_outbounds(&probe_documents, &tags) {
-                    Ok(selected) if !selected.is_empty() => {
+                    Ok(mut selected) if !selected.is_empty() => {
+                        // Hysteresis: keep the current main node when it is within
+                        // five percent of the measured leader. This prevents selector
+                        // flapping between near-equal connections.
+                        let current_main = original_routing.get("routing")
+                            .and_then(|routing| routing.get("balancers"))
+                            .and_then(Value::as_array)
+                            .and_then(|balancers| balancers.iter().find(|item|
+                                item.get("tag").and_then(Value::as_str) == Some(PROGRAM_BALANCER_TAG)))
+                            .and_then(|balancer| balancer.get("selector"))
+                            .and_then(Value::as_array)
+                            .and_then(|selector| selector.first())
+                            .and_then(Value::as_str);
+                        let mut retained_current = false;
+                        if let Some(current) = current_main {
+                            if let Some(position) = selected.iter().position(|(tag, _)| tag == current) {
+                                let leader_score = selected[0].1;
+                                let current_score = selected[position].1;
+                                if current_score >= leader_score * 0.95 {
+                                    selected.swap(0, position);
+                                    retained_current = position != 0;
+                                }
+                            }
+                        }
+                        if retained_current {
+                            info("Текущее основное подключение сохранено: преимущество нового лидера меньше 5%.");
+                        }
                         let main_tag = selected[0].0.clone();
                         let main = vec![main_tag.clone()];
                         let reserve = selected.get(1)

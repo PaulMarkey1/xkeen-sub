@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, speed_monitor, test, update};
+use crate::{auto_update, backup, balancers, current_connection, install_config, maintenance, setup, speed_monitor, speed_test_v3, test, update};
 use crate::terminal::{command_item, title, separator};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
@@ -35,6 +35,8 @@ pub fn run() -> AppResult<()> {
         [root, action] if root == "setup" && action == "edit" => setup::edit::run().map(|_| ()),
         [action] if action == "speed-monitor" => test::run(),
         [action] if action == "speed-monitor-menu" => speed_monitor::run_menu(),
+        [action] if action == "speed-monitor-v3-original" => speed_test_v3::run_original(),
+        [action] if action == "speed-monitor-v3" => speed_test_v3::run_coach(),
         [action] if action == "test" => test::run(),
         [action] if action == "update" => update::run(None),
         [action, target] if action == "update" => update::run(Some(target)),
@@ -74,7 +76,9 @@ fn print_help() -> AppResult<()> {
     command_item("  clear", "Удалить все точки восстановления после подтверждения");
     command_item("  list [ID]", "Просмотреть резервные копии или открыть запись");
     command_item("test", "Проверить подключения без изменения рабочих файлов");
-    command_item("speed-monitor", "Запустить поэтапную проверку скорости подключений");
+    command_item("speed-monitor", "Запустить текущую поэтапную проверку скорости подключений");
+    command_item("speed-monitor-v3-original", "Эксперимент V3 по исходному предложению (все подключения)");
+    command_item("speed-monitor-v3", "Эксперимент V3 по альтернативной схеме (все подключения)");
     command_item("speed-monitor-menu", "Настроить почасовые проверки и просмотреть журнал");
     command_item("update", "Обновить все подписки");
     command_item("  subN", "Обновить одну подписку");

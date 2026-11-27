@@ -439,6 +439,12 @@ pub(crate) fn reset_after_update() -> AppResult<()> {
     remove_forced_selection()
 }
 
+pub(crate) fn active_primary_tag() -> Option<String> {
+    let configs = load_configs().ok()?;
+    let server = find_api_server(&configs).ok()?;
+    query_balancer(&server, "xkeen-sub-balancer").ok()
+}
+
 pub(crate) fn has_pending_selection() -> bool {
     Path::new(STATE_PATH).is_file()
 }

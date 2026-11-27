@@ -302,7 +302,7 @@ pub(crate) fn select_advanced_outbounds(
         Err(error) => {
             match fs::read_to_string(&log_path) {
                 Ok(log) if !log.trim().is_empty() => Err(
-                    format!("{error}\\nЖурнал вспомогательного Xray:\\n{}", log.trim()).into()
+                    format!("{error}\nЖурнал вспомогательного Xray:\n{}", log.trim()).into()
                 ),
                 _ => Err(error),
             }

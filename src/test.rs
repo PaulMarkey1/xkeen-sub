@@ -56,5 +56,5 @@ pub fn run() -> AppResult<()> {
         OUTBOUND_FILE,
         tags.len()
     );
-    crate::speed_test::test_outbounds_speed(&documents, &tags).map(|_| ())
+    crate::xray_probe::select_advanced_outbounds(&documents, &tags).map(|_| ())
 }

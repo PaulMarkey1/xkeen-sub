@@ -185,7 +185,7 @@ pub(crate) fn select_advanced_outbounds(
                 continue;
             }
             let port = ports[tags.iter().position(|candidate| candidate == tag).unwrap()];
-            match measure_adaptive_candidate(port, timeout) {
+            match measure_adaptive_candidate(port, timeout, quick_speed[tag]) {
                 Ok((speed, samples, stable)) => {
                     coarse_results.insert(tag.clone(), speed);
                     println!("  {tag} — {:.2} Мбит/с, {} интервалов{}",
@@ -231,7 +231,7 @@ pub(crate) fn select_advanced_outbounds(
                 let timeout = Duration::from_secs(3).min(fair_share);
                 if timeout < Duration::from_millis(650) { break; }
                 let port = ports[tags.iter().position(|candidate| candidate == tag).unwrap()];
-                match measure_adaptive_candidate(port, timeout) {
+                match measure_adaptive_candidate(port, timeout, coarse_results[tag]) {
                     Ok((speed, samples, stable)) => {
                         final_samples.get_mut(tag).unwrap().push(speed);
                         println!("    {tag} — {:.2} Мбит/с ({} интервалов{})",
@@ -520,8 +520,14 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
 /// are connection/download warm-up; subsequent ranges must reuse the same
 /// TCP/TLS connection. Sampling stops after two consecutive stable comparisons
 /// (<=15% difference) and never exceeds the caller's hard time budget.
-fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usize, bool), String> {
-    const CHUNK_SIZE: u64 = 1_000_000;
+fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps: f64) -> Result<(f64, usize, bool), String> {
+    let chunk_size: u64 = if expected_speed_mbps < 10.0 {
+        256_000
+    } else if expected_speed_mbps < 100.0 {
+        1_000_000
+    } else {
+        4_000_000
+    };
     const WARMUP: Duration = Duration::from_millis(300);
     const MIN_SAMPLE_TIME: Duration = Duration::from_millis(1600);
     const MAX_REQUESTS: usize = 256;
@@ -529,7 +535,7 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usiz
     let proxy = format!("http://127.0.0.1:{port}");
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
     let connect_arg = format!("{:.3}", timeout.min(Duration::from_millis(900)).as_secs_f64());
-    let range_arg = format!("0-{}", CHUNK_SIZE - 1);
+    let range_arg = format!("0-{}", chunk_size - 1);
     let mut command = Command::new(CURL_BIN);
     command.args([
         "--silent", "--show-error", "--http1.1", "--no-buffer",
@@ -582,8 +588,8 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usiz
                     failure = Some("HTTP 429: тестовый источник ограничил запросы".into());
                     break;
                 }
-                if status != 206 || bytes != CHUNK_SIZE {
-                    failure = Some(format!("неполный Range-ответ: HTTP {status}, {bytes}/{CHUNK_SIZE} байт"));
+                if status != 206 || bytes != chunk_size {
+                    failure = Some(format!("неполный Range-ответ: HTTP {status}, {bytes}/{chunk_size} байт"));
                     break;
                 }
                 if !first_transfer && connections != 0 {

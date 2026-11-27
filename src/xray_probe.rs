@@ -294,6 +294,20 @@ pub(crate) fn select_advanced_outbounds(
         Ok(ranking)
     })();
 
+    // Preserve helper-Xray diagnostics on failure. Previously the log was
+    // deleted unconditionally, removing the only evidence about routing,
+    // DNS, TLS and outbound connection failures.
+    let result = match result {
+        Ok(ranking) => Ok(ranking),
+        Err(error) => {
+            match fs::read_to_string(&log_path) {
+                Ok(log) if !log.trim().is_empty() => Err(
+                    format!("{error}\\nЖурнал вспомогательного Xray:\\n{}", log.trim()).into()
+                ),
+                _ => Err(error),
+            }
+        }
+    };
     if let Err(error) = fs::remove_dir_all(&directory) {
         eprintln!("Не удалось удалить временный каталог {}: {error}", directory.display());
     }

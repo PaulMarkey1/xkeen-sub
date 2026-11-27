@@ -13,7 +13,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
-const TEST_URL: &str = "https://fsn1-speed.hetzner.com/100MB.bin";
+const TEST_URL: &str = "https://speedtest.tele2.net/100MB.zip";
 const GLOBAL_DEADLINE: Duration = Duration::from_secs(60);
 const HELPER_START_LIMIT: Duration = Duration::from_secs(8);
 const STAGE1_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -96,7 +96,7 @@ pub(crate) fn select_advanced_outbounds(
         println!();
         println!("Новый отбор: прогрев → пинг → быстрый отсев → 10 МБ → 3 финалиста.");
         println!("Ограничение конкурентности: 5 на крупных пакетах; общий лимит 60 секунд.");
-        println!("Источник: Hetzner 100 MB, Range-запросы. Рабочие конфиги не меняются до результата.");
+        println!("Источник: Tele2 Speedtest 100 MB, Range-запросы. Рабочие конфиги не меняются до результата.");
 
         // One small warm-up request per node; results deliberately do not enter the score.
         println!("\nЭТАП 0 — прогрев подключений (32 КБ, группы до 5).");
@@ -125,7 +125,7 @@ pub(crate) fn select_advanced_outbounds(
         for (batch_index, batch) in ports.chunks(5).enumerate() {
             if Instant::now() >= deadline { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
-            let results = run_parallel_batch(&batch_tags, batch, 1, STAGE1_TIMEOUT.min(remaining(deadline)));
+            let results = run_parallel_batch(&batch_tags, batch, 32_000, STAGE1_TIMEOUT.min(remaining(deadline)));
             for (tag, result) in batch_tags.iter().zip(results) {
                 match result {
                     ProbeResult::Success { latency_ms, .. } => {
@@ -280,7 +280,7 @@ pub(crate) fn select_advanced_outbounds(
         let ping_ports: Vec<u16> = finalists.iter().filter_map(|tag|
             tags.iter().position(|candidate| candidate == tag).map(|index| ports[index])
         ).collect();
-        let ping_results = run_parallel_batch(&finalists, &ping_ports, 1, STAGE1_TIMEOUT.min(remaining(deadline)));
+        let ping_results = run_parallel_batch(&finalists, &ping_ports, 32_000, STAGE1_TIMEOUT.min(remaining(deadline)));
         let mut final_ping: BTreeMap<String, f64> = BTreeMap::new();
         for (tag, result) in finalists.iter().zip(ping_results) {
             match result {

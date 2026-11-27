@@ -122,7 +122,7 @@ pub(crate) fn select_advanced_outbounds(
         println!("\nЭТАП 2 — быстрый отсев всех подключений (256 КБ, группы до 5).");
         let mut quick_speed: BTreeMap<String, f64> = BTreeMap::new();
         for (batch_index, batch) in ports.chunks(5).enumerate() {
-            if remaining(deadline).is_zero() { break; }
+            if remaining(deadline) < CURL_CONNECT_TIMEOUT { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
             let timeout = STAGE1_TIMEOUT.min(remaining(deadline));
             let results = run_parallel_batch(&batch_tags, batch, 256_000, timeout);
@@ -499,7 +499,7 @@ fn curl_failure_reason(
 fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let proxy = format!("http://127.0.0.1:{port}");
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
-    let connect_timeout = timeout.min(Duration::from_millis(700));
+    let connect_timeout = timeout.min(CURL_CONNECT_TIMEOUT);
     let connect_arg = format!("{:.3}", connect_timeout.as_secs_f64());
     let range_arg = format!("0-{}", size.saturating_sub(1));
     let output = match Command::new(CURL_BIN)

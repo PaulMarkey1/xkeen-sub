@@ -18,7 +18,8 @@ const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_URL: &str = "https://speedtest.tele2.net/100MB.zip";
 const GLOBAL_DEADLINE: Duration = Duration::from_secs(60);
 const HELPER_START_LIMIT: Duration = Duration::from_secs(8);
-const STAGE1_TIMEOUT: Duration = Duration::from_millis(1200);
+const STAGE1_TIMEOUT: Duration = Duration::from_millis(1600);
+const CURL_CONNECT_TIMEOUT: Duration = Duration::from_millis(1100);
 
 #[derive(Debug)]
 enum ProbeResult {
@@ -92,7 +93,7 @@ pub(crate) fn select_advanced_outbounds(
         println!("\nЭТАП 1 — KeepAlive-пинг всех подключений, группы до 5.");
         let mut initial_ping: BTreeMap<String, f64> = BTreeMap::new();
         for (batch_index, batch) in ports.chunks(5).enumerate() {
-            if remaining(deadline).is_zero() { break; }
+            if remaining(deadline) < CURL_CONNECT_TIMEOUT { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
             let timeout = STAGE1_TIMEOUT.min(remaining(deadline));
             let results = run_parallel_ping_batch(&batch_tags, batch, timeout);
@@ -399,7 +400,7 @@ fn run_parallel_ping_batch(
 fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     let proxy = format!("http://127.0.0.1:{port}");
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
-    let connect_timeout = timeout.min(Duration::from_millis(700));
+    let connect_timeout = timeout.min(CURL_CONNECT_TIMEOUT);
     let connect_arg = format!("{:.3}", connect_timeout.as_secs_f64());
     let output = match Command::new(CURL_BIN)
         .args([
@@ -584,7 +585,7 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
 
     let proxy = format!("http://127.0.0.1:{port}");
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
-    let connect_arg = format!("{:.3}", timeout.min(Duration::from_millis(900)).as_secs_f64());
+    let connect_arg = format!("{:.3}", timeout.min(CURL_CONNECT_TIMEOUT).as_secs_f64());
     let range_arg = format!("0-{}", chunk_size - 1);
     let mut command = Command::new(CURL_BIN);
     command.args([

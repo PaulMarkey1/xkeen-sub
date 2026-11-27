@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::mpsc;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -294,6 +294,20 @@ pub(crate) fn select_advanced_outbounds(
         Ok(ranking)
     })();
 
+    // Preserve helper-Xray diagnostics on failure. Previously the log was
+    // deleted unconditionally, removing the only evidence about routing,
+    // DNS, TLS and outbound connection failures.
+    let result = match result {
+        Ok(ranking) => Ok(ranking),
+        Err(error) => {
+            match fs::read_to_string(&log_path) {
+                Ok(log) if !log.trim().is_empty() => Err(
+                    format!("{error}\nЖурнал вспомогательного Xray:\n{}", log.trim()).into()
+                ),
+                _ => Err(error),
+            }
+        }
+    };
     if let Err(error) = fs::remove_dir_all(&directory) {
         eprintln!("Не удалось удалить временный каталог {}: {error}", directory.display());
     }
@@ -407,6 +421,12 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return ProbeResult::Failure {
+            reason: curl_failure_reason("KeepAlive HEAD", &output.status, &stderr, &stdout),
+            http_code: 0,
+        };
+    }
     let rows: Vec<Vec<&str>> = stdout.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| line.split('\t').map(str::trim).collect())
@@ -421,6 +441,12 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     }
     let first_status = rows[0][1].parse::<u16>().unwrap_or(0);
     let second_status = rows[1][1].parse::<u16>().unwrap_or(0);
+    if first_status == 0 || second_status == 0 {
+        return ProbeResult::Failure {
+            reason: curl_failure_reason("KeepAlive HEAD (HTTP-ответ не получен)", &output.status, &stderr, &stdout),
+            http_code: 0,
+        };
+    }
     if first_status == 429 || second_status == 429 {
         return ProbeResult::Failure {
             reason: "HTTP 429 (ограничение тестового источника)".into(), http_code: 429
@@ -430,11 +456,6 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
         let status = if !(200..400).contains(&second_status) { second_status } else { first_status };
         return ProbeResult::Failure {
             reason: format!("HTTP {status} при HEAD-проверке"), http_code: status
-        };
-    }
-    if !output.status.success() {
-        return ProbeResult::Failure {
-            reason: format!("ошибка curl при пинге: {}", output.status), http_code: second_status
         };
     }
     let reused_connections = rows[1][2].parse::<u32>().unwrap_or(u32::MAX);
@@ -451,6 +472,27 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
         };
     }
     ProbeResult::Success { speed_mbps: 0.0, latency_ms: latency }
+}
+
+fn curl_failure_reason(
+    stage: &str,
+    status: &std::process::ExitStatus,
+    stderr: &str,
+    stdout: &str,
+) -> String {
+    let exit_code = status.code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| status.to_string());
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    let detail = if !stderr.is_empty() {
+        stderr.to_owned()
+    } else if !stdout.is_empty() {
+        format!("вывод curl: {stdout}")
+    } else {
+        "curl не сообщил дополнительную причину".to_owned()
+    };
+    format!("{stage}: curl завершился с кодом {exit_code}; {detail}")
 }
 
 fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
@@ -478,6 +520,12 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
         };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return ProbeResult::Failure {
+            reason: curl_failure_reason("Range-загрузка", &output.status, &stderr, &stdout),
+            http_code: 0,
+        };
+    }
     let fields: Vec<&str> = stdout.split('\t').map(str::trim).collect();
     if fields.len() != 4 {
         return ProbeResult::Failure {
@@ -489,14 +537,14 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let first_byte = fields[1].parse::<f64>().unwrap_or(0.0);
     let total = fields[2].parse::<f64>().unwrap_or(0.0);
     let http_code = fields[3].parse::<u16>().unwrap_or(0);
+    if http_code == 0 {
+        return ProbeResult::Failure {
+            reason: curl_failure_reason("Range-загрузка (HTTP-ответ не получен)", &output.status, &stderr, &stdout),
+            http_code: 0,
+        };
+    }
     if http_code != 206 {
         return ProbeResult::Failure { reason: format!("HTTP {http_code} (ожидался 206 Partial Content)"), http_code };
-    }
-    if !output.status.success() {
-        return ProbeResult::Failure {
-            reason: format!("ошибка curl: {}", output.status),
-            http_code,
-        };
     }
     if bytes != size {
         return ProbeResult::Failure {
@@ -552,9 +600,16 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
     for _ in 0..MAX_REQUESTS {
         command.arg(TEST_URL);
     }
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null())
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|error| format!("не удалось запустить curl: {error}"))?;
     let stdout = child.stdout.take().ok_or("не удалось открыть поток результатов curl")?;
+    let stderr = child.stderr.take().ok_or("не удалось открыть поток ошибок curl")?;
+    let stderr_reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut output = String::new();
+        let _ = reader.read_to_string(&mut output);
+        output
+    });
     let (sender, receiver) = mpsc::channel::<String>();
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -628,12 +683,31 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
     }
 
     let _ = child.kill();
-    let _ = child.wait();
+    let process_status = child.wait().ok();
     let _ = reader.join();
-
-    if let Some(reason) = failure { return Err(reason); }
+    let stderr = stderr_reader.join().unwrap_or_default();
+    
+    if let Some(reason) = failure {
+        let process = process_status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "статус процесса недоступен".to_owned());
+        let diagnostic = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; stderr curl: {}", stderr.trim())
+        };
+        return Err(format!("{reason}; curl: {process}{diagnostic}"));
+    }
     if samples.is_empty() {
-        return Err("не получено ни одного полного измерительного интервала после прогрева".into());
+        let process = process_status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "статус процесса недоступен".to_owned());
+        let diagnostic = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; stderr curl: {}", stderr.trim())
+        };
+        return Err(format!("не получено ни одного полного измерительного интервала после прогрева; curl: {process}{diagnostic}"));
     }
     let speed = median(&samples).ok_or("не удалось вычислить медиану скорости")?;
     Ok((speed, samples.len(), stable))
@@ -706,7 +780,29 @@ fn safe_config_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{median, robust_speed_score};
+    use super::{curl_failure_reason, median, robust_speed_score};
+    use std::process::Command;
+
+    #[test]
+    fn curl_failure_diagnostic_preserves_exit_code_and_stderr() {
+        let status = Command::new("sh").args(["-c", "exit 7"]).status().unwrap();
+        let message = curl_failure_reason(
+            "Range-загрузка",
+            &status,
+            "curl: (7) Failed to connect to 127.0.0.1",
+            "",
+        );
+        assert!(message.contains("кодом 7"), "{message}");
+        assert!(message.contains("Failed to connect"), "{message}");
+    }
+
+    #[test]
+    fn curl_failure_diagnostic_falls_back_to_captured_stdout() {
+        let status = Command::new("sh").args(["-c", "exit 28"]).status().unwrap();
+        let message = curl_failure_reason("HEAD", &status, "  ", "diagnostic marker");
+        assert!(message.contains("кодом 28"), "{message}");
+        assert!(message.contains("diagnostic marker"), "{message}");
+    }
 
     #[test]
     fn median_handles_odd_sample_count() {

@@ -17,24 +17,11 @@ const TEST_URL: &str = "https://speedtest.tele2.net/100MB.zip";
 const GLOBAL_DEADLINE: Duration = Duration::from_secs(60);
 const HELPER_START_LIMIT: Duration = Duration::from_secs(8);
 const STAGE1_TIMEOUT: Duration = Duration::from_millis(1200);
-const STAGE2_TIMEOUT: Duration = Duration::from_millis(1100);
-const STAGE3_TIMEOUT: Duration = Duration::from_millis(1100);
-const CONCURRENCY: usize = 6;
-const SHORTLIST_SIZE: usize = 8;
-const FINALISTS_SIZE: usize = 3;
-const STAGE3_ROUNDS: usize = 5;
 
 #[derive(Debug)]
 enum ProbeResult {
     Success { speed_mbps: f64, latency_ms: f64 },
     Failure { reason: String, http_code: u16 },
-}
-
-#[derive(Default)]
-struct Evidence {
-    successes: usize,
-    attempts: usize,
-    comparable_speeds: Vec<f64>,
 }
 
 /// Selects the best outbounds using repeated real throughput measurements.
@@ -151,13 +138,11 @@ pub(crate) fn select_advanced_outbounds(
         // Fast throughput screen, in groups of five. Ranking combines latency and speed.
         println!("\nЭТАП 2 — быстрый отсев всех узлов (256 КБ, до 5 одновременно).");
         let mut quick_speed: BTreeMap<String, f64> = BTreeMap::new();
-        let mut quick_attempts = 0usize;
         for (batch_index, batch) in ports.chunks(5).enumerate() {
             if Instant::now() >= deadline { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
             let results = run_parallel_batch(&batch_tags, batch, 256_000, STAGE1_TIMEOUT.min(remaining(deadline)));
             for (tag, result) in batch_tags.iter().zip(results) {
-                quick_attempts += 1;
                 match result {
                     ProbeResult::Success { speed_mbps, .. } => {
                         quick_speed.insert(tag.clone(), speed_mbps);
@@ -181,12 +166,8 @@ pub(crate) fn select_advanced_outbounds(
         let max_quick = quick_speed.values().copied().fold(0.0_f64, f64::max);
         let min_ping = initial_ping.values().copied().fold(f64::INFINITY, f64::min);
         let mut quick_rank: Vec<(String, f64)> = quick_speed.iter().map(|(tag, speed)| {
-            let speed_score = if max_quick > 0.0 { speed / max_quick } else { 0.0 };
             let latency = initial_ping.get(tag).copied().unwrap_or(min_ping * 3.0);
-            let ping_score = if latency.is_finite() && latency > 0.0 {
-                (min_ping / latency).clamp(0.0, 1.0)
-            } else { 0.0 };
-            (tag.clone(), speed_score * 70.0 + ping_score * 30.0)
+            (tag.clone(), combined_score(*speed, max_quick, latency, min_ping))
         }).collect();
         quick_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
         quick_rank.truncate(10);
@@ -228,12 +209,8 @@ pub(crate) fn select_advanced_outbounds(
         let min_short_ping = shortlist.iter().filter_map(|tag| initial_ping.get(tag).copied())
             .fold(f64::INFINITY, f64::min);
         let mut finalist_rank: Vec<(String, f64)> = large_speed.iter().map(|(tag, speed)| {
-            let speed_score = if max_large > 0.0 { speed / max_large } else { 0.0 };
             let latency = initial_ping.get(tag).copied().unwrap_or(min_short_ping * 3.0);
-            let ping_score = if latency.is_finite() && latency > 0.0 {
-                (min_short_ping / latency).clamp(0.0, 1.0)
-            } else { 0.0 };
-            (tag.clone(), speed_score * 70.0 + ping_score * 30.0)
+            (tag.clone(), combined_score(*speed, max_large, latency, min_short_ping))
         }).collect();
         finalist_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
         finalist_rank.truncate(3);
@@ -311,12 +288,8 @@ pub(crate) fn select_advanced_outbounds(
         let max_speed = speed_medians.values().copied().fold(0.0_f64, f64::max);
         let best_ping = final_ping.values().copied().fold(f64::INFINITY, f64::min);
         let mut ranking: Vec<(String, f64)> = speed_medians.iter().map(|(tag, speed)| {
-            let speed_score = if max_speed > 0.0 { speed / max_speed } else { 0.0 };
             let latency = final_ping.get(tag).copied().unwrap_or(best_ping * 2.0);
-            let ping_score = if latency.is_finite() && latency > 0.0 && best_ping.is_finite() {
-                (best_ping / latency).clamp(0.0, 1.0)
-            } else { 0.0 };
-            let score = speed_score * 70.0 + ping_score * 30.0;
+            let score = combined_score(*speed, max_speed, latency, best_ping);
             println!("  {tag}: медиана скорости {:.2} Мбит/с, пинг {:.1} мс, итог {:.1}/100",
                 speed, latency, score);
             (tag.clone(), score)
@@ -464,6 +437,17 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     ProbeResult::Success { speed_mbps: bytes as f64 * 8.0 / transfer / 1_000_000.0, latency_ms: first_byte * 1000.0 }
 }
 
+fn combined_score(speed: f64, max_speed: f64, latency_ms: f64, best_ping_ms: f64) -> f64 {
+    let speed_score = if max_speed.is_finite() && max_speed > 0.0 {
+        (speed / max_speed).clamp(0.0, 1.0)
+    } else { 0.0 };
+    let ping_score = if latency_ms.is_finite() && latency_ms > 0.0
+        && best_ping_ms.is_finite() && best_ping_ms > 0.0 {
+        (best_ping_ms / latency_ms).clamp(0.0, 1.0)
+    } else { 0.0 };
+    speed_score * 70.0 + ping_score * 30.0
+}
+
 fn median(values: &[f64]) -> Option<f64> {
     if values.is_empty() { return None; }
     let mut sorted = values.to_vec();
@@ -522,7 +506,7 @@ fn safe_config_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::median;
+    use super::{combined_score, median};
 
     #[test]
     fn median_handles_odd_sample_count() {
@@ -532,6 +516,12 @@ mod tests {
     #[test]
     fn median_averages_even_sample_count() {
         assert_eq!(median(&[30.0, 10.0]), Some(20.0));
+    }
+
+    #[test]
+    fn combined_score_uses_seventy_percent_speed_and_thirty_percent_ping() {
+        assert!((combined_score(50.0, 100.0, 20.0, 10.0) - 50.0).abs() < 0.001);
+        assert_eq!(combined_score(100.0, 100.0, 10.0, 10.0), 100.0);
     }
 
     #[test]

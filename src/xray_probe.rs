@@ -421,6 +421,12 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return ProbeResult::Failure {
+            reason: curl_failure_reason("KeepAlive HEAD", &output.status, &stderr, &stdout),
+            http_code: 0,
+        };
+    }
     let rows: Vec<Vec<&str>> = stdout.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| line.split('\t').map(str::trim).collect())
@@ -430,14 +436,6 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
             reason: if stderr.is_empty() {
                 format!("curl не вернул два результата KeepAlive: {}", stdout.trim())
             } else { stderr },
-            http_code: 0,
-        };
-    }
-    // A zero HTTP status means curl never received an HTTP response. Check the
-    // process result first: otherwise the useful curl exit code and stderr are lost.
-    if !output.status.success() {
-        return ProbeResult::Failure {
-            reason: curl_failure_reason("KeepAlive HEAD", &output.status, &stderr, &stdout),
             http_code: 0,
         };
     }
@@ -522,6 +520,12 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
         };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return ProbeResult::Failure {
+            reason: curl_failure_reason("Range-загрузка", &output.status, &stderr, &stdout),
+            http_code: 0,
+        };
+    }
     let fields: Vec<&str> = stdout.split('\t').map(str::trim).collect();
     if fields.len() != 4 {
         return ProbeResult::Failure {
@@ -533,14 +537,6 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let first_byte = fields[1].parse::<f64>().unwrap_or(0.0);
     let total = fields[2].parse::<f64>().unwrap_or(0.0);
     let http_code = fields[3].parse::<u16>().unwrap_or(0);
-    // Do not report "HTTP 0" as if it were an HTTP response. It means
-    // curl did not receive response headers; expose its exit status and stderr.
-    if !output.status.success() {
-        return ProbeResult::Failure {
-            reason: curl_failure_reason("Range-загрузка", &output.status, &stderr, &stdout),
-            http_code,
-        };
-    }
     if http_code == 0 {
         return ProbeResult::Failure {
             reason: curl_failure_reason("Range-загрузка (HTTP-ответ не получен)", &output.status, &stderr, &stdout),

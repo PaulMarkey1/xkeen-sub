@@ -205,8 +205,6 @@ pub(crate) fn select_advanced_outbounds(
         println!("\nЭТАП 4 — два последовательных контрольных раунда финалистов.");
         let mut final_samples: BTreeMap<String, Vec<f64>> = finalists.iter()
             .cloned().map(|tag| (tag, Vec::new())).collect();
-        let mut final_failures: BTreeMap<String, usize> = finalists.iter()
-            .cloned().map(|tag| (tag, 0)).collect();
         let total_checks = finalists.len().saturating_mul(2);
         let mut completed_checks = 0usize;
         for round in 0..2 {
@@ -227,7 +225,6 @@ pub(crate) fn select_advanced_outbounds(
                             speed, samples, if stable { ", стабильно" } else { "" });
                     }
                     Err(reason) => {
-                        *final_failures.get_mut(tag).unwrap() += 1;
                         println!("    {tag} — ошибка: {reason}");
                         if reason.contains("429") {
                             finish_child(&mut child);
@@ -243,7 +240,7 @@ pub(crate) fn select_advanced_outbounds(
         for tag in &finalists {
             let values = final_samples.get(tag).map(Vec::as_slice).unwrap_or(&[]);
             if values.is_empty() { continue; }
-            let score = robust_speed_score(values, 2)?;
+            let Some(score) = robust_speed_score(values, 2) else { continue; };
             let med = median(values).unwrap_or(0.0);
             let mad = median(&values.iter().map(|value| (value - med).abs()).collect::<Vec<_>>())
                 .unwrap_or(0.0);
@@ -259,7 +256,7 @@ pub(crate) fn select_advanced_outbounds(
 
         // Five-percent hysteresis: keep the current primary outbound if it is
         // still within 5% of the new best candidate.
-        if let Some(current) = current_primary_tag(documents) {
+        if let Some(current) = crate::current_connection::active_primary_tag() {
             if let (Some(best), Some(current_score)) = (
                 ranking.first().map(|item| item.1),
                 ranking.iter().find(|item| item.0 == current).map(|item| item.1),
@@ -291,18 +288,6 @@ pub(crate) fn select_advanced_outbounds(
     let _ = fs::remove_file(&log_path);
     println!("Общее время проверки: {:.2} с.", started.elapsed().as_secs_f64());
     result
-}
-
-fn current_primary_tag(documents: &[(String, Value)]) -> Option<String> {
-    documents.iter().find_map(|(_, document)| {
-        document.get("routing")?.get("balancers")?.as_array()?.iter().find_map(|balancer| {
-            if balancer.get("tag").and_then(Value::as_str)
-                != Some(crate::balancer::PROGRAM_BALANCER_TAG) {
-                return None;
-            }
-            balancer.get("selector")?.as_array()?.first()?.as_str().map(str::to_owned)
-        })
-    })
 }
 
 fn configure_probe_inbounds(
@@ -592,7 +577,9 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usiz
                     failure = Some("KeepAlive не сохранился между последовательными загрузками".into());
                     break;
                 }
+                let was_first_transfer = first_transfer;
                 first_transfer = false;
+                if was_first_transfer { continue; }
 
                 let transfer = total - first_byte;
                 if !transfer.is_finite() || transfer <= 0.0 { continue; }

@@ -15,11 +15,15 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
-const TEST_URL: &str = "https://speedtest.tele2.net/100MB.zip";
+const TEST_URL: &str = "https://speed.cloudflare.com/__down";
 const GLOBAL_DEADLINE: Duration = Duration::from_secs(60);
 const HELPER_START_LIMIT: Duration = Duration::from_secs(8);
 const STAGE1_TIMEOUT: Duration = Duration::from_millis(1600);
 const CURL_CONNECT_TIMEOUT: Duration = Duration::from_millis(1100);
+
+fn download_url(bytes: u64) -> String {
+    format!("{TEST_URL}?bytes={bytes}")
+}
 
 #[derive(Debug)]
 enum ProbeResult {
@@ -89,7 +93,7 @@ pub(crate) fn select_advanced_outbounds(
         println!("Общий лимит — 60 секунд. Рабочий Xray и рабочие конфигурации не изменяются.");
         println!("Точные замеры выполняются по одному подключению; соединение curl сохраняется между измерениями.");
 
-        // Stage 1: XKeen-UI DoubleKeepAlive ping, at most five nodes at once.
+        // Stage 1: Cloudflare zero-byte GET KeepAlive ping, at most five nodes at once.
         println!("\nЭТАП 1 — KeepAlive-пинг всех подключений, группы до 5.");
         let mut initial_ping: BTreeMap<String, f64> = BTreeMap::new();
         for (batch_index, batch) in ports.chunks(5).enumerate() {
@@ -394,22 +398,23 @@ fn run_parallel_ping_batch(
     })
 }
 
-/// Two HEAD requests run inside one curl process. curl's connection cache is shared
-/// between transfers, so the second request reuses the first request's TCP/TLS session.
-/// num_connects == 0 on transfer two is required; otherwise this was not KeepAlive.
+/// Two zero-byte Cloudflare download requests run inside one curl process.
+/// curl shares its connection cache between transfers; the second request must reuse
+/// the first request's TCP/TLS session (num_connects == 0).
 fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     let proxy = format!("http://127.0.0.1:{port}");
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
     let connect_timeout = timeout.min(CURL_CONNECT_TIMEOUT);
     let connect_arg = format!("{:.3}", connect_timeout.as_secs_f64());
+    let ping_url = download_url(0);
     let output = match Command::new(CURL_BIN)
         .args([
-            "--silent", "--show-error", "--http1.1", "--head",
+            "--silent", "--show-error", "--http1.1",
             "--proxy", &proxy,
             "--connect-timeout", &connect_arg, "--max-time", &timeout_arg,
             "--output", "/dev/null", "--write-out",
             "%{time_starttransfer}\\t%{http_code}\\t%{num_connects}\\n",
-            TEST_URL, TEST_URL,
+            &ping_url, &ping_url,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -424,7 +429,7 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if !output.status.success() {
         return ProbeResult::Failure {
-            reason: curl_failure_reason("KeepAlive HEAD", &output.status, &stderr, &stdout),
+            reason: curl_failure_reason("KeepAlive GET", &output.status, &stderr, &stdout),
             http_code: 0,
         };
     }
@@ -444,7 +449,7 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     let second_status = rows[1][1].parse::<u16>().unwrap_or(0);
     if first_status == 0 || second_status == 0 {
         return ProbeResult::Failure {
-            reason: curl_failure_reason("KeepAlive HEAD (HTTP-ответ не получен)", &output.status, &stderr, &stdout),
+            reason: curl_failure_reason("KeepAlive GET (HTTP-ответ не получен)", &output.status, &stderr, &stdout),
             http_code: 0,
         };
     }
@@ -456,7 +461,7 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     if !(200..400).contains(&first_status) || !(200..400).contains(&second_status) {
         let status = if !(200..400).contains(&second_status) { second_status } else { first_status };
         return ProbeResult::Failure {
-            reason: format!("HTTP {status} при HEAD-проверке"), http_code: status
+            reason: format!("HTTP {status} при KeepAlive-проверке"), http_code: status
         };
     }
     let reused_connections = rows[1][2].parse::<u32>().unwrap_or(u32::MAX);
@@ -501,16 +506,15 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
     let connect_timeout = timeout.min(CURL_CONNECT_TIMEOUT);
     let connect_arg = format!("{:.3}", connect_timeout.as_secs_f64());
-    let range_arg = format!("0-{}", size.saturating_sub(1));
+    let url = download_url(size);
     let output = match Command::new(CURL_BIN)
         .args([
             "--silent", "--show-error", "--proxy", &proxy,
             "--connect-timeout", &connect_arg, "--max-time", &timeout_arg,
-            "--range", &range_arg,
             "--output", "/dev/null", "--write-out",
             "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}",
         ])
-        .arg(TEST_URL)
+        .arg(&url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output() {
@@ -523,7 +527,7 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if !output.status.success() {
         return ProbeResult::Failure {
-            reason: curl_failure_reason("Range-загрузка", &output.status, &stderr, &stdout),
+            reason: curl_failure_reason("Загрузка Cloudflare", &output.status, &stderr, &stdout),
             http_code: 0,
         };
     }
@@ -544,8 +548,8 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
             http_code: 0,
         };
     }
-    if http_code != 206 {
-        return ProbeResult::Failure { reason: format!("HTTP {http_code} (ожидался 206 Partial Content)"), http_code };
+    if http_code != 200 {
+        return ProbeResult::Failure { reason: format!("HTTP {http_code} (ожидался 200 OK)"), http_code };
     }
     if bytes != size {
         return ProbeResult::Failure {
@@ -564,7 +568,7 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
 }
 
 
-/// Measures repeated fixed-size ranges in one curl process. The first 300 ms
+/// Measures repeated fixed-size Cloudflare downloads in one curl process. The first 300 ms
 /// are connection/download warm-up; subsequent ranges must reuse the same
 /// TCP/TLS connection. Sampling stops after two consecutive stable comparisons
 /// (<=15% difference) and never exceeds the caller's hard time budget.
@@ -586,20 +590,19 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
     let proxy = format!("http://127.0.0.1:{port}");
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
     let connect_arg = format!("{:.3}", timeout.min(CURL_CONNECT_TIMEOUT).as_secs_f64());
-    let range_arg = format!("0-{}", chunk_size - 1);
+    let url = download_url(chunk_size);
     let mut command = Command::new(CURL_BIN);
     command.args([
         "--silent", "--show-error", "--http1.1", "--no-buffer",
         "--proxy", &proxy,
         "--connect-timeout", &connect_arg,
         "--max-time", &timeout_arg,
-        "--range", &range_arg,
         "--output", "/dev/null",
         "--write-out",
         "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}\\t%{num_connects}\\n",
     ]);
     for _ in 0..MAX_REQUESTS {
-        command.arg(TEST_URL);
+        command.arg(&url);
     }
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|error| format!("не удалось запустить curl: {error}"))?;
@@ -646,8 +649,8 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
                     failure = Some("HTTP 429: тестовый источник ограничил запросы".into());
                     break;
                 }
-                if status != 206 || bytes != chunk_size {
-                    failure = Some(format!("неполный Range-ответ: HTTP {status}, {bytes}/{chunk_size} байт"));
+                if status != 200 || bytes != chunk_size {
+                    failure = Some(format!("неполная загрузка Cloudflare: HTTP {status}, {bytes}/{chunk_size} байт"));
                     break;
                 }
                 if !first_transfer && connections != 0 {

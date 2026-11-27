@@ -13,7 +13,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
-const TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=";
+const TEST_URL: &str = "https://fsn1-speed.hetzner.com/100MB.bin";
 const GLOBAL_DEADLINE: Duration = Duration::from_secs(60);
 const HELPER_START_LIMIT: Duration = Duration::from_secs(8);
 const STAGE1_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -102,6 +102,7 @@ pub(crate) fn select_advanced_outbounds(
         println!("Этап 1: два прохода по всем узлам, 256 КБ, до 6 параллельных проверок.");
         println!("Этап 2: до 8 кандидатов, по два замера 512 КБ.");
         println!("Этап 3: до 3 финалистов, пять последовательных раундов по 512 КБ.");
+        println!("Источник тестовых данных: файл Hetzner 100 MB (Range-запросы).");
         println!("Общий лимит — 60 секунд, включая запуск вспомогательного Xray.");
 
         let mut evidence: BTreeMap<String, Evidence> = tags.iter()
@@ -144,7 +145,7 @@ pub(crate) fn select_advanced_outbounds(
                             println!("  {tag} — {reason}");
                             if http_code == 429 {
                                 finish_child(&mut child);
-                                return Err("Cloudflare вернул HTTP 429; замеры остановлены, чтобы не усиливать ограничение запросов.".into());
+                                return Err("Тестовый сервер вернул HTTP 429; замеры остановлены, чтобы не усиливать ограничение.".into());
                             }
                         }
                     }
@@ -195,7 +196,7 @@ pub(crate) fn select_advanced_outbounds(
                         println!("  {tag}, замер {}/2 — {reason}", attempt + 1);
                         if http_code == 429 {
                             finish_child(&mut child);
-                            return Err("Cloudflare вернул HTTP 429; проверка остановлена.".into());
+                            return Err("Тестовый сервер вернул HTTP 429; проверка остановлена.".into());
                         }
                     }
                 }
@@ -352,14 +353,16 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
     let connect_timeout = timeout.min(Duration::from_millis(700));
     let connect_arg = format!("{:.3}", connect_timeout.as_secs_f64());
+    let range_arg = format!("0-{}", size.saturating_sub(1));
     let output = match Command::new(CURL_BIN)
         .args([
             "--silent", "--show-error", "--proxy", &proxy,
             "--connect-timeout", &connect_arg, "--max-time", &timeout_arg,
+            "--range", &range_arg,
             "--output", "/dev/null", "--write-out",
             "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}",
         ])
-        .arg(format!("{TEST_URL}{size}"))
+        .arg(TEST_URL)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output() {
@@ -381,8 +384,8 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let first_byte = fields[1].parse::<f64>().unwrap_or(0.0);
     let total = fields[2].parse::<f64>().unwrap_or(0.0);
     let http_code = fields[3].parse::<u16>().unwrap_or(0);
-    if http_code != 200 {
-        return ProbeResult::Failure { reason: format!("HTTP {http_code}"), http_code };
+    if http_code != 206 {
+        return ProbeResult::Failure { reason: format!("HTTP {http_code} (ожидался 206 Partial Content)"), http_code };
     }
     if !output.status.success() {
         return ProbeResult::Failure {

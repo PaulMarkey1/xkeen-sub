@@ -217,6 +217,7 @@ pub(crate) fn select_advanced_outbounds(
         }
 
         let mut stage_rank: Vec<(String, f64)> = stage_speed.iter()
+            .filter(|(_, values)| values.len() == DOWNLOAD_ROUNDS)
             .filter_map(|(tag, values)| median(values).map(|speed| (tag.clone(), speed)))
             .collect();
         stage_rank.sort_by(|a, b| b.1.total_cmp(&a.1));

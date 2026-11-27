@@ -180,7 +180,7 @@ pub(crate) fn select_advanced_outbounds(
             let available = remaining(deadline).saturating_sub(final_reserve);
             let fair_share = Duration::from_millis((available.as_millis() / left) as u64);
             let timeout = Duration::from_secs(3).min(fair_share);
-            if timeout < Duration::from_millis(650) {
+            if timeout < Duration::from_millis(1600) {
                 println!("  {tag} — пропущен: сохраняем время для финалистов.");
                 continue;
             }
@@ -223,7 +223,7 @@ pub(crate) fn select_advanced_outbounds(
         for round in 0..2 {
             println!("  Раунд {}/2", round + 1);
             for offset in 0..finalists.len() {
-                if remaining(deadline) < Duration::from_millis(650) { break; }
+                if remaining(deadline) < Duration::from_millis(1600) { break; }
                 let index = (offset + round) % finalists.len();
                 let tag = &finalists[index];
                 let checks_left = total_checks.saturating_sub(completed_checks).max(1) as u128;
@@ -521,6 +521,9 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
 /// TCP/TLS connection. Sampling stops after two consecutive stable comparisons
 /// (<=15% difference) and never exceeds the caller's hard time budget.
 fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps: f64) -> Result<(f64, usize, bool), String> {
+    if timeout < Duration::from_millis(1600) {
+        return Err("недостаточно времени для минимального окна замера 1,6 с".into());
+    }
     let chunk_size: u64 = if expected_speed_mbps < 10.0 {
         256_000
     } else if expected_speed_mbps < 100.0 {

@@ -406,7 +406,7 @@ fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     let rows: Vec<Vec<&str>> = stdout.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| line.split('\\t').map(str::trim).collect())
+        .map(|line| line.split('\t').map(str::trim).collect())
         .collect();
     if rows.len() != 2 || rows.iter().any(|row| row.len() != 3) {
         return ProbeResult::Failure {

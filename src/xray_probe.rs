@@ -176,9 +176,10 @@ pub(crate) fn select_advanced_outbounds(
         println!("\nЭТАП 4 — загрузка 10 МБ, блоки по 3, три раунда.");
         let mut stage_speed: BTreeMap<String, Vec<f64>> = candidates.iter()
             .cloned().map(|tag| (tag, Vec::new())).collect();
-        for round in 0..DOWNLOAD_ROUNDS {
-            println!("  Раунд {}/{}", round + 1, DOWNLOAD_ROUNDS);
-            for batch_tags in candidates.chunks(3) {
+        for batch_tags in candidates.chunks(3) {
+            println!("  Блок: {}", batch_tags.join(", "));
+            for round in 0..DOWNLOAD_ROUNDS {
+                println!("    Раунд {}/{}", round + 1, DOWNLOAD_ROUNDS);
                 if remaining(deadline).is_zero() { break; }
                 let batch_ports: Vec<u16> = batch_tags.iter().map(|tag| {
                     ports[tags.iter().position(|candidate| candidate == tag).unwrap()]
@@ -189,10 +190,10 @@ pub(crate) fn select_advanced_outbounds(
                     match result {
                         ProbeResult::Success { speed_mbps, .. } => {
                             stage_speed.get_mut(tag).unwrap().push(speed_mbps);
-                            println!("    {tag} — {:.2} Мбит/с", speed_mbps);
+                            println!("      {tag} — {:.2} Мбит/с", speed_mbps);
                         }
                         ProbeResult::Failure { reason, http_code } => {
-                            println!("    {tag} — замер не прошёл, повторяем один раз: {reason}");
+                            println!("      {tag} — замер не прошёл, повторяем один раз: {reason}");
                             if http_code == 429 {
                                 finish_child(&mut child);
                                 return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());
@@ -200,10 +201,10 @@ pub(crate) fn select_advanced_outbounds(
                             match measure_candidate(ports[tags.iter().position(|candidate| candidate == tag).unwrap()], DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT.min(remaining(deadline))) {
                                 ProbeResult::Success { speed_mbps, .. } => {
                                     stage_speed.get_mut(tag).unwrap().push(speed_mbps);
-                                    println!("    {tag} — повтор успешен: {:.2} Мбит/с", speed_mbps);
+                                    println!("      {tag} — повтор успешен: {:.2} Мбит/с", speed_mbps);
                                 }
                                 ProbeResult::Failure { reason, http_code } => {
-                                    println!("    {tag} — повтор тоже не прошёл: {reason}");
+                                    println!("      {tag} — повтор тоже не прошёл: {reason}");
                                     if http_code == 429 {
                                         finish_child(&mut child);
                                         return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());

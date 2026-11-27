@@ -631,17 +631,6 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usiz
     Ok((speed, samples.len(), stable))
 }
 
-fn combined_score(speed: f64, max_speed: f64, latency_ms: f64, best_ping_ms: f64) -> f64 {
-    let speed_score = if max_speed.is_finite() && max_speed > 0.0 {
-        (speed / max_speed).clamp(0.0, 1.0)
-    } else { 0.0 };
-    let ping_score = if latency_ms.is_finite() && latency_ms > 0.0
-        && best_ping_ms.is_finite() && best_ping_ms > 0.0 {
-        (best_ping_ms / latency_ms).clamp(0.0, 1.0)
-    } else { 0.0 };
-    speed_score * 70.0 + ping_score * 30.0
-}
-
 fn robust_speed_score(values: &[f64], attempts: usize) -> Option<f64> {
     let med = median(values)?;
     let deviations: Vec<f64> = values.iter().map(|value| (value - med).abs()).collect();

@@ -152,6 +152,19 @@ pub(crate) fn select_advanced_outbounds(
             .collect();
         quick_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
         quick_rank.truncate(8);
+        // Keep the currently active outbound in the exact-test shortlist when it
+        // passed the coarse screen, so the 5% hysteresis decision is evidence-based.
+        let active_tag = crate::current_connection::active_primary_tag();
+        if let Some(current) = active_tag.as_ref() {
+            if !quick_rank.iter().any(|item| &item.0 == current) {
+                if let Some(speed) = quick_speed.get(current) {
+                    if quick_rank.len() == 8 { quick_rank.pop(); }
+                    quick_rank.push((current.clone(), *speed));
+                    quick_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    println!("Текущее подключение {current} добавлено в точный тест для проверки гистерезиса.");
+                }
+            }
+        }
         let shortlist: Vec<String> = quick_rank.iter().map(|item| item.0.clone()).collect();
         println!("В точный замер проходят {} подключений: {}.",
             shortlist.len(), shortlist.join(", "));
@@ -256,7 +269,7 @@ pub(crate) fn select_advanced_outbounds(
 
         // Five-percent hysteresis: keep the current primary outbound if it is
         // still within 5% of the new best candidate.
-        if let Some(current) = crate::current_connection::active_primary_tag() {
+        if let Some(current) = active_tag {
             if let (Some(best), Some(current_score)) = (
                 ranking.first().map(|item| item.1),
                 ranking.iter().find(|item| item.0 == current).map(|item| item.1),
@@ -594,7 +607,7 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usiz
                     } else {
                         stable_pairs = 0;
                     }
-                    if started.elapsed() >= MIN_SAMPLE_TIME && stable_pairs >= 2 {
+                    if started.elapsed() >= MIN_SAMPLE_TIME && stable_pairs >= 1 {
                         stable = true;
                         break;
                     }

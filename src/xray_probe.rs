@@ -792,7 +792,7 @@ mod tests {
             "curl: (7) Failed to connect to 127.0.0.1",
             "",
         );
-        assert!(message.contains("код 7"), "{message}");
+        assert!(message.contains("кодом 7"), "{message}");
         assert!(message.contains("Failed to connect"), "{message}");
     }
 
@@ -800,7 +800,7 @@ mod tests {
     fn curl_failure_diagnostic_falls_back_to_captured_stdout() {
         let status = Command::new("sh").args(["-c", "exit 28"]).status().unwrap();
         let message = curl_failure_reason("HEAD", &status, "  ", "diagnostic marker");
-        assert!(message.contains("код 28"), "{message}");
+        assert!(message.contains("кодом 28"), "{message}");
         assert!(message.contains("diagnostic marker"), "{message}");
     }
 

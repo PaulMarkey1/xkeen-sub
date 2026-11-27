@@ -81,43 +81,25 @@ pub(crate) fn select_advanced_outbounds(
         }
 
         println!();
-        println!("Новый отбор: прогрев → пинг → быстрый отсев → 10 МБ → 3 финалиста.");
+        println!("Новый отбор: пинг KeepAlive → быстрый отсев → 10 МБ → 3 финалиста.");
         println!("Ограничение конкурентности: 5 на крупных пакетах; общий лимит 60 секунд.");
         println!("Источник: Tele2 Speedtest 100 MB, Range-запросы. Рабочие конфиги не меняются до результата.");
 
-        // One small warm-up request per node; results deliberately do not enter the score.
-        println!("\nЭТАП 0 — прогрев подключений (32 КБ, группы до 5).");
-        for (batch_index, batch) in ports.chunks(5).enumerate() {
-            if Instant::now() >= deadline { break; }
-            let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
-            let warm = run_parallel_batch(&batch_tags, batch, 32_000, STAGE1_TIMEOUT.min(remaining(deadline)));
-            for (tag, result) in batch_tags.iter().zip(warm) {
-                match result {
-                    ProbeResult::Success { .. } => println!("  {tag} — прогрето"),
-                    ProbeResult::Failure { reason, http_code } => {
-                        println!("  {tag} — прогрев пропущен: {reason}");
-                        if http_code == 429 {
-                            finish_child(&mut child);
-                            return Err("Тестовый источник ограничил запросы (HTTP 429) на прогреве. Текущие селекторы сохранены.".into());
-                        }
-                    }
-                }
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-
-        // Initial latency: one tiny request per node, in restrained batches.
-        println!("\nЭТАП 1 — первичный пинг всех подключений.");
+        // XKeen-UI DoubleKeepAlive: first HEAD establishes DNS/TCP/TLS and warms the
+        // connection; the second HEAD is timed on the same persistent connection.
+        println!("\nЭТАП 1 — пинг всех подключений (двойной HEAD + KeepAlive, группы до 5).");
         let mut initial_ping: BTreeMap<String, f64> = BTreeMap::new();
         for (batch_index, batch) in ports.chunks(5).enumerate() {
             if Instant::now() >= deadline { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
-            let results = run_parallel_batch(&batch_tags, batch, 32_000, STAGE1_TIMEOUT.min(remaining(deadline)));
+            let results = run_parallel_ping_batch(
+                &batch_tags, batch, STAGE1_TIMEOUT.min(remaining(deadline))
+            );
             for (tag, result) in batch_tags.iter().zip(results) {
                 match result {
                     ProbeResult::Success { latency_ms, .. } => {
                         initial_ping.insert(tag.clone(), latency_ms);
-                        println!("  {tag} — {:.1} мс", latency_ms);
+                        println!("  {tag} — {:.1} мс (KeepAlive)", latency_ms);
                     }
                     ProbeResult::Failure { reason, http_code } => {
                         println!("  {tag} — пинг не измерен: {reason}");
@@ -257,7 +239,7 @@ pub(crate) fn select_advanced_outbounds(
         let ping_ports: Vec<u16> = finalists.iter().filter_map(|tag|
             tags.iter().position(|candidate| candidate == tag).map(|index| ports[index])
         ).collect();
-        let ping_results = run_parallel_batch(&finalists, &ping_ports, 32_000, STAGE1_TIMEOUT.min(remaining(deadline)));
+        let ping_results = run_parallel_ping_batch(&finalists, &ping_ports, STAGE1_TIMEOUT.min(remaining(deadline)));
         let mut final_ping: BTreeMap<String, f64> = BTreeMap::new();
         for (tag, result) in finalists.iter().zip(ping_results) {
             match result {
@@ -374,6 +356,98 @@ fn run_parallel_batch(
             ProbeResult::Failure { reason: "поток проверки завершился аварийно".into(), http_code: 0 }
         })).collect()
     })
+}
+
+fn run_parallel_ping_batch(
+    tags: &[String],
+    ports: &[u16],
+    timeout: Duration,
+) -> Vec<ProbeResult> {
+    thread::scope(|scope| {
+        let handles: Vec<_> = tags.iter().zip(ports.iter()).map(|(tag, port)| {
+            scope.spawn(move || {
+                let _ = tag;
+                measure_ping_candidate(*port, timeout)
+            })
+        }).collect();
+        handles.into_iter().map(|handle| handle.join().unwrap_or_else(|_| {
+            ProbeResult::Failure { reason: "поток проверки пинга завершился аварийно".into(), http_code: 0 }
+        })).collect()
+    })
+}
+
+/// Two HEAD requests run inside one curl process. curl's connection cache is shared
+/// between transfers, so the second request reuses the first request's TCP/TLS session.
+/// num_connects == 0 on transfer two is required; otherwise this was not KeepAlive.
+fn measure_ping_candidate(port: u16, timeout: Duration) -> ProbeResult {
+    let proxy = format!("http://127.0.0.1:{port}");
+    let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
+    let connect_timeout = timeout.min(Duration::from_millis(700));
+    let connect_arg = format!("{:.3}", connect_timeout.as_secs_f64());
+    let output = match Command::new(CURL_BIN)
+        .args([
+            "--silent", "--show-error", "--http1.1", "--head",
+            "--proxy", &proxy,
+            "--connect-timeout", &connect_arg, "--max-time", &timeout_arg,
+            "--output", "/dev/null", "--write-out",
+            "%{time_starttransfer}\\t%{http_code}\\t%{num_connects}\\n",
+            TEST_URL, TEST_URL,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return ProbeResult::Failure {
+            reason: format!("не удалось запустить curl для пинга: {error}"), http_code: 0
+        },
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let rows: Vec<Vec<&str>> = stdout.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.split('\\t').map(str::trim).collect())
+        .collect();
+    if rows.len() != 2 || rows.iter().any(|row| row.len() != 3) {
+        return ProbeResult::Failure {
+            reason: if stderr.is_empty() {
+                format!("curl не вернул два результата KeepAlive: {}", stdout.trim())
+            } else { stderr },
+            http_code: 0,
+        };
+    }
+    let first_status = rows[0][1].parse::<u16>().unwrap_or(0);
+    let second_status = rows[1][1].parse::<u16>().unwrap_or(0);
+    if first_status == 429 || second_status == 429 {
+        return ProbeResult::Failure {
+            reason: "HTTP 429 (ограничение тестового источника)".into(), http_code: 429
+        };
+    }
+    if !(200..400).contains(&first_status) || !(200..400).contains(&second_status) {
+        let status = if !(200..400).contains(&second_status) { second_status } else { first_status };
+        return ProbeResult::Failure {
+            reason: format!("HTTP {status} при HEAD-проверке"), http_code: status
+        };
+    }
+    if !output.status.success() {
+        return ProbeResult::Failure {
+            reason: format!("ошибка curl при пинге: {}", output.status), http_code: second_status
+        };
+    }
+    let reused_connections = rows[1][2].parse::<u32>().unwrap_or(u32::MAX);
+    if reused_connections != 0 {
+        return ProbeResult::Failure {
+            reason: "сервер или прокси не сохранил KeepAlive-соединение".into(),
+            http_code: second_status,
+        };
+    }
+    let latency = rows[1][0].parse::<f64>().unwrap_or(f64::NAN) * 1000.0;
+    if !latency.is_finite() || latency <= 0.0 {
+        return ProbeResult::Failure {
+            reason: "некорректное время ответа KeepAlive".into(), http_code: second_status
+        };
+    }
+    ProbeResult::Success { speed_mbps: 0.0, latency_ms: latency }
 }
 
 fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {

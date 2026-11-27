@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::mpsc;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -600,9 +600,16 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
     for _ in 0..MAX_REQUESTS {
         command.arg(TEST_URL);
     }
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null())
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|error| format!("не удалось запустить curl: {error}"))?;
     let stdout = child.stdout.take().ok_or("не удалось открыть поток результатов curl")?;
+    let stderr = child.stderr.take().ok_or("не удалось открыть поток ошибок curl")?;
+    let stderr_reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut output = String::new();
+        let _ = reader.read_to_string(&mut output);
+        output
+    });
     let (sender, receiver) = mpsc::channel::<String>();
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -676,12 +683,31 @@ fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps:
     }
 
     let _ = child.kill();
-    let _ = child.wait();
+    let process_status = child.wait().ok();
     let _ = reader.join();
-
-    if let Some(reason) = failure { return Err(reason); }
+    let stderr = stderr_reader.join().unwrap_or_default();
+    
+    if let Some(reason) = failure {
+        let process = process_status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "статус процесса недоступен".to_owned());
+        let diagnostic = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; stderr curl: {}", stderr.trim())
+        };
+        return Err(format!("{reason}; curl: {process}{diagnostic}"));
+    }
     if samples.is_empty() {
-        return Err("не получено ни одного полного измерительного интервала после прогрева".into());
+        let process = process_status
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "статус процесса недоступен".to_owned());
+        let diagnostic = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; stderr curl: {}", stderr.trim())
+        };
+        return Err(format!("не получено ни одного полного измерительного интервала после прогрева; curl: {process}{diagnostic}"));
     }
     let speed = median(&samples).ok_or("не удалось вычислить медиану скорости")?;
     Ok((speed, samples.len(), stable))

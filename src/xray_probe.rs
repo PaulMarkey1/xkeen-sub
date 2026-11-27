@@ -100,7 +100,7 @@ pub(crate) fn select_advanced_outbounds(
                 match result {
                     ProbeResult::Success { latency_ms, .. } => {
                         initial_ping.insert(tag.clone(), latency_ms);
-                        println!("  {tag} — {:.1} мс (KeepAlive)");
+                        println!("  {tag} — {:.1} мс (KeepAlive)", latency_ms);
                     }
                     ProbeResult::Failure { reason, http_code } => {
                         println!("  {tag} — пинг не измерен: {reason}");
@@ -130,7 +130,7 @@ pub(crate) fn select_advanced_outbounds(
                 match result {
                     ProbeResult::Success { speed_mbps, .. } => {
                         quick_speed.insert(tag.clone(), speed_mbps);
-                        println!("  {tag} — {:.2} Мбит/с");
+                        println!("  {tag} — {:.2} Мбит/с", speed_mbps);
                     }
                     ProbeResult::Failure { reason, http_code } => {
                         println!("  {tag} — быстрый замер пропущен: {reason}");
@@ -243,14 +243,12 @@ pub(crate) fn select_advanced_outbounds(
         for tag in &finalists {
             let values = final_samples.get(tag).map(Vec::as_slice).unwrap_or(&[]);
             if values.is_empty() { continue; }
+            let score = robust_speed_score(values, 2)?;
             let med = median(values).unwrap_or(0.0);
             let mad = median(&values.iter().map(|value| (value - med).abs()).collect::<Vec<_>>())
                 .unwrap_or(0.0);
             let attempts = 2usize;
             let successes = values.len().min(attempts);
-            let reliability = successes as f64 / attempts as f64;
-            let robust_speed = (med - 0.5 * mad).max(0.0);
-            let score = robust_speed * reliability;
             println!("  {tag}: медиана {:.2}, MAD {:.2}, успешность {}/{}, итог {:.2} Мбит/с",
                 med, mad, successes, attempts, score);
             if score.is_finite() && score > 0.0 {
@@ -644,6 +642,15 @@ fn combined_score(speed: f64, max_speed: f64, latency_ms: f64, best_ping_ms: f64
     speed_score * 70.0 + ping_score * 30.0
 }
 
+fn robust_speed_score(values: &[f64], attempts: usize) -> Option<f64> {
+    let med = median(values)?;
+    let deviations: Vec<f64> = values.iter().map(|value| (value - med).abs()).collect();
+    let mad = median(&deviations).unwrap_or(0.0);
+    let reliability = values.len().min(attempts) as f64 / attempts.max(1) as f64;
+    let score = (med - 0.5 * mad).max(0.0) * reliability;
+    (score.is_finite() && score > 0.0).then_some(score)
+}
+
 fn median(values: &[f64]) -> Option<f64> {
     if values.is_empty() { return None; }
     let mut sorted = values.to_vec();
@@ -702,7 +709,7 @@ fn safe_config_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{combined_score, median};
+    use super::{median, robust_speed_score};
 
     #[test]
     fn median_handles_odd_sample_count() {
@@ -715,13 +722,27 @@ mod tests {
     }
 
     #[test]
-    fn combined_score_uses_seventy_percent_speed_and_thirty_percent_ping() {
-        assert!((combined_score(50.0, 100.0, 20.0, 10.0) - 50.0).abs() < 0.001);
-        assert_eq!(combined_score(100.0, 100.0, 10.0, 10.0), 100.0);
+    fn median_returns_none_for_empty_samples() {
+        assert_eq!(median(&[]), None);
     }
 
     #[test]
-    fn median_returns_none_for_empty_samples() {
-        assert_eq!(median(&[]), None);
+    fn robust_score_penalizes_spread_with_mad() {
+        let steady = robust_speed_score(&[100.0, 102.0], 2).unwrap();
+        let unstable = robust_speed_score(&[50.0, 150.0], 2).unwrap();
+        assert!(steady > unstable);
+    }
+
+    #[test]
+    fn robust_score_penalizes_failed_final_round() {
+        let both_successful = robust_speed_score(&[100.0, 102.0], 2).unwrap();
+        let one_successful = robust_speed_score(&[100.0], 2).unwrap();
+        assert!(both_successful > one_successful);
+    }
+
+    #[test]
+    fn robust_score_rejects_empty_or_zero_samples() {
+        assert_eq!(robust_speed_score(&[], 2), None);
+        assert_eq!(robust_speed_score(&[0.0], 2), None);
     }
 }

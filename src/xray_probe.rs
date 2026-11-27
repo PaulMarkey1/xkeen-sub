@@ -192,10 +192,23 @@ pub(crate) fn select_advanced_outbounds(
                             println!("    {tag} — {:.2} Мбит/с", speed_mbps);
                         }
                         ProbeResult::Failure { reason, http_code } => {
-                            println!("    {tag} — неудачный замер: {reason}");
+                            println!("    {tag} — замер не прошёл, повторяем один раз: {reason}");
                             if http_code == 429 {
                                 finish_child(&mut child);
                                 return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());
+                            }
+                            match measure_candidate(ports[tags.iter().position(|candidate| candidate == tag).unwrap()], DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT.min(remaining(deadline))) {
+                                ProbeResult::Success { speed_mbps, .. } => {
+                                    stage_speed.get_mut(tag).unwrap().push(speed_mbps);
+                                    println!("    {tag} — повтор успешен: {:.2} Мбит/с", speed_mbps);
+                                }
+                                ProbeResult::Failure { reason, http_code } => {
+                                    println!("    {tag} — повтор тоже не прошёл: {reason}");
+                                    if http_code == 429 {
+                                        finish_child(&mut child);
+                                        return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());
+                                    }
+                                }
                             }
                         }
                     }
@@ -247,10 +260,23 @@ pub(crate) fn select_advanced_outbounds(
                         println!("    {tag} — {:.2} Мбит/с", speed_mbps);
                     }
                     ProbeResult::Failure { reason, http_code } => {
-                        println!("    {tag} — неудачный замер: {reason}");
+                        println!("    {tag} — замер не прошёл, повторяем один раз: {reason}");
                         if http_code == 429 {
                             finish_child(&mut child);
                             return Err("Тестовый источник вернул HTTP 429 на финальном этапе; прежние селекторы сохранены.".into());
+                        }
+                        match measure_candidate(ports[tags.iter().position(|candidate| candidate == tag).unwrap()], DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT.min(remaining(deadline))) {
+                            ProbeResult::Success { speed_mbps, .. } => {
+                                final_speed.get_mut(tag).unwrap().push(speed_mbps);
+                                println!("    {tag} — повтор успешен: {:.2} Мбит/с", speed_mbps);
+                            }
+                            ProbeResult::Failure { reason, http_code } => {
+                                println!("    {tag} — повтор тоже не прошёл: {reason}");
+                                if http_code == 429 {
+                                    finish_child(&mut child);
+                                    return Err("Тестовый источник вернул HTTP 429 на финальном этапе; прежние селекторы сохранены.".into());
+                                }
+                            }
                         }
                     }
                 }

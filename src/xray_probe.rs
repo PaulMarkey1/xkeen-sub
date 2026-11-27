@@ -113,8 +113,7 @@ pub(crate) fn select_advanced_outbounds(
             }
         }
         if initial_ping.is_empty() {
-            finish_child(&mut child);
-            return Err("Не удалось измерить KeepAlive-пинг ни одного подключения; прежние селекторы сохранены.".into());
+            println!("  KeepAlive-пинг не получен ни для одного узла. Продолжаем: итоговый выбор основан на фактической скорости.");
         }
 
         // Stage 2: coarse speed screen in groups of five. Ping is diagnostic only;

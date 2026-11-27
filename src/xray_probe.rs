@@ -544,7 +544,7 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
     let http_code = fields[3].parse::<u16>().unwrap_or(0);
     if http_code == 0 {
         return ProbeResult::Failure {
-            reason: curl_failure_reason("Range-загрузка (HTTP-ответ не получен)", &output.status, &stderr, &stdout),
+            reason: curl_failure_reason("Загрузка Cloudflare (HTTP-ответ не получен)", &output.status, &stderr, &stdout),
             http_code: 0,
         };
     }
@@ -784,14 +784,20 @@ fn safe_config_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{curl_failure_reason, median, robust_speed_score};
+    use super::{curl_failure_reason, download_url, median, robust_speed_score};
     use std::process::Command;
+
+    #[test]
+    fn cloudflare_download_url_uses_requested_byte_count() {
+        assert_eq!(download_url(0), "https://speed.cloudflare.com/__down?bytes=0");
+        assert_eq!(download_url(256_000), "https://speed.cloudflare.com/__down?bytes=256000");
+    }
 
     #[test]
     fn curl_failure_diagnostic_preserves_exit_code_and_stderr() {
         let status = Command::new("sh").args(["-c", "exit 7"]).status().unwrap();
         let message = curl_failure_reason(
-            "Range-загрузка",
+            "Загрузка Cloudflare",
             &status,
             "curl: (7) Failed to connect to 127.0.0.1",
             "",

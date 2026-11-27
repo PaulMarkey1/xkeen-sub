@@ -241,7 +241,7 @@ pub(crate) fn select_advanced_outbounds(
                         println!("  {tag} — {reason}");
                         if http_code == 429 {
                             finish_child(&mut child);
-                            return Err("Cloudflare вернул HTTP 429; проверка остановлена.".into());
+                            return Err("Тестовый сервер вернул HTTP 429; проверка остановлена.".into());
                         }
                     }
                 }

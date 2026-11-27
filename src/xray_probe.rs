@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::{BufRead, BufReader};
+use std::sync::mpsc;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -32,6 +34,7 @@ pub(crate) fn select_advanced_outbounds(
     tags: &[String],
 ) -> AppResult<Vec<(String, f64)>> {
     let started = Instant::now();
+    let deadline = started + GLOBAL_DEADLINE;
     if tags.is_empty() {
         println!("Нет подключений для проверки.");
         return Ok(Vec::new());
@@ -39,7 +42,7 @@ pub(crate) fn select_advanced_outbounds(
     if !Path::new(ASSET_DIR).is_dir() {
         return Err(format!("Каталог данных Xray не найден: {ASSET_DIR}").into());
     }
-    let deadline = started + GLOBAL_DEADLINE;
+
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let directory = PathBuf::from("/opt/tmp").join(format!(
         "xkeen-sub-speed-{}-{nonce}", std::process::id()
@@ -81,212 +84,205 @@ pub(crate) fn select_advanced_outbounds(
         }
 
         println!();
-        println!("Новый отбор: пинг KeepAlive → быстрый отсев → 10 МБ → 3 финалиста.");
-        println!("Ограничение конкурентности: 5 на крупных пакетах; общий лимит 60 секунд.");
-        println!("Источник: Tele2 Speedtest 100 MB, Range-запросы. Рабочие конфиги не меняются до результата.");
+        println!("Алгоритм: KeepAlive-пинг → быстрый отсев → адаптивный последовательный замер → 3 финалиста.");
+        println!("Общий лимит — 60 секунд. Рабочий Xray и рабочие конфигурации не изменяются.");
+        println!("Точные замеры выполняются по одному подключению; соединение curl сохраняется между измерениями.");
 
-        // XKeen-UI DoubleKeepAlive: first HEAD establishes DNS/TCP/TLS and warms the
-        // connection; the second HEAD is timed on the same persistent connection.
-        println!("\nЭТАП 1 — пинг всех подключений (двойной HEAD + KeepAlive, группы до 5).");
+        // Stage 1: XKeen-UI DoubleKeepAlive ping, at most five nodes at once.
+        println!("\nЭТАП 1 — KeepAlive-пинг всех подключений, группы до 5.");
         let mut initial_ping: BTreeMap<String, f64> = BTreeMap::new();
         for (batch_index, batch) in ports.chunks(5).enumerate() {
-            if Instant::now() >= deadline { break; }
+            if remaining(deadline).is_zero() { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
-            let results = run_parallel_ping_batch(
-                &batch_tags, batch, STAGE1_TIMEOUT.min(remaining(deadline))
-            );
+            let timeout = STAGE1_TIMEOUT.min(remaining(deadline));
+            let results = run_parallel_ping_batch(&batch_tags, batch, timeout);
             for (tag, result) in batch_tags.iter().zip(results) {
                 match result {
                     ProbeResult::Success { latency_ms, .. } => {
                         initial_ping.insert(tag.clone(), latency_ms);
-                        println!("  {tag} — {:.1} мс (KeepAlive)", latency_ms);
+                        println!("  {tag} — {:.1} мс (KeepAlive)");
                     }
                     ProbeResult::Failure { reason, http_code } => {
                         println!("  {tag} — пинг не измерен: {reason}");
                         if http_code == 429 {
                             finish_child(&mut child);
-                            return Err("Тестовый источник ограничил запросы (HTTP 429) при пинге. Текущие селекторы сохранены.".into());
+                            return Err("Тестовый источник вернул HTTP 429. Прежние селекторы сохранены.".into());
                         }
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(250));
         }
         if initial_ping.is_empty() {
             finish_child(&mut child);
-            return Err("Не удалось получить достоверный пинг ни одного подключения; прежние селекторы сохранены.".into());
+            return Err("Не удалось измерить KeepAlive-пинг ни одного подключения; прежние селекторы сохранены.".into());
         }
 
-        // Fast throughput screen, in groups of five. Ranking combines latency and speed.
-        println!("\nЭТАП 2 — быстрый отсев всех узлов (256 КБ, до 5 одновременно).");
+        // Stage 2: coarse speed screen in groups of five. Ping is diagnostic only;
+        // it does not outweigh actual throughput in the final ranking.
+        println!("\nЭТАП 2 — быстрый отсев всех подключений (256 КБ, группы до 5).");
         let mut quick_speed: BTreeMap<String, f64> = BTreeMap::new();
         for (batch_index, batch) in ports.chunks(5).enumerate() {
-            if Instant::now() >= deadline { break; }
+            if remaining(deadline).is_zero() { break; }
             let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
-            let results = run_parallel_batch(&batch_tags, batch, 256_000, STAGE1_TIMEOUT.min(remaining(deadline)));
+            let timeout = STAGE1_TIMEOUT.min(remaining(deadline));
+            let results = run_parallel_batch(&batch_tags, batch, 256_000, timeout);
             for (tag, result) in batch_tags.iter().zip(results) {
                 match result {
                     ProbeResult::Success { speed_mbps, .. } => {
                         quick_speed.insert(tag.clone(), speed_mbps);
-                        println!("  {tag} — {:.2} Мбит/с", speed_mbps);
+                        println!("  {tag} — {:.2} Мбит/с");
                     }
                     ProbeResult::Failure { reason, http_code } => {
-                        println!("  {tag} — {reason}");
+                        println!("  {tag} — быстрый замер пропущен: {reason}");
                         if http_code == 429 {
                             finish_child(&mut child);
-                            return Err("Тестовый источник вернул HTTP 429 на быстром отсеве. Текущие селекторы сохранены.".into());
+                            return Err("Тестовый источник вернул HTTP 429 на быстром отсеве. Прежние селекторы сохранены.".into());
                         }
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(300));
         }
         if quick_speed.is_empty() {
             finish_child(&mut child);
             return Err("Быстрый отсев не дал успешных измерений; прежние селекторы сохранены.".into());
         }
-        let max_quick = quick_speed.values().copied().fold(0.0_f64, f64::max);
-        let min_ping = initial_ping.values().copied().fold(f64::INFINITY, f64::min);
-        let mut quick_rank: Vec<(String, f64)> = quick_speed.iter().map(|(tag, speed)| {
-            let latency = initial_ping.get(tag).copied().unwrap_or(min_ping * 3.0);
-            (tag.clone(), combined_score(*speed, max_quick, latency, min_ping))
-        }).collect();
-        quick_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
-        quick_rank.truncate(10);
-        let shortlist: Vec<String> = quick_rank.iter().map(|item| item.0.clone()).collect();
-        println!("В следующий этап проходят {} узлов: {}", shortlist.len(), shortlist.join(", "));
 
-        // Stage 3: a single 10 MB transfer for each of the ten nodes, batches of five.
-        println!("\nЭТАП 3 — по 10 МБ на узел, пакеты по 5 подключений.");
-        let mut large_speed: BTreeMap<String, f64> = BTreeMap::new();
-        for batch in shortlist.chunks(5) {
-            if Instant::now() >= deadline { break; }
-            let batch_ports: Vec<u16> = batch.iter().filter_map(|tag|
-                tags.iter().position(|candidate| candidate == tag).map(|index| ports[index])
-            ).collect();
-            let results = run_parallel_batch(batch, &batch_ports, 10_000_000, Duration::from_secs(8).min(remaining(deadline)));
-            for (tag, result) in batch.iter().zip(results) {
-                match result {
-                    ProbeResult::Success { speed_mbps, .. } => {
-                        large_speed.insert(tag.clone(), speed_mbps);
-                        println!("  {tag} — {:.2} Мбит/с (10 МБ)", speed_mbps);
-                    }
-                    ProbeResult::Failure { reason, http_code } => {
-                        println!("  {tag} — замер 10 МБ не прошёл: {reason}");
-                        if http_code == 429 {
-                            finish_child(&mut child);
-                            return Err("Тестовый источник вернул HTTP 429 на замере 10 МБ. Текущие селекторы сохранены.".into());
-                        }
+        let mut quick_rank: Vec<(String, f64)> = quick_speed.iter()
+            .map(|(tag, speed)| (tag.clone(), *speed))
+            .collect();
+        quick_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
+        quick_rank.truncate(8);
+        let shortlist: Vec<String> = quick_rank.iter().map(|item| item.0.clone()).collect();
+        println!("В точный замер проходят {} подключений: {}.",
+            shortlist.len(), shortlist.join(", "));
+
+        // Stage 3: adaptive tests, strictly one node at a time.
+        // Each candidate gets up to 3 seconds, but reserve enough time for two
+        // sequential final rounds on the three finalists.
+        println!("\nЭТАП 3 — адаптивный замер топ-8 (последовательно, до 3 секунд на узел).");
+        let final_reserve = Duration::from_secs(18);
+        let mut coarse_results: BTreeMap<String, f64> = BTreeMap::new();
+        for (index, tag) in shortlist.iter().enumerate() {
+            let left = shortlist.len().saturating_sub(index).max(1) as u128;
+            let available = remaining(deadline).saturating_sub(final_reserve);
+            let fair_share = Duration::from_millis((available.as_millis() / left) as u64);
+            let timeout = Duration::from_secs(3).min(fair_share);
+            if timeout < Duration::from_millis(650) {
+                println!("  {tag} — пропущен: сохраняем время для финалистов.");
+                continue;
+            }
+            let port = ports[tags.iter().position(|candidate| candidate == tag).unwrap()];
+            match measure_adaptive_candidate(port, timeout) {
+                Ok((speed, samples, stable)) => {
+                    coarse_results.insert(tag.clone(), speed);
+                    println!("  {tag} — {:.2} Мбит/с, {} интервалов{}",
+                        speed, samples, if stable { ", скорость стабилизировалась" } else { ", без стабилизации" });
+                }
+                Err(reason) => {
+                    println!("  {tag} — точный замер не прошёл: {reason}");
+                    if reason.contains("429") {
+                        finish_child(&mut child);
+                        return Err("Тестовый источник ограничил запросы (HTTP 429). Прежние селекторы сохранены.".into());
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(400));
         }
-        if large_speed.is_empty() {
+        if coarse_results.is_empty() {
             finish_child(&mut child);
-            return Err("Не удалось измерить скорость на 10 МБ; прежние селекторы сохранены.".into());
+            return Err("Не осталось подключений с успешным адаптивным замером; прежние селекторы сохранены.".into());
         }
 
-        let max_large = large_speed.values().copied().fold(0.0_f64, f64::max);
-        let min_short_ping = shortlist.iter().filter_map(|tag| initial_ping.get(tag).copied())
-            .fold(f64::INFINITY, f64::min);
-        let mut finalist_rank: Vec<(String, f64)> = large_speed.iter().map(|(tag, speed)| {
-            let latency = initial_ping.get(tag).copied().unwrap_or(min_short_ping * 3.0);
-            (tag.clone(), combined_score(*speed, max_large, latency, min_short_ping))
-        }).collect();
-        finalist_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
-        finalist_rank.truncate(3);
-        let finalists: Vec<String> = finalist_rank.iter().map(|item| item.0.clone()).collect();
-        println!("Финалисты: {}", finalists.join(", "));
-        if finalists.is_empty() {
-            finish_child(&mut child);
-            return Err("После замеров 10 МБ не осталось финалистов; прежние селекторы сохранены.".into());
-        }
+        let mut finalists_rank: Vec<(String, f64)> = coarse_results.iter()
+            .map(|(tag, speed)| (tag.clone(), *speed))
+            .collect();
+        finalists_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
+        finalists_rank.truncate(3);
+        let finalists: Vec<String> = finalists_rank.iter().map(|item| item.0.clone()).collect();
+        println!("\nФИНАЛИСТЫ: {}", finalists.join(", "));
 
-        // Three simultaneous 10 MB rounds, rotating the order to reduce systematic bias.
-        println!("\nЭТАП 4 — три раунда по 10 МБ, одновременно 3 финалиста.");
+        // Stage 4: two sequential final rounds, rotating the order to remove
+        // a fixed first/last-candidate advantage.
+        println!("\nЭТАП 4 — два последовательных контрольных раунда финалистов.");
         let mut final_samples: BTreeMap<String, Vec<f64>> = finalists.iter()
             .cloned().map(|tag| (tag, Vec::new())).collect();
-        for round in 0..3 {
-            if Instant::now() >= deadline { break; }
-            println!("  Раунд {}/3", round + 1);
-            let order: Vec<String> = (0..finalists.len())
-                .map(|offset| finalists[(round + offset) % finalists.len()].clone()).collect();
-            let batch_ports: Vec<u16> = order.iter().filter_map(|tag|
-                tags.iter().position(|candidate| candidate == tag).map(|index| ports[index])
-            ).collect();
-            let results = run_parallel_batch(&order, &batch_ports, 10_000_000, Duration::from_secs(8).min(remaining(deadline)));
-            for (tag, result) in order.iter().zip(results) {
-                match result {
-                    ProbeResult::Success { speed_mbps, .. } => {
-                        final_samples.get_mut(tag).expect("sample vector exists").push(speed_mbps);
-                        println!("    {tag} — {:.2} Мбит/с", speed_mbps);
+        let mut final_failures: BTreeMap<String, usize> = finalists.iter()
+            .cloned().map(|tag| (tag, 0)).collect();
+        let total_checks = finalists.len().saturating_mul(2);
+        let mut completed_checks = 0usize;
+        for round in 0..2 {
+            println!("  Раунд {}/2", round + 1);
+            for offset in 0..finalists.len() {
+                if remaining(deadline) < Duration::from_millis(650) { break; }
+                let index = (offset + round) % finalists.len();
+                let tag = &finalists[index];
+                let checks_left = total_checks.saturating_sub(completed_checks).max(1) as u128;
+                let fair_share = Duration::from_millis((remaining(deadline).as_millis() / checks_left) as u64);
+                let timeout = Duration::from_secs(3).min(fair_share);
+                if timeout < Duration::from_millis(650) { break; }
+                let port = ports[tags.iter().position(|candidate| candidate == tag).unwrap()];
+                match measure_adaptive_candidate(port, timeout) {
+                    Ok((speed, samples, stable)) => {
+                        final_samples.get_mut(tag).unwrap().push(speed);
+                        println!("    {tag} — {:.2} Мбит/с ({} интервалов{})",
+                            speed, samples, if stable { ", стабильно" } else { "" });
                     }
-                    ProbeResult::Failure { reason, http_code } => {
-                        println!("    {tag} — {reason}");
-                        if http_code == 429 {
+                    Err(reason) => {
+                        *final_failures.get_mut(tag).unwrap() += 1;
+                        println!("    {tag} — ошибка: {reason}");
+                        if reason.contains("429") {
                             finish_child(&mut child);
-                            return Err("Тестовый источник вернул HTTP 429 на финальном этапе. Текущие селекторы сохранены.".into());
+                            return Err("Тестовый источник вернул HTTP 429 на финальном этапе. Прежние селекторы сохранены.".into());
                         }
                     }
                 }
+                completed_checks += 1;
             }
-            thread::sleep(Duration::from_millis(350));
         }
 
-        // Final latency check after sustained transfers; use a single tiny request per finalist.
-        println!("\nЭТАП 5 — повторный пинг финалистов после нагрузки.");
-        let ping_ports: Vec<u16> = finalists.iter().filter_map(|tag|
-            tags.iter().position(|candidate| candidate == tag).map(|index| ports[index])
-        ).collect();
-        let ping_results = run_parallel_ping_batch(&finalists, &ping_ports, STAGE1_TIMEOUT.min(remaining(deadline)));
-        let mut final_ping: BTreeMap<String, f64> = BTreeMap::new();
-        for (tag, result) in finalists.iter().zip(ping_results) {
-            match result {
-                ProbeResult::Success { latency_ms, .. } => {
-                    final_ping.insert(tag.clone(), latency_ms);
-                    println!("  {tag} — {:.1} мс", latency_ms);
-                }
-                ProbeResult::Failure { reason, http_code } => {
-                    println!("  {tag} — финальный пинг недоступен: {reason}");
-                    if http_code == 429 {
-                        finish_child(&mut child);
-                        return Err("Тестовый источник ограничил финальный пинг (HTTP 429). Текущие селекторы сохранены.".into());
+        let mut ranking: Vec<(String, f64)> = Vec::new();
+        for tag in &finalists {
+            let values = final_samples.get(tag).map(Vec::as_slice).unwrap_or(&[]);
+            if values.is_empty() { continue; }
+            let med = median(values).unwrap_or(0.0);
+            let mad = median(&values.iter().map(|value| (value - med).abs()).collect::<Vec<_>>())
+                .unwrap_or(0.0);
+            let attempts = 2usize;
+            let successes = values.len().min(attempts);
+            let reliability = successes as f64 / attempts as f64;
+            let robust_speed = (med - 0.5 * mad).max(0.0);
+            let score = robust_speed * reliability;
+            println!("  {tag}: медиана {:.2}, MAD {:.2}, успешность {}/{}, итог {:.2} Мбит/с",
+                med, mad, successes, attempts, score);
+            if score.is_finite() && score > 0.0 {
+                ranking.push((tag.clone(), score));
+            }
+        }
+        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        // Five-percent hysteresis: keep the current primary outbound if it is
+        // still within 5% of the new best candidate.
+        if let Some(current) = current_primary_tag(documents) {
+            if let (Some(best), Some(current_score)) = (
+                ranking.first().map(|item| item.1),
+                ranking.iter().find(|item| item.0 == current).map(|item| item.1),
+            ) {
+                if current_score >= best * 0.95 {
+                    if let Some(position) = ranking.iter().position(|item| item.0 == current) {
+                        let item = ranking.remove(position);
+                        ranking.insert(0, item);
+                        println!("Гистерезис 5%: сохраняем текущее подключение {current}.");
                     }
                 }
             }
         }
 
-        let mut speed_medians: BTreeMap<String, f64> = BTreeMap::new();
-        for tag in &finalists {
-            if let Some(value) = median(final_samples.get(tag).map(Vec::as_slice).unwrap_or(&[])) {
-                speed_medians.insert(tag.clone(), value);
-            }
-        }
-        if speed_medians.is_empty() {
-            finish_child(&mut child);
-            return Err("Финальные измерения скорости не завершились успешно; прежние селекторы сохранены.".into());
-        }
-        let max_speed = speed_medians.values().copied().fold(0.0_f64, f64::max);
-        let best_ping = final_ping.values().copied().fold(f64::INFINITY, f64::min);
-        let mut ranking: Vec<(String, f64)> = speed_medians.iter().map(|(tag, speed)| {
-            let latency = final_ping.get(tag).copied().unwrap_or(best_ping * 2.0);
-            let score = combined_score(*speed, max_speed, latency, best_ping);
-            println!("  {tag}: медиана скорости {:.2} Мбит/с, пинг {:.1} мс, итог {:.1}/100",
-                speed, latency, score);
-            (tag.clone(), score)
-        }).collect();
-        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
         finish_child(&mut child);
         if ranking.is_empty() {
-            return Err("Итоговый рейтинг пуст; прежние селекторы сохранены.".into());
+            return Err("Финальные замеры не дали надёжного результата; прежние селекторы сохранены.".into());
         }
-        if Instant::now() >= deadline {
-            println!("Предупреждение: общий лимит 60 секунд достигнут; учтены только завершённые проверки.");
-        }
-        println!("\nИТОГОВЫЙ РЕЙТИНГ (скорость 70%, пинг 30%):");
+        println!("\nИТОГОВЫЙ РЕЙТИНГ (медиана − 0,5 × MAD, с поправкой на успешность):");
         for (index, (tag, score)) in ranking.iter().enumerate() {
-            println!("  {}. {} — {:.1}/100", index + 1, tag, score);
+            println!("  {}. {} — {:.2} Мбит/с", index + 1, tag, score);
         }
         Ok(ranking)
     })();
@@ -297,6 +293,18 @@ pub(crate) fn select_advanced_outbounds(
     let _ = fs::remove_file(&log_path);
     println!("Общее время проверки: {:.2} с.", started.elapsed().as_secs_f64());
     result
+}
+
+fn current_primary_tag(documents: &[(String, Value)]) -> Option<String> {
+    documents.iter().find_map(|(_, document)| {
+        document.get("routing")?.get("balancers")?.as_array()?.iter().find_map(|balancer| {
+            if balancer.get("tag").and_then(Value::as_str)
+                != Some(crate::balancer::PROGRAM_BALANCER_TAG) {
+                return None;
+            }
+            balancer.get("selector")?.as_array()?.first()?.as_str().map(str::to_owned)
+        })
+    })
 }
 
 fn configure_probe_inbounds(
@@ -509,6 +517,120 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
         };
     }
     ProbeResult::Success { speed_mbps: bytes as f64 * 8.0 / transfer / 1_000_000.0, latency_ms: first_byte * 1000.0 }
+}
+
+
+/// Measures repeated fixed-size ranges in one curl process. The first 300 ms
+/// are connection/download warm-up; subsequent ranges must reuse the same
+/// TCP/TLS connection. Sampling stops after two consecutive stable comparisons
+/// (<=15% difference) and never exceeds the caller's hard time budget.
+fn measure_adaptive_candidate(port: u16, timeout: Duration) -> Result<(f64, usize, bool), String> {
+    const CHUNK_SIZE: u64 = 1_000_000;
+    const WARMUP: Duration = Duration::from_millis(300);
+    const MIN_SAMPLE_TIME: Duration = Duration::from_millis(1600);
+    const MAX_REQUESTS: usize = 256;
+
+    let proxy = format!("http://127.0.0.1:{port}");
+    let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
+    let connect_arg = format!("{:.3}", timeout.min(Duration::from_millis(900)).as_secs_f64());
+    let range_arg = format!("0-{}", CHUNK_SIZE - 1);
+    let mut command = Command::new(CURL_BIN);
+    command.args([
+        "--silent", "--show-error", "--http1.1", "--no-buffer",
+        "--proxy", &proxy,
+        "--connect-timeout", &connect_arg,
+        "--max-time", &timeout_arg,
+        "--range", &range_arg,
+        "--output", "/dev/null",
+        "--write-out",
+        "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}\\t%{num_connects}\\n",
+    ]);
+    for _ in 0..MAX_REQUESTS {
+        command.arg(TEST_URL);
+    }
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|error| format!("не удалось запустить curl: {error}"))?;
+    let stdout = child.stdout.take().ok_or("не удалось открыть поток результатов curl")?;
+    let (sender, receiver) = mpsc::channel::<String>();
+    let reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => if sender.send(line).is_err() { break; },
+            }
+        }
+    });
+
+    let started = Instant::now();
+    let mut samples = Vec::new();
+    let mut previous: Option<f64> = None;
+    let mut stable_pairs = 0usize;
+    let mut stable = false;
+    let mut first_transfer = true;
+    let mut failure: Option<String> = None;
+
+    while started.elapsed() < timeout {
+        match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(line) => {
+                let fields: Vec<&str> = line.trim().split('\t').collect();
+                if fields.len() != 5 { continue; }
+                let bytes = fields[0].parse::<u64>().unwrap_or(0);
+                let first_byte = fields[1].parse::<f64>().unwrap_or(0.0);
+                let total = fields[2].parse::<f64>().unwrap_or(0.0);
+                let status = fields[3].parse::<u16>().unwrap_or(0);
+                let connections = fields[4].parse::<u32>().unwrap_or(u32::MAX);
+
+                if status == 429 {
+                    failure = Some("HTTP 429: тестовый источник ограничил запросы".into());
+                    break;
+                }
+                if status != 206 || bytes != CHUNK_SIZE {
+                    failure = Some(format!("неполный Range-ответ: HTTP {status}, {bytes}/{CHUNK_SIZE} байт"));
+                    break;
+                }
+                if !first_transfer && connections != 0 {
+                    failure = Some("KeepAlive не сохранился между последовательными загрузками".into());
+                    break;
+                }
+                first_transfer = false;
+
+                let transfer = total - first_byte;
+                if !transfer.is_finite() || transfer <= 0.0 { continue; }
+                let speed = bytes as f64 * 8.0 / transfer / 1_000_000.0;
+                if started.elapsed() < WARMUP { continue; }
+                samples.push(speed);
+
+                if let Some(last) = previous {
+                    let relative_delta = (speed - last).abs() / last.max(speed).max(0.001);
+                    if relative_delta <= 0.15 {
+                        stable_pairs += 1;
+                    } else {
+                        stable_pairs = 0;
+                    }
+                    if started.elapsed() >= MIN_SAMPLE_TIME && stable_pairs >= 2 {
+                        stable = true;
+                        break;
+                    }
+                }
+                previous = Some(speed);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+
+    if let Some(reason) = failure { return Err(reason); }
+    if samples.is_empty() {
+        return Err("не получено ни одного полного измерительного интервала после прогрева".into());
+    }
+    let speed = median(&samples).ok_or("не удалось вычислить медиану скорости")?;
+    Ok((speed, samples.len(), stable))
 }
 
 fn combined_score(speed: f64, max_speed: f64, latency_ms: f64, best_ping_ms: f64) -> f64 {

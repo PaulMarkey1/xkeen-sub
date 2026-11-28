@@ -186,8 +186,40 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
 }
 
 fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String], api_port: u16) -> AppResult<()> {
+    // Older xkeen-sub installations may not have an API section at all.
+    // The probe runs from an isolated temporary config directory, so provide
+    // a complete API endpoint there without modifying the user's live files.
+    if !documents.iter().any(|(_, value)| value.get("api").is_some()) {
+        documents.push((
+            "xkeen-sub-probe-api.json".to_owned(),
+            json!({
+                "api": {
+                    "tag": "api",
+                    "services": ["ObservatoryService"]
+                },
+                "inbounds": [{
+                    "tag": "api",
+                    "listen": "127.0.0.1",
+                    "port": api_port,
+                    "protocol": "dokodemo-door",
+                    "settings": {"address": "127.0.0.1"}
+                }],
+                "outbounds": [{
+                    "tag": "api",
+                    "protocol": "freedom"
+                }],
+                "routing": {
+                    "rules": [{
+                        "type": "field",
+                        "inboundTag": ["api"],
+                        "outboundTag": "api"
+                    }]
+                }
+            }),
+        ));
+    }
     let api_index = documents.iter().position(|(_, value)| value.get("api").is_some())
-        .ok_or("В конфигурации Xray не найден объект api.")?;
+        .ok_or("Не удалось подготовить API для вспомогательного Xray.")?;
 
     {
         let api = documents[api_index].1.get_mut("api")

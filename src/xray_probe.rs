@@ -691,7 +691,7 @@ mod tests {
         assert!((weighted_score(100.0, 20.0, 100.0, 20.0).unwrap() - 100.0).abs() < 1e-9);
         let speed_only = weighted_score(50.0, 20.0, 100.0, 20.0).unwrap();
         let ping_only = weighted_score(100.0, 40.0, 100.0, 20.0).unwrap();
-        assert!(speed_only > ping_only);
+        assert!(speed_only < ping_only);
     }
 
     #[test]

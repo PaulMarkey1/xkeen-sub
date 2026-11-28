@@ -261,6 +261,11 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
     let api_tag = existing_api_tag
         .or_else(|| inbound_tags.iter().find(|tag| tag.as_str() == "api").cloned())
         .unwrap_or_else(|| unique_tag("xkeen-sub-api", &inbound_tags));
+    let effective_api_port = if isolated {
+        api_port
+    } else {
+        available_config_port(documents, api_port, &api_tag)
+    };
     documents[api_index].1["api"]["tag"] = Value::String(api_tag.clone());
 
     let services = documents[api_index].1["api"].get_mut("services")
@@ -296,7 +301,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
                 object.insert("settings".to_owned(), json!({"address":"127.0.0.1"}));
                 if isolated {
                     object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
-                    object.insert("port".to_owned(), json!(api_port));
+                    object.insert("port".to_owned(), json!(effective_api_port));
                 } else {
                     if object.get("listen").and_then(Value::as_str).is_none() {
                         object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
@@ -333,7 +338,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
         inbounds.push(json!({
             "tag": api_tag,
             "listen": "127.0.0.1",
-            "port": api_port,
+            "port": effective_api_port,
             "protocol": "dokodemo-door",
             "settings": {"address":"127.0.0.1"}
         }));
@@ -408,6 +413,20 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
         }
     }
     Ok(())
+}
+
+fn available_config_port(documents: &[(String, Value)], preferred: u16, api_tag: &str) -> u16 {
+    let used: Vec<u16> = documents.iter()
+        .filter_map(|(_, doc)| doc.get("inbounds").and_then(Value::as_array))
+        .flatten()
+        .filter(|inbound| inbound.get("tag").and_then(Value::as_str) != Some(api_tag))
+        .filter_map(|inbound| inbound.get("port").and_then(Value::as_u64))
+        .filter_map(|port| u16::try_from(port).ok())
+        .collect();
+    if !used.contains(&preferred) {
+        return preferred;
+    }
+    (10085..=20000).find(|port| !used.contains(port)).unwrap_or(preferred)
 }
 
 fn unique_tag(base: &str, existing: &[String]) -> String {

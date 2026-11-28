@@ -633,7 +633,7 @@ mod api_tests {
             .map(|items| items.iter().any(|item| item["tag"] == tag && item["port"] == 10085))
             .unwrap_or(false)));
         assert!(docs.iter().any(|(_, value)| value.get("outbounds").and_then(Value::as_array)
-            .map(|items| items.iter().any(|item| item["tag"] == "xkeen-sub-api-out" && item["protocol"] == "freedom"))
+            .map(|items| items.iter().any(|item| item["tag"] == tag && item["protocol"] == "freedom"))
             .unwrap_or(false)));
         assert!(docs.iter().any(|(_, value)| value.get("routing").and_then(|r| r.get("rules")).and_then(Value::as_array)
             .map(|rules| rules.iter().any(|rule| rule["inboundTag"][0] == tag))
@@ -669,6 +669,32 @@ mod api_tests {
     }
 
     #[test]
+    #[test]
+    fn avoids_existing_non_api_outbound_tag_collision() {
+        let mut docs = vec![(
+            "04_outbounds.json".to_owned(),
+            json!({"outbounds":[
+                {"tag":"api","protocol":"vless"},
+                {"tag":"node","protocol":"vless"}
+            ]}),
+        ), (
+            "05_routing.json".to_owned(),
+            json!({"routing":{"rules":[]}}),
+        )];
+
+        ensure_api(&mut docs, 10085, false).unwrap();
+
+        let api_doc = docs.iter().find(|(_, value)| value.get("api").is_some()).unwrap();
+        let tag = api_doc.1["api"]["tag"].as_str().unwrap();
+        assert_ne!(tag, "api");
+        assert!(docs.iter().any(|(_, value)| value.get("outbounds").and_then(Value::as_array)
+            .map(|items| items.iter().any(|item| item["tag"] == tag && item["protocol"] == "freedom"))
+            .unwrap_or(false)));
+        assert!(docs.iter().any(|(_, value)| value.get("inbounds").and_then(Value::as_array)
+            .map(|items| items.iter().any(|item| item["tag"] == tag))
+            .unwrap_or(false)));
+    }
+
     fn helper_api_is_isolated_and_uses_the_ephemeral_port() {
         let mut docs = vec![(
             "00_api.json".to_owned(),

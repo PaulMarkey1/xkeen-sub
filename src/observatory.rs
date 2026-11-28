@@ -25,7 +25,7 @@ pub fn prepare_observatory(
     prepare_observatory_with_interval(documents, tags, None)
 }
 
-/// Synchronizes selectors and uses the optional interval only for a new default template.
+/// Synchronizes selectors and, when provided, applies the interval to existing and new Observatory objects.
 pub fn prepare_observatory_with_interval(
     documents: &mut Vec<(String, Value)>,
     tags: &[String],
@@ -48,6 +48,9 @@ pub fn prepare_observatory_with_interval(
             })?;
 
             object.insert("subjectSelector".to_owned(), selector.clone());
+            if let Some(interval) = probe_interval {
+                object.insert("probeInterval".to_owned(), Value::String(interval.to_owned()));
+            }
             updated.push(ObservatoryUpdate {
                 file_name: file_name.clone(),
                 object_name: key.to_owned(),
@@ -208,17 +211,34 @@ mod tests {
 
 
     #[test]
-    fn advanced_interval_applies_only_to_new_observatory_template() {
+    fn supplied_interval_overrides_existing_and_new_observatory() {
         let mut existing = vec![(
             "observatory.json".to_owned(),
             json!({"observatory": {"probeInterval": "60s"}}),
         )];
         super::prepare_observatory_with_interval(&mut existing, &["node".to_owned()], Some("10s")).unwrap();
-        assert_eq!(existing[0].1["observatory"]["probeInterval"], "60s");
+        assert_eq!(existing[0].1["observatory"]["probeInterval"], "10s");
 
         let mut missing = vec![("routing.json".to_owned(), json!({"routing": {}}))];
         super::prepare_observatory_with_interval(&mut missing, &["node".to_owned()], Some("10s")).unwrap();
         assert_eq!(missing[1].1["observatory"]["probeInterval"], "10s");
+
+        let mut simple = vec![(
+            "observatory.json".to_owned(),
+            json!({"observatory": {"probeInterval": "10s"}}),
+        )];
+        super::prepare_observatory_with_interval(&mut simple, &["node".to_owned()], Some("60s")).unwrap();
+        assert_eq!(simple[0].1["observatory"]["probeInterval"], "60s");
+    }
+
+    #[test]
+    fn no_interval_preserves_user_configured_value() {
+        let mut docs = vec![(
+            "observatory.json".to_owned(),
+            json!({"observatory": {"probeInterval": "17s"}}),
+        )];
+        super::prepare_observatory_with_interval(&mut docs, &["node".to_owned()], None).unwrap();
+        assert_eq!(docs[0].1["observatory"]["probeInterval"], "17s");
     }
 
     #[test]

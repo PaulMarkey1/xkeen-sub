@@ -224,6 +224,27 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
         }
     }
 
+    // Ensure the configuration that will actually be applied has a complete
+    // API (including RoutingService for current-connection controls). Legacy
+    // installations may have no API object or only a partial one.
+    let mut api_docs: Vec<(String, Value)> = docs.iter()
+        .map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
+    crate::xray_probe::ensure_api_configuration(&mut api_docs, 10085)?;
+    for (name, value) in api_docs {
+        if let Some(index) = docs.iter().position(|doc| doc.file_name == name) {
+            docs[index].value = value;
+        } else {
+            docs.push(ConfigDocument {
+                file_name: name.clone(),
+                path: std::path::Path::new(CONFIG_DIR).join(&name),
+                original: String::new(),
+                original_value: Value::Null,
+                value,
+                is_new: true,
+            });
+        }
+    }
+
     validate_documents(docs)?;
     if target == BalancingMode::Advanced && !tags.is_empty() {
         info("Проверяем подключения для Advanced блоками по пять...");

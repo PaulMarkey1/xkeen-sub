@@ -307,7 +307,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
                         object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
                     }
                     if object.get("port").and_then(Value::as_u64).filter(|port| *port > 0 && *port <= u16::MAX as u64).is_none() {
-                        object.insert("port".to_owned(), json!(api_port));
+                        object.insert("port".to_owned(), json!(effective_api_port));
                     }
                 }
                 let mut rebuilt = Vec::with_capacity(inbounds.len());
@@ -331,10 +331,13 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
     }
 
     if !api_inbound_found {
-        let inbounds = documents[api_index].1.as_object_mut()
-            .ok_or("Корень API-конфигурации должен быть объектом.")?
-            .entry("inbounds").or_insert_with(|| json!([]))
-            .as_array_mut().ok_or("Поле inbounds должно быть массивом.")?;
+        let root = documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть объектом.")?;
+        if !root.get("inbounds").map(Value::is_array).unwrap_or(false) {
+            root.insert("inbounds".to_owned(), json!([]));
+        }
+        let inbounds = root.get_mut("inbounds").and_then(Value::as_array_mut)
+            .ok_or("Не удалось подготовить массив inbounds.")?;
         inbounds.push(json!({
             "tag": api_tag,
             "listen": "127.0.0.1",
@@ -346,6 +349,10 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
 
     // The API inbound must be routed to a freedom outbound. Do not overwrite
     // unrelated outbounds or routing rules from a user's existing config.
+    let existing_outbound_tags: Vec<String> = documents.iter()
+        .filter_map(|(_, doc)| doc.get("outbounds").and_then(Value::as_array))
+        .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
+        .map(str::to_owned).collect();
     let api_outbound_tag = if documents.iter().any(|(_, doc)| {
         doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
             item.get("tag").and_then(Value::as_str) == Some("api")
@@ -353,7 +360,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
     }) {
         "api".to_owned()
     } else {
-        unique_tag("xkeen-sub-api-out", &outbound_tags)
+        unique_tag("xkeen-sub-api-out", &existing_outbound_tags)
     };
     if !documents.iter().any(|(_, doc)| {
         doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|

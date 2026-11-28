@@ -56,5 +56,5 @@ pub fn run() -> AppResult<()> {
         OUTBOUND_FILE,
         tags.len()
     );
-    crate::speed_test::test_outbounds_speed(&documents, &tags)
+    crate::speed_test::test_outbounds_speed(&documents, &tags).map(|_| ())
 }

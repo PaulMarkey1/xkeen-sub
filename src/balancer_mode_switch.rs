@@ -208,7 +208,7 @@ fn prepare_and_apply(docs: &mut Vec<ConfigDocument>, target: BalancingMode, back
 
     let initial_obs_tags = selector_tags.clone();
     let mut obs_docs: Vec<(String, Value)> = docs.iter().map(|doc| (doc.file_name.clone(), doc.value.clone())).collect();
-    prepare_observatory_with_interval(&mut obs_docs, &initial_obs_tags, if target == BalancingMode::Advanced { Some("10s") } else { None })?;
+    prepare_observatory_with_interval(&mut obs_docs, &initial_obs_tags, Some(if target == BalancingMode::Advanced { "10s" } else { "60s" }))?;
     for (name, value) in obs_docs {
         if let Some(index) = docs.iter().position(|doc| doc.file_name == name) {
             docs[index].value = value;

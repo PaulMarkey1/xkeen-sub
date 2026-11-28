@@ -189,6 +189,7 @@ pub fn tick() -> AppResult<()> {
             }
         }
     }
+    crate::speed_monitor::tick()?;
     Ok(())
 }
 
@@ -216,7 +217,7 @@ pub(crate) fn refresh_cron() -> AppResult<()> {
 fn sync_cron(enabled: bool) -> AppResult<()> {
     // Keep the existing single cron entry while either scheduled updates or
     // a temporary manual node selection needs periodic processing.
-    let enabled = enabled || crate::current_connection::has_pending_selection();
+    let enabled = enabled || crate::current_connection::has_pending_selection() || crate::speed_monitor::is_enabled();
     if !crate::system::command_exists("crontab") {
         if enabled { return Err("Не найдена команда crontab. Установите cron в Entware.".into()); }
         return Ok(());

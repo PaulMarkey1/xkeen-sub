@@ -1,8 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::io::{BufRead, BufReader, Read};
-use std::sync::mpsc;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -38,14 +36,14 @@ pub(crate) fn select_advanced_outbounds(
     documents: &[(String, Value)],
     tags: &[String],
 ) -> AppResult<Vec<(String, f64)>> {
-    const PING_TIMEOUT: Duration = Duration::from_secs(3);
-    const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
-    const GLOBAL_DEADLINE: Duration = Duration::from_secs(600);
-    const DOWNLOAD_BYTES: u64 = 10_000_000;
-    const DOWNLOAD_ROUNDS: usize = 3;
+    const PING_LIMIT: Duration = Duration::from_secs(3);
+    const TRANSFER_LIMIT: Duration = Duration::from_secs(30);
+    const TEST_BYTES: u64 = 10_000_000;
+    const SAMPLES: usize = 3;
+    const BATCH_SIZE: usize = 5;
+    const TRANSFER_BATCH: usize = 3;
+    const DEADLINE: Duration = Duration::from_secs(600);
 
-    let started = Instant::now();
-    let deadline = started + GLOBAL_DEADLINE;
     if tags.is_empty() {
         println!("Нет подключений для проверки.");
         return Ok(Vec::new());
@@ -54,315 +52,288 @@ pub(crate) fn select_advanced_outbounds(
         return Err(format!("Каталог данных Xray не найден: {ASSET_DIR}").into());
     }
 
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let directory = PathBuf::from("/opt/tmp").join(format!(
-        "xkeen-sub-speed-{}-{nonce}", std::process::id()
-    ));
-    let log_path = PathBuf::from("/tmp").join(format!(
-        "xkeen-sub-speed-{}-{nonce}.log", std::process::id()
-    ));
+    let expires = Instant::now() + DEADLINE;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let work_dir = PathBuf::from("/opt/tmp")
+        .join(format!("xkeen-sub-probe-{}-{stamp}", std::process::id()));
+    let log_file = PathBuf::from("/tmp")
+        .join(format!("xkeen-sub-probe-{}-{stamp}.log", std::process::id()));
     fs::create_dir_all("/opt/tmp")?;
-    fs::create_dir(&directory)?;
+    fs::create_dir(&work_dir)?;
 
-    let result = (|| -> AppResult<Vec<(String, f64)>> {
+    let operation = (|| -> AppResult<Vec<(String, f64)>> {
         let ports = (0..tags.len()).map(|_| reserve_port())
             .collect::<AppResult<Vec<_>>>()?;
-        let mut helper_documents = documents.to_vec();
-        configure_probe_inbounds(&mut helper_documents, tags, &ports)?;
-        for (name, value) in &helper_documents {
-            if !safe_config_name(name) {
-                return Err(format!("Недопустимое имя конфигурационного файла: {name}").into());
+        let mut isolated_config = documents.to_vec();
+        configure_probe_inbounds(&mut isolated_config, tags, &ports)?;
+        for (filename, document) in &isolated_config {
+            if !safe_config_name(filename) {
+                return Err(format!("Недопустимое имя файла Xray: {filename}").into());
             }
-            fs::write(directory.join(name), serde_json::to_vec_pretty(value)?)?;
+            fs::write(work_dir.join(filename), serde_json::to_vec_pretty(document)?)?;
         }
 
-        let xray_bin = std::env::var_os("XRAY_BIN").map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(XRAY_DEFAULT));
-        let log = fs::File::create(&log_path)?;
-        let stderr = log.try_clone()?;
-        let child = Command::new(&xray_bin)
+        let binary = std::env::var_os("XRAY_BIN")
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from(XRAY_DEFAULT));
+        let stdout = fs::File::create(&log_file)?;
+        let stderr = stdout.try_clone()?;
+        let process = Command::new(binary)
             .arg("run")
-            .env("XRAY_LOCATION_CONFDIR", &directory)
+            .env("XRAY_LOCATION_CONFDIR", &work_dir)
             .env("XRAY_LOCATION_ASSET", ASSET_DIR)
-            .stdout(Stdio::from(log))
+            .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .spawn()
-            .map_err(|error| format!("Не удалось запустить вспомогательный Xray: {error}"))?;
-        let mut child = HelperProcess(child);
-        if !wait_for_ports(&ports, &mut child, HELPER_START_LIMIT.min(remaining(deadline))) {
-            finish_child(&mut child);
-            return Err("Вспомогательный Xray не открыл тестовые порты вовремя.".into());
+            .map_err(|e| format!("Не удалось запустить изолированный Xray: {e}"))?;
+        let mut helper = HelperProcess(process);
+        if !wait_for_ports(&ports, &mut helper, HELPER_START_LIMIT.min(remaining(expires))) {
+            return Err("Изолированный Xray не открыл тестовые порты.".into());
         }
 
-        println!();
-        println!("Алгоритм: пинг блоками по 5 → повторный пинг → половина лучших → 10 МБ × 3 в блоках по 3 → 3 финалиста.");
-        println!("Финал: повторный пинг и три одновременных загрузки по 10 МБ.");
-        println!("Итог: скорость 80% + пинг 20%. Рабочий Xray и рабочие конфигурации не изменяются.");
+        println!("\nПроверка выполняется на временном Xray. Рабочие файлы и основной процесс не меняются.");
+        println!("План: ping 5 → повторный ping → лучшая половина → замеры 3×10 МБ блоками по 3 → 3 финалиста → финальный ping и 3 параллельных замера.");
+        let index_of = |tag: &str| tags.iter().position(|known| known == tag);
 
-        // Stage 1: ping every outbound in batches of five, with a hard 3-second timeout.
-        println!("\nЭТАП 1 — первичный пинг, блоки по 5, тайм-аут 3 секунды.");
-        let mut first_ping: BTreeMap<String, f64> = BTreeMap::new();
-        for (batch_index, batch) in ports.chunks(5).enumerate() {
-            if remaining(deadline).is_zero() { break; }
-            let batch_tags = tags[batch_index * 5..batch_index * 5 + batch.len()].to_vec();
-            let timeout = PING_TIMEOUT.min(remaining(deadline));
-            let results = run_parallel_ping_batch(&batch_tags, batch, timeout);
-            for (tag, result) in batch_tags.iter().zip(results) {
-                match result {
+        // A. Initial reachability: batches of five, each with a three-second cap.
+        println!("\nЭТАП 1. Первичный ping, блоки по {BATCH_SIZE}, лимит 3 с.");
+        let mut alive = Vec::<(String, f64)>::new();
+        for (offset, batch) in tags.chunks(BATCH_SIZE).enumerate() {
+            if remaining(expires).is_zero() { break; }
+            let batch_ports = &ports[offset * BATCH_SIZE..offset * BATCH_SIZE + batch.len()];
+            let outcomes = run_parallel_ping_batch(batch, batch_ports, PING_LIMIT.min(remaining(expires)));
+            for (tag, outcome) in batch.iter().zip(outcomes) {
+                match outcome {
                     ProbeResult::Success { latency_ms, .. } => {
-                        first_ping.insert(tag.clone(), latency_ms);
-                        println!("  {tag} — {:.1} мс", latency_ms);
+                        alive.push((tag.clone(), latency_ms));
+                        println!("  {tag}: {latency_ms:.1} мс");
                     }
                     ProbeResult::Failure { reason, http_code } => {
-                        println!("  {tag} — нет ответа: {reason}");
+                        println!("  {tag}: не отвечает ({reason})");
                         if http_code == 429 {
-                            finish_child(&mut child);
-                            return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());
+                            return Err("Источник тестирования вернул HTTP 429. Результат не применён.".into());
                         }
                     }
                 }
             }
         }
-        if first_ping.is_empty() {
-            finish_child(&mut child);
-            return Err("Ни одно подключение не ответило на первичный пинг; прежние селекторы сохранены.".into());
+        if alive.is_empty() {
+            return Err("Первичный ping не прошёл ни для одного узла.".into());
         }
 
-        // Stage 2: retry only responders. The timeout equals the slowest successful
-        // response time from stage 1, exactly as requested (no additional floor).
-        let second_timeout_ms = first_ping.values().copied().fold(0.0_f64, f64::max);
-        let second_timeout = Duration::from_secs_f64((second_timeout_ms / 1000.0).max(0.001));
-        println!("\nЭТАП 2 — повторный пинг {} подключений; тайм-аут {:.1} мс.",
-            first_ping.len(), second_timeout.as_secs_f64() * 1000.0);
-        let mut responders: Vec<String> = first_ping.keys().cloned().collect();
-        responders.sort();
-        let mut second_ping: BTreeMap<String, f64> = BTreeMap::new();
-        for (batch_index, batch_tags) in responders.chunks(5).enumerate() {
-            if remaining(deadline).is_zero() { break; }
-            let batch_ports: Vec<u16> = batch_tags.iter().map(|tag| {
-                ports[tags.iter().position(|candidate| candidate == tag).unwrap()]
-            }).collect();
-            let results = run_parallel_ping_batch(batch_tags, &batch_ports, second_timeout.min(remaining(deadline)));
-            for (tag, result) in batch_tags.iter().zip(results) {
-                match result {
-                    ProbeResult::Success { latency_ms, .. } => {
-                        second_ping.insert(tag.clone(), latency_ms);
-                        println!("  {tag} — {:.1} мс", latency_ms);
-                    }
-                    ProbeResult::Failure { reason, .. } => println!("  {tag} — исключён: {reason}"),
+        // B. Retry only reachable nodes. Timeout is exactly the maximum measured latency.
+        let retry_timeout = alive.iter().map(|(_, ms)| *ms).fold(0.0_f64, f64::max);
+        let retry_timeout = Duration::from_secs_f64((retry_timeout / 1000.0).max(0.001));
+        println!("\nЭТАП 2. Повторный ping {} узлов, тайм-аут {:.1} мс.",
+            alive.len(), retry_timeout.as_secs_f64() * 1000.0);
+        let alive_tags: Vec<String> = alive.iter().map(|(tag, _)| tag.clone()).collect();
+        let mut confirmed = Vec::<(String, f64)>::new();
+        for batch in alive_tags.chunks(BATCH_SIZE) {
+            if remaining(expires).is_zero() { break; }
+            let batch_ports: Vec<u16> = batch.iter().filter_map(|tag| index_of(tag).map(|i| ports[i])).collect();
+            let outcomes = run_parallel_ping_batch(batch, &batch_ports, retry_timeout.min(remaining(expires)));
+            for (tag, outcome) in batch.iter().zip(outcomes) {
+                if let ProbeResult::Success { latency_ms, .. } = outcome {
+                    confirmed.push((tag.clone(), latency_ms));
+                    println!("  {tag}: {latency_ms:.1} мс — подтверждён");
+                } else if let ProbeResult::Failure { reason, .. } = outcome {
+                    println!("  {tag}: исключён ({reason})");
                 }
             }
-            let _ = batch_index;
         }
-        if second_ping.is_empty() {
-            finish_child(&mut child);
-            return Err("Повторный пинг не прошёл ни для одного подключения; прежние селекторы сохранены.".into());
+        if confirmed.is_empty() {
+            return Err("Повторный ping не подтвердил ни одного узла.".into());
         }
 
-        // Stage 3: keep the fastest half by second-stage ping; round odd counts up.
-        let mut ping_rank: Vec<(String, f64)> = second_ping.iter()
-            .map(|(tag, ping)| (tag.clone(), *ping)).collect();
-        ping_rank.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let keep_count = (ping_rank.len() + 1) / 2;
-        ping_rank.truncate(keep_count);
-        let candidates: Vec<String> = ping_rank.iter().map(|item| item.0.clone()).collect();
-        println!("\nЭТАП 3 — отбор половины по повторному пингу: {} из {}.",
-            candidates.len(), second_ping.len());
-        for (index, (tag, ping)) in ping_rank.iter().enumerate() {
-            println!("  {}. {tag} — {:.1} мс", index + 1, ping);
+        // C. Keep the quickest half, rounding upward for an odd number.
+        confirmed.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let retained = (confirmed.len() + 1) / 2;
+        confirmed.truncate(retained);
+        let screened: Vec<String> = confirmed.iter().map(|entry| entry.0.clone()).collect();
+        println!("\nЭТАП 3. Оставляем {retained} из {} по повторному ping.", alive.len());
+        for (rank, (tag, latency)) in confirmed.iter().enumerate() {
+            println!("  {}. {tag}: {latency:.1} мс", rank + 1);
         }
 
-        // Stage 4: three 10 MB downloads per node, in batches of three.
-        println!("\nЭТАП 4 — загрузка 10 МБ, блоки по 3, три раунда.");
-        let mut stage_speed: BTreeMap<String, Vec<f64>> = candidates.iter()
-            .cloned().map(|tag| (tag, Vec::new())).collect();
-        for batch_tags in candidates.chunks(3) {
-            println!("  Блок: {}", batch_tags.join(", "));
-            for round in 0..DOWNLOAD_ROUNDS {
-                println!("    Раунд {}/{}", round + 1, DOWNLOAD_ROUNDS);
-                if remaining(deadline).is_zero() { break; }
-                let batch_ports: Vec<u16> = batch_tags.iter().map(|tag| {
-                    ports[tags.iter().position(|candidate| candidate == tag).unwrap()]
-                }).collect();
-                let timeout = DOWNLOAD_TIMEOUT.min(remaining(deadline));
-                let results = run_parallel_batch(batch_tags, &batch_ports, DOWNLOAD_BYTES, timeout);
-                for (tag, result) in batch_tags.iter().zip(results) {
+        // D. Three fixed-size samples, grouped by three nodes. Each failed sample
+        // receives exactly one retry; a node is eligible only with 3 valid samples.
+        println!("\nЭТАП 4. Скрининг скорости: 3 загрузки по 10 МБ, блоки по 3 узла.");
+        let mut screening: BTreeMap<String, Vec<f64>> =
+            screened.iter().cloned().map(|tag| (tag, Vec::new())).collect();
+        for group in screened.chunks(TRANSFER_BATCH) {
+            println!("  Группа: {}", group.join(", "));
+            let group_ports: Vec<u16> = group.iter().filter_map(|tag| index_of(tag).map(|i| ports[i])).collect();
+            for sample_no in 1..=SAMPLES {
+                if remaining(expires).is_zero() { break; }
+                println!("    Измерение {sample_no}/{SAMPLES}");
+                let outcomes = run_parallel_batch(group, &group_ports, TEST_BYTES, TRANSFER_LIMIT.min(remaining(expires)));
+                for (tag, first) in group.iter().zip(outcomes) {
+                    let result = match first {
+                        ProbeResult::Success { speed_mbps, .. } => ProbeResult::Success { speed_mbps, latency_ms: 0.0 },
+                        ProbeResult::Failure { reason, http_code } => {
+                            println!("      {tag}: ошибка, один повтор ({reason})");
+                            if http_code == 429 {
+                                return Err("Источник тестирования вернул HTTP 429. Результат не применён.".into());
+                            }
+                            let port = ports[index_of(tag).ok_or("Не найден порт узла")?];
+                            measure_candidate(port, TEST_BYTES, TRANSFER_LIMIT.min(remaining(expires)))
+                        }
+                    };
                     match result {
                         ProbeResult::Success { speed_mbps, .. } => {
-                            stage_speed.get_mut(tag).unwrap().push(speed_mbps);
-                            println!("      {tag} — {:.2} Мбит/с", speed_mbps);
+                            screening.get_mut(tag).unwrap().push(speed_mbps);
+                            println!("      {tag}: {speed_mbps:.2} Мбит/с");
                         }
                         ProbeResult::Failure { reason, http_code } => {
-                            println!("      {tag} — замер не прошёл, повторяем один раз: {reason}");
+                            println!("      {tag}: повтор не прошёл ({reason})");
                             if http_code == 429 {
-                                finish_child(&mut child);
-                                return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());
-                            }
-                            match measure_candidate(ports[tags.iter().position(|candidate| candidate == tag).unwrap()], DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT.min(remaining(deadline))) {
-                                ProbeResult::Success { speed_mbps, .. } => {
-                                    stage_speed.get_mut(tag).unwrap().push(speed_mbps);
-                                    println!("      {tag} — повтор успешен: {:.2} Мбит/с", speed_mbps);
-                                }
-                                ProbeResult::Failure { reason, http_code } => {
-                                    println!("      {tag} — повтор тоже не прошёл: {reason}");
-                                    if http_code == 429 {
-                                        finish_child(&mut child);
-                                        return Err("Тестовый источник вернул HTTP 429; прежние селекторы сохранены.".into());
-                                    }
-                                }
+                                return Err("Источник тестирования вернул HTTP 429. Результат не применён.".into());
                             }
                         }
                     }
                 }
             }
         }
-
-        let mut stage_rank: Vec<(String, f64)> = stage_speed.iter()
-            .filter(|(_, values)| values.len() == DOWNLOAD_ROUNDS)
-            .filter_map(|(tag, values)| median(values).map(|speed| (tag.clone(), speed)))
+        let mut speed_order: Vec<(String, f64)> = screening.iter()
+            .filter(|(_, samples)| samples.len() == SAMPLES)
+            .filter_map(|(tag, samples)| median(samples).map(|value| (tag.clone(), value)))
             .collect();
-        stage_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
-        stage_rank.truncate(3);
-        if stage_rank.is_empty() {
-            finish_child(&mut child);
-            return Err("Не удалось получить ни одного полного замера 10 МБ; прежние селекторы сохранены.".into());
+        speed_order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        speed_order.truncate(3);
+        if speed_order.is_empty() {
+            return Err("Нет узлов с тремя успешными скрининговыми измерениями.".into());
         }
-        let finalists: Vec<String> = stage_rank.iter().map(|item| item.0.clone()).collect();
-        println!("\nЭТАП 5 — финалисты по медианной скорости: {}", finalists.join(", "));
+        let finalists: Vec<String> = speed_order.iter().map(|entry| entry.0.clone()).collect();
+        println!("\nЭТАП 5. Финалисты по медиане скорости: {}", finalists.join(", "));
 
-        // Stage 6: re-ping finalists, then run three concurrent final download rounds.
-        let finalist_ports: Vec<u16> = finalists.iter().map(|tag| {
-            ports[tags.iter().position(|candidate| candidate == tag).unwrap()]
-        }).collect();
-        println!("\nЭТАП 6А — повторный пинг трёх финалистов.");
-        let final_ping_results = run_parallel_ping_batch(&finalists, &finalist_ports, PING_TIMEOUT.min(remaining(deadline)));
-        let mut final_ping: BTreeMap<String, f64> = BTreeMap::new();
-        for (tag, result) in finalists.iter().zip(final_ping_results) {
-            match result {
+        // E. Fresh ping for finalists.
+        let finalist_ports: Vec<u16> = finalists.iter().filter_map(|tag| index_of(tag).map(|i| ports[i])).collect();
+        println!("\nЭТАП 6. Финальный ping финалистов.");
+        let ping_outcomes = run_parallel_ping_batch(&finalists, &finalist_ports, PING_LIMIT.min(remaining(expires)));
+        let mut final_ping = BTreeMap::<String, f64>::new();
+        for (tag, outcome) in finalists.iter().zip(ping_outcomes) {
+            match outcome {
                 ProbeResult::Success { latency_ms, .. } => {
                     final_ping.insert(tag.clone(), latency_ms);
-                    println!("  {tag} — {:.1} мс", latency_ms);
+                    println!("  {tag}: {latency_ms:.1} мс");
                 }
-                ProbeResult::Failure { reason, .. } => println!("  {tag} — финальный пинг не пройден: {reason}"),
+                ProbeResult::Failure { reason, .. } => println!("  {tag}: исключён ({reason})"),
             }
         }
 
-        println!("\nЭТАП 6Б — три одновременных финальных загрузки по 10 МБ.");
-        let mut final_speed: BTreeMap<String, Vec<f64>> = finalists.iter()
-            .cloned().map(|tag| (tag, Vec::new())).collect();
-        for round in 0..DOWNLOAD_ROUNDS {
-            println!("  Финальный раунд {}/{}", round + 1, DOWNLOAD_ROUNDS);
-            if remaining(deadline).is_zero() { break; }
-            let timeout = DOWNLOAD_TIMEOUT.min(remaining(deadline));
-            let results = run_parallel_batch(&finalists, &finalist_ports, DOWNLOAD_BYTES, timeout);
-            for (tag, result) in finalists.iter().zip(results) {
+        // F. Three simultaneous final rounds. Failed transfers get one individual retry.
+        println!("\nЭТАП 7. Три параллельных финальных загрузки по 10 МБ.");
+        let mut final_samples: BTreeMap<String, Vec<f64>> =
+            finalists.iter().cloned().map(|tag| (tag, Vec::new())).collect();
+        for round in 1..=SAMPLES {
+            if remaining(expires).is_zero() { break; }
+            println!("  Раунд {round}/{SAMPLES}");
+            let outcomes = run_parallel_batch(&finalists, &finalist_ports, TEST_BYTES, TRANSFER_LIMIT.min(remaining(expires)));
+            for (tag, first) in finalists.iter().zip(outcomes) {
+                let result = match first {
+                    ProbeResult::Success { speed_mbps, .. } => ProbeResult::Success { speed_mbps, latency_ms: 0.0 },
+                    ProbeResult::Failure { reason, http_code } => {
+                        println!("    {tag}: ошибка, один повтор ({reason})");
+                        if http_code == 429 {
+                            return Err("Источник тестирования вернул HTTP 429 на финальном этапе.".into());
+                        }
+                        let port = ports[index_of(tag).ok_or("Не найден порт финалиста")?];
+                        measure_candidate(port, TEST_BYTES, TRANSFER_LIMIT.min(remaining(expires)))
+                    }
+                };
                 match result {
                     ProbeResult::Success { speed_mbps, .. } => {
-                        final_speed.get_mut(tag).unwrap().push(speed_mbps);
-                        println!("    {tag} — {:.2} Мбит/с", speed_mbps);
+                        final_samples.get_mut(tag).unwrap().push(speed_mbps);
+                        println!("    {tag}: {speed_mbps:.2} Мбит/с");
                     }
                     ProbeResult::Failure { reason, http_code } => {
-                        println!("    {tag} — замер не прошёл, повторяем один раз: {reason}");
+                        println!("    {tag}: повтор не прошёл ({reason})");
                         if http_code == 429 {
-                            finish_child(&mut child);
-                            return Err("Тестовый источник вернул HTTP 429 на финальном этапе; прежние селекторы сохранены.".into());
-                        }
-                        match measure_candidate(ports[tags.iter().position(|candidate| candidate == tag).unwrap()], DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT.min(remaining(deadline))) {
-                            ProbeResult::Success { speed_mbps, .. } => {
-                                final_speed.get_mut(tag).unwrap().push(speed_mbps);
-                                println!("    {tag} — повтор успешен: {:.2} Мбит/с", speed_mbps);
-                            }
-                            ProbeResult::Failure { reason, http_code } => {
-                                println!("    {tag} — повтор тоже не прошёл: {reason}");
-                                if http_code == 429 {
-                                    finish_child(&mut child);
-                                    return Err("Тестовый источник вернул HTTP 429 на финальном этапе; прежние селекторы сохранены.".into());
-                                }
-                            }
+                            return Err("Источник тестирования вернул HTTP 429 на финальном этапе.".into());
                         }
                     }
                 }
             }
         }
 
-        // Require all three final download samples and a successful final ping.
-        // This avoids allowing one lucky transfer to decide the winner.
-        let mut ranking: Vec<(String, f64)> = Vec::new();
-        let mut metrics: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+        // G. Score only complete candidates: 3/3 transfers and a valid final ping.
+        let mut measured = BTreeMap::<String, (f64, f64)>::new();
         for tag in &finalists {
-            let speeds = final_speed.get(tag).map(Vec::as_slice).unwrap_or(&[]);
             let Some(ping) = final_ping.get(tag).copied() else {
-                println!("  {tag} — исключён: нет успешного финального пинга.");
+                println!("  {tag}: исключён — финальный ping не прошёл");
                 continue;
             };
-            if speeds.len() != DOWNLOAD_ROUNDS {
-                println!("  {tag} — исключён: получено {}/{} полных финальных загрузок.",
-                    speeds.len(), DOWNLOAD_ROUNDS);
+            let samples = final_samples.get(tag).map(Vec::as_slice).unwrap_or(&[]);
+            if samples.len() != SAMPLES {
+                println!("  {tag}: исключён — финальных загрузок {}/{}", samples.len(), SAMPLES);
                 continue;
             }
-            let speed = median(speeds).unwrap_or(0.0);
-            if speed > 0.0 && speed.is_finite() && ping > 0.0 && ping.is_finite() {
-                metrics.insert(tag.clone(), (speed, ping));
+            if let Some(speed) = median(samples) {
+                if speed.is_finite() && speed > 0.0 && ping.is_finite() && ping > 0.0 {
+                    measured.insert(tag.clone(), (speed, ping));
+                }
             }
         }
-        let max_speed = metrics.values().map(|value| value.0).fold(0.0_f64, f64::max);
-        let min_ping = metrics.values().map(|value| value.1).fold(f64::INFINITY, f64::min);
-        for (tag, (speed, ping)) in &metrics {
-            let score = 100.0
-                * (speed / max_speed).powf(0.8)
-                * (min_ping / ping).powf(0.2);
-            if score.is_finite() && score > 0.0 {
-                println!("  {tag}: медиана {:.2} Мбит/с, медианный пинг {:.1} мс, балл {:.2}",
-                    speed, ping, score);
-                ranking.push((tag.clone(), score));
-            }
-        }
+        let top_speed = measured.values().map(|v| v.0).fold(0.0_f64, f64::max);
+        let best_ping = measured.values().map(|v| v.1).fold(f64::INFINITY, f64::min);
+        let mut ranking: Vec<(String, f64)> = measured.iter().filter_map(|(tag, (speed, ping))| {
+            let score = weighted_score(*speed, *ping, top_speed, best_ping)?;
+            println!("  {tag}: медиана {:.2} Мбит/с, ping {:.1} мс, score {:.2}",
+                speed, ping, score);
+            Some((tag.clone(), score))
+        }).collect();
         ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-        // Preserve the existing primary node when it is within the existing 5% hysteresis.
-        if let Some(current) = crate::current_connection::active_primary_tag() {
-            if let (Some(best), Some(current_score)) = (
-                ranking.first().map(|item| item.1),
-                ranking.iter().find(|item| item.0 == current).map(|item| item.1),
+        // Existing five-percent hysteresis: retain the active primary if nearly tied.
+        if let Some(active) = crate::current_connection::active_primary_tag() {
+            if let (Some(best), Some(active_score)) = (
+                ranking.first().map(|v| v.1),
+                ranking.iter().find(|v| v.0 == active).map(|v| v.1),
             ) {
-                if current_score >= best * 0.95 {
-                    if let Some(position) = ranking.iter().position(|item| item.0 == current) {
-                        let item = ranking.remove(position);
-                        ranking.insert(0, item);
-                        println!("Гистерезис 5%: сохраняем текущее подключение {current}.");
+                if active_score >= best * 0.95 {
+                    if let Some(position) = ranking.iter().position(|v| v.0 == active) {
+                        let current = ranking.remove(position);
+                        ranking.insert(0, current);
+                        println!("Гистерезис 5%: оставляем активный узел {active}.");
                     }
                 }
             }
         }
-
-        finish_child(&mut child);
         if ranking.is_empty() {
-            return Err("Финальные измерения не дали трёх полных раундов и успешного пинга ни для одного финалиста; прежние селекторы сохранены.".into());
+            return Err("Ни один финалист не прошёл все финальные проверки. Текущие селекторы не затронуты.".into());
         }
-        println!("\nИТОГОВЫЙ РЕЙТИНГ (80% скорость / 20% пинг):");
-        for (index, (tag, score)) in ranking.iter().enumerate() {
-            println!("  {}. {} — {:.2} балла", index + 1, tag, score);
+        println!("\nРЕЙТИНГ (80% скорость / 20% ping):");
+        for (position, (tag, score)) in ranking.iter().enumerate() {
+            println!("  {}. {tag} — {score:.2}", position + 1);
         }
+        finish_child(&mut helper);
         Ok(ranking)
     })();
 
-    let result = match result {
-        Ok(ranking) => Ok(ranking),
+    let result = match operation {
+        Ok(value) => Ok(value),
         Err(error) => {
-            match fs::read_to_string(&log_path) {
-                Ok(log) if !log.trim().is_empty() => Err(
-                    format!("{error}\nЖурнал вспомогательного Xray:\n{}", log.trim()).into()
-                ),
-                _ => Err(error),
+            let details = fs::read_to_string(&log_file).unwrap_or_default();
+            if details.trim().is_empty() {
+                Err(error)
+            } else {
+                Err(format!("{error}\nЖурнал временного Xray:\n{}", details.trim()).into())
             }
         }
     };
-    if let Err(error) = fs::remove_dir_all(&directory) {
-        eprintln!("Не удалось удалить временный каталог {}: {error}", directory.display());
-    }
-    let _ = fs::remove_file(&log_path);
-    println!("Общее время проверки: {:.2} с.", started.elapsed().as_secs_f64());
+    let _ = fs::remove_dir_all(&work_dir);
+    let _ = fs::remove_file(&log_file);
     result
+}
+
+fn weighted_score(speed: f64, ping: f64, maximum_speed: f64, minimum_ping: f64) -> Option<f64> {
+    if !speed.is_finite() || !ping.is_finite()
+        || !maximum_speed.is_finite() || !minimum_ping.is_finite()
+        || speed <= 0.0 || ping <= 0.0 || maximum_speed <= 0.0 || minimum_ping <= 0.0
+    {
+        return None;
+    }
+    let score = 100.0 * (speed / maximum_speed).powf(0.8) * (minimum_ping / ping).powf(0.2);
+    (score.is_finite() && score > 0.0).then_some(score)
 }
 
 fn configure_probe_inbounds(
@@ -612,164 +583,6 @@ fn measure_candidate(port: u16, size: u64, timeout: Duration) -> ProbeResult {
 }
 
 
-/// Measures repeated fixed-size Cloudflare downloads in one curl process. The first 300 ms
-/// are connection/download warm-up; subsequent ranges must reuse the same
-/// TCP/TLS connection. Sampling stops after two consecutive stable comparisons
-/// (<=15% difference) and never exceeds the caller's hard time budget.
-fn measure_adaptive_candidate(port: u16, timeout: Duration, expected_speed_mbps: f64) -> Result<(f64, usize, bool), String> {
-    if timeout < Duration::from_millis(1600) {
-        return Err("недостаточно времени для минимального окна замера 1,6 с".into());
-    }
-    let chunk_size: u64 = if expected_speed_mbps < 10.0 {
-        256_000
-    } else if expected_speed_mbps < 100.0 {
-        1_000_000
-    } else {
-        4_000_000
-    };
-    const WARMUP: Duration = Duration::from_millis(300);
-    const MIN_SAMPLE_TIME: Duration = Duration::from_millis(1600);
-    const MAX_REQUESTS: usize = 256;
-
-    let proxy = format!("http://127.0.0.1:{port}");
-    let timeout_arg = format!("{:.3}", timeout.as_secs_f64());
-    let connect_arg = format!("{:.3}", timeout.min(CURL_CONNECT_TIMEOUT).as_secs_f64());
-    let url = download_url(chunk_size);
-    let mut command = Command::new(CURL_BIN);
-    command.args([
-        "--silent", "--show-error", "--http1.1", "--no-buffer",
-        "--proxy", &proxy,
-        "--connect-timeout", &connect_arg,
-        "--max-time", &timeout_arg,
-        "--output", "/dev/null",
-        "--write-out",
-        "%{size_download}\\t%{time_starttransfer}\\t%{time_total}\\t%{http_code}\\t%{num_connects}\\n",
-    ]);
-    for _ in 0..MAX_REQUESTS {
-        command.arg(&url);
-    }
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|error| format!("не удалось запустить curl: {error}"))?;
-    let stdout = child.stdout.take().ok_or("не удалось открыть поток результатов curl")?;
-    let stderr = child.stderr.take().ok_or("не удалось открыть поток ошибок curl")?;
-    let stderr_reader = thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut output = String::new();
-        let _ = reader.read_to_string(&mut output);
-        output
-    });
-    let (sender, receiver) = mpsc::channel::<String>();
-    let reader = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => if sender.send(line).is_err() { break; },
-            }
-        }
-    });
-
-    let started = Instant::now();
-    let mut samples = Vec::new();
-    let mut previous: Option<f64> = None;
-    let mut stable_pairs = 0usize;
-    let mut stable = false;
-    let mut first_transfer = true;
-    let mut failure: Option<String> = None;
-
-    while started.elapsed() < timeout {
-        match receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(line) => {
-                let fields: Vec<&str> = line.trim().split('\t').collect();
-                if fields.len() != 5 { continue; }
-                let bytes = fields[0].parse::<u64>().unwrap_or(0);
-                let first_byte = fields[1].parse::<f64>().unwrap_or(0.0);
-                let total = fields[2].parse::<f64>().unwrap_or(0.0);
-                let status = fields[3].parse::<u16>().unwrap_or(0);
-                let connections = fields[4].parse::<u32>().unwrap_or(u32::MAX);
-
-                if status == 429 {
-                    failure = Some("HTTP 429: тестовый источник ограничил запросы".into());
-                    break;
-                }
-                if status != 200 || bytes != chunk_size {
-                    failure = Some(format!("неполная загрузка Cloudflare: HTTP {status}, {bytes}/{chunk_size} байт"));
-                    break;
-                }
-                if !first_transfer && connections != 0 {
-                    failure = Some("KeepAlive не сохранился между последовательными загрузками".into());
-                    break;
-                }
-                let was_first_transfer = first_transfer;
-                first_transfer = false;
-                if was_first_transfer { continue; }
-
-                let transfer = total - first_byte;
-                if !transfer.is_finite() || transfer <= 0.0 { continue; }
-                let speed = bytes as f64 * 8.0 / transfer / 1_000_000.0;
-                if started.elapsed() < WARMUP { continue; }
-                samples.push(speed);
-
-                if let Some(last) = previous {
-                    let relative_delta = (speed - last).abs() / last.max(speed).max(0.001);
-                    if relative_delta <= 0.15 {
-                        stable_pairs += 1;
-                    } else {
-                        stable_pairs = 0;
-                    }
-                    if started.elapsed() >= MIN_SAMPLE_TIME && stable_pairs >= 1 {
-                        stable = true;
-                        break;
-                    }
-                }
-                previous = Some(speed);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    let _ = child.kill();
-    let process_status = child.wait().ok();
-    let _ = reader.join();
-    let stderr = stderr_reader.join().unwrap_or_default();
-    
-    if let Some(reason) = failure {
-        let process = process_status
-            .map(|status| status.to_string())
-            .unwrap_or_else(|| "статус процесса недоступен".to_owned());
-        let diagnostic = if stderr.trim().is_empty() {
-            String::new()
-        } else {
-            format!("; stderr curl: {}", stderr.trim())
-        };
-        return Err(format!("{reason}; curl: {process}{diagnostic}"));
-    }
-    if samples.is_empty() {
-        let process = process_status
-            .map(|status| status.to_string())
-            .unwrap_or_else(|| "статус процесса недоступен".to_owned());
-        let diagnostic = if stderr.trim().is_empty() {
-            String::new()
-        } else {
-            format!("; stderr curl: {}", stderr.trim())
-        };
-        return Err(format!("не получено ни одного полного измерительного интервала после прогрева; curl: {process}{diagnostic}"));
-    }
-    let speed = median(&samples).ok_or("не удалось вычислить медиану скорости")?;
-    Ok((speed, samples.len(), stable))
-}
-
-fn robust_speed_score(values: &[f64], attempts: usize) -> Option<f64> {
-    let med = median(values)?;
-    let deviations: Vec<f64> = values.iter().map(|value| (value - med).abs()).collect();
-    let mad = median(&deviations).unwrap_or(0.0);
-    let reliability = values.len().min(attempts) as f64 / attempts.max(1) as f64;
-    let score = (med - 0.5 * mad).max(0.0) * reliability;
-    (score.is_finite() && score > 0.0).then_some(score)
-}
-
 fn median(values: &[f64]) -> Option<f64> {
     if values.is_empty() { return None; }
     let mut sorted = values.to_vec();
@@ -828,7 +641,7 @@ fn safe_config_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{curl_failure_reason, download_url, median, robust_speed_score};
+    use super::{curl_failure_reason, download_url, median, weighted_score};
     use std::process::Command;
 
     #[test]
@@ -874,22 +687,16 @@ mod tests {
     }
 
     #[test]
-    fn robust_score_penalizes_spread_with_mad() {
-        let steady = robust_speed_score(&[100.0, 102.0], 2).unwrap();
-        let unstable = robust_speed_score(&[50.0, 150.0], 2).unwrap();
-        assert!(steady > unstable);
+    fn score_uses_eighty_twenty_weighting_and_normalizes_best_values() {
+        assert!((weighted_score(100.0, 20.0, 100.0, 20.0).unwrap() - 100.0).abs() < 1e-9);
+        let speed_only = weighted_score(50.0, 20.0, 100.0, 20.0).unwrap();
+        let ping_only = weighted_score(100.0, 40.0, 100.0, 20.0).unwrap();
+        assert!(speed_only > ping_only);
     }
 
     #[test]
-    fn robust_score_penalizes_failed_final_round() {
-        let both_successful = robust_speed_score(&[100.0, 102.0], 2).unwrap();
-        let one_successful = robust_speed_score(&[100.0], 2).unwrap();
-        assert!(both_successful > one_successful);
-    }
-
-    #[test]
-    fn robust_score_rejects_empty_or_zero_samples() {
-        assert_eq!(robust_speed_score(&[], 2), None);
-        assert_eq!(robust_speed_score(&[0.0], 2), None);
+    fn score_rejects_invalid_metrics() {
+        assert_eq!(weighted_score(0.0, 10.0, 100.0, 10.0), None);
+        assert_eq!(weighted_score(10.0, f64::NAN, 100.0, 10.0), None);
     }
 }

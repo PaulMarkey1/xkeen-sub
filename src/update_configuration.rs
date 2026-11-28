@@ -19,6 +19,18 @@ use crate::update_report::{print_baseline_plan, print_configuration_summary, pri
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
+
+/// Returns whether the active Xray configuration uses the three-balancer Advanced mode.
+pub(crate) fn is_advanced_mode() -> AppResult<bool> {
+    let docs = load_config_documents()?;
+    let routing = docs.iter()
+        .find(|doc| doc.file_name == ROUTING_FILE)
+        .or_else(|| docs.iter().find(|doc| doc.value.get("routing").is_some()))
+        .ok_or("Не найдена конфигурация routing.")?;
+    Ok(crate::balancer::detect_balancing_mode(&routing.value)
+        == crate::balancer::BalancingMode::Advanced)
+}
+
 pub(crate) struct PreparedConfiguration {
     pub(crate) docs: Vec<ConfigDocument>,
     balancer: BalancerPreparation,
@@ -221,7 +233,6 @@ fn prepare_configuration(
                 "Advanced по результатам speed test: основной {}; резервный {}; третий {}. Не занятые позиции заполнены freedom.",
                 main_tag, reserve_tag, rest_tag
             ))?;
-            }
         }
     } else {
         let filtered_selectors = crate::balancer::filter_blacklisted_selectors(

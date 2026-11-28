@@ -185,87 +185,21 @@ fn probe_group(documents: &[(String, Value)], tags: &[String]) -> AppResult<BTre
     result
 }
 
+/// Adds a complete API endpoint to a prepared configuration set.
+///
+/// When `isolated` is true (the temporary probe instance), the API inbound is
+/// moved to the ephemeral loopback port and all non-API inbounds are removed
+/// so the helper Xray cannot collide with the running proxy. For the actual
+/// configuration, existing valid API settings are preserved.
+pub(crate) fn ensure_api_configuration(
+    documents: &mut Vec<(String, Value)>,
+    api_port: u16,
+) -> AppResult<()> {
+    ensure_api(documents, api_port, false)
+}
+
 fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String], api_port: u16) -> AppResult<()> {
-    // Older xkeen-sub installations may not have an API section at all.
-    // The probe runs from an isolated temporary config directory, so provide
-    // a complete API endpoint there without modifying the user's live files.
-    if !documents.iter().any(|(_, value)| value.get("api").is_some()) {
-        documents.push((
-            "xkeen-sub-probe-api.json".to_owned(),
-            json!({
-                "api": {
-                    "tag": "api",
-                    "services": ["ObservatoryService"]
-                },
-                "inbounds": [{
-                    "tag": "api",
-                    "listen": "127.0.0.1",
-                    "port": api_port,
-                    "protocol": "dokodemo-door",
-                    "settings": {"address": "127.0.0.1"}
-                }],
-                "outbounds": [{
-                    "tag": "api",
-                    "protocol": "freedom"
-                }],
-                "routing": {
-                    "rules": [{
-                        "type": "field",
-                        "inboundTag": ["api"],
-                        "outboundTag": "api"
-                    }]
-                }
-            }),
-        ));
-    }
-    let api_index = documents.iter().position(|(_, value)| value.get("api").is_some())
-        .ok_or("Не удалось подготовить API для вспомогательного Xray.")?;
-
-    {
-        let api = documents[api_index].1.get_mut("api")
-            .and_then(Value::as_object_mut)
-            .ok_or("Объект api должен быть JSON-объектом.")?;
-        let services = api.entry("services").or_insert_with(|| json!([]));
-        let services = services.as_array_mut()
-            .ok_or("Поле api.services должно быть массивом.")?;
-        if !services.iter().any(|value| value.as_str() == Some("ObservatoryService")) {
-            services.push(Value::String("ObservatoryService".to_owned()));
-        }
-    }
-
-    let mut api_inbound_found = false;
-    for (_, document) in documents.iter_mut() {
-        let Some(inbounds) = document.get_mut("inbounds").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let mut retained = Vec::new();
-        for mut inbound in std::mem::take(inbounds) {
-            if inbound.get("tag").and_then(Value::as_str) == Some("api") {
-                let object = inbound.as_object_mut().ok_or("API inbound должен быть объектом.")?;
-                object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
-                object.insert("port".to_owned(), json!(api_port));
-                object.insert("protocol".to_owned(), Value::String("dokodemo-door".to_owned()));
-                object.insert("settings".to_owned(), json!({"address":"127.0.0.1"}));
-                retained.push(inbound);
-                api_inbound_found = true;
-            }
-        }
-        *inbounds = retained;
-    }
-
-    if !api_inbound_found {
-        let inbounds = documents[api_index].1.as_object_mut()
-            .ok_or("Корень API-конфигурации должен быть объектом.")?
-            .entry("inbounds").or_insert_with(|| json!([]))
-            .as_array_mut().ok_or("Поле inbounds должно быть массивом.")?;
-        inbounds.push(json!({
-            "tag": "api",
-            "listen": "127.0.0.1",
-            "port": api_port,
-            "protocol": "dokodemo-door",
-            "settings": {"address": "127.0.0.1"}
-        }));
-    }
+    ensure_api(documents, api_port, true)?;
 
     let selector = Value::Array(tags.iter().cloned().map(Value::String).collect());
     let mut found_observatory = false;
@@ -293,6 +227,196 @@ fn configure_helper(documents: &mut Vec<(String, Value)>, tags: &[String], api_p
         ));
     }
     Ok(())
+}
+
+fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: bool) -> AppResult<()> {
+    // An API key alone is not sufficient: old installations may contain an
+    // empty/partial object without a tag, services, inbound, outbound or route.
+    let api_index = match documents.iter().position(|(_, value)| value.get("api").is_some()) {
+        Some(index) => index,
+        None => {
+            let mut name = "xkeen-sub-api.json".to_owned();
+            let mut suffix = 1usize;
+            while documents.iter().any(|(existing, _)| existing == &name) {
+                name = format!("xkeen-sub-api-{suffix}.json");
+                suffix += 1;
+            }
+            documents.push((name, json!({"api": {}})));
+            documents.len() - 1
+        }
+    };
+
+    if !documents[api_index].1.get("api").map(Value::is_object).unwrap_or(false) {
+        documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть JSON-объектом.")?
+            .insert("api".to_owned(), json!({}));
+    }
+
+    let existing_api_tag = documents[api_index].1["api"].get("tag")
+        .and_then(Value::as_str).filter(|tag| !tag.trim().is_empty()).map(str::to_owned);
+    let inbound_tags: Vec<String> = documents.iter()
+        .filter_map(|(_, doc)| doc.get("inbounds").and_then(Value::as_array))
+        .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
+        .map(str::to_owned).collect();
+    let api_tag = existing_api_tag
+        .or_else(|| inbound_tags.iter().find(|tag| tag.as_str() == "api").cloned())
+        .unwrap_or_else(|| unique_tag("xkeen-sub-api", &inbound_tags));
+    documents[api_index].1["api"]["tag"] = Value::String(api_tag.clone());
+
+    let services = documents[api_index].1["api"].get_mut("services")
+        .and_then(Value::as_array_mut);
+    if services.is_none() {
+        documents[api_index].1["api"]["services"] = json!([]);
+    }
+    let services = documents[api_index].1["api"]["services"].as_array_mut()
+        .ok_or("Не удалось подготовить api.services.")?;
+    for service in ["RoutingService", "ObservatoryService"] {
+        if !services.iter().any(|value| value.as_str() == Some(service)) {
+            services.push(Value::String(service.to_owned()));
+        }
+    }
+
+    let mut api_inbound_found = false;
+    for (_, document) in documents.iter_mut() {
+        let Some(inbounds) = document.get_mut("inbounds").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut retained_api = None;
+        for inbound in inbounds.iter() {
+            if inbound.get("tag").and_then(Value::as_str) == Some(api_tag.as_str()) {
+                retained_api = Some(inbound.clone());
+                break;
+            }
+        }
+        if let Some(mut inbound) = retained_api {
+            if !api_inbound_found {
+                let object = inbound.as_object_mut().ok_or("API inbound должен быть объектом.")?;
+                object.insert("tag".to_owned(), Value::String(api_tag.clone()));
+                object.insert("protocol".to_owned(), Value::String("dokodemo-door".to_owned()));
+                object.insert("settings".to_owned(), json!({"address":"127.0.0.1"}));
+                if isolated {
+                    object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
+                    object.insert("port".to_owned(), json!(api_port));
+                } else {
+                    if object.get("listen").and_then(Value::as_str).is_none() {
+                        object.insert("listen".to_owned(), Value::String("127.0.0.1".to_owned()));
+                    }
+                    if object.get("port").and_then(Value::as_u64).filter(|port| *port > 0 && *port <= u16::MAX as u64).is_none() {
+                        object.insert("port".to_owned(), json!(api_port));
+                    }
+                }
+                let mut rebuilt = Vec::with_capacity(inbounds.len());
+                for existing in std::mem::take(inbounds) {
+                    if existing.get("tag").and_then(Value::as_str) == Some(api_tag.as_str()) {
+                        if !api_inbound_found {
+                            rebuilt.push(inbound.clone());
+                            api_inbound_found = true;
+                        }
+                    } else if !isolated {
+                        rebuilt.push(existing);
+                    }
+                }
+                *inbounds = rebuilt;
+            } else {
+                inbounds.retain(|existing| existing.get("tag").and_then(Value::as_str) != Some(api_tag.as_str()));
+            }
+        } else if isolated {
+            inbounds.clear();
+        }
+    }
+
+    if !api_inbound_found {
+        let inbounds = documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть объектом.")?
+            .entry("inbounds").or_insert_with(|| json!([]))
+            .as_array_mut().ok_or("Поле inbounds должно быть массивом.")?;
+        inbounds.push(json!({
+            "tag": api_tag,
+            "listen": "127.0.0.1",
+            "port": api_port,
+            "protocol": "dokodemo-door",
+            "settings": {"address":"127.0.0.1"}
+        }));
+    }
+
+    // The API inbound must be routed to a freedom outbound. Do not overwrite
+    // unrelated outbounds or routing rules from a user's existing config.
+    let mut outbound_tags: Vec<String> = documents.iter()
+        .filter_map(|(_, doc)| doc.get("outbounds").and_then(Value::as_array))
+        .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
+        .map(str::to_owned).collect();
+    let api_outbound_tag = if documents.iter().any(|(_, doc)| {
+        doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
+            item.get("tag").and_then(Value::as_str) == Some("api")
+                && item.get("protocol").and_then(Value::as_str) == Some("freedom"))
+    }) {
+        "api".to_owned()
+    } else {
+        unique_tag("xkeen-sub-api-out", &outbound_tags)
+    };
+    if !documents.iter().any(|(_, doc)| {
+        doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
+            item.get("tag").and_then(Value::as_str) == Some(api_outbound_tag.as_str())
+                && item.get("protocol").and_then(Value::as_str) == Some("freedom"))
+    }) {
+        documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть объектом.")?
+            .entry("outbounds").or_insert_with(|| json!([]))
+            .as_array_mut().ok_or("Поле outbounds должно быть массивом.")?
+            .push(json!({"tag":api_outbound_tag,"protocol":"freedom"}));
+    }
+
+    let mut route_found = false;
+    for (_, document) in documents.iter_mut() {
+        if let Some(rules) = document.get_mut("routing").and_then(|routing| routing.get_mut("rules")).and_then(Value::as_array_mut) {
+            if rules.iter().any(|rule| {
+                rule.get("inboundTag").and_then(Value::as_array).map(|tags|
+                    tags.iter().any(|tag| tag.as_str() == Some(api_tag.as_str()))).unwrap_or(false)
+                    && rule.get("outboundTag").and_then(Value::as_str) == Some(api_outbound_tag.as_str())
+            }) {
+                route_found = true;
+                break;
+            }
+        }
+    }
+    if !route_found {
+        let routing = documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть объектом.")?
+            .entry("routing").or_insert_with(|| json!({}));
+        let routing = routing.as_object_mut().ok_or("Поле routing должно быть объектом.")?;
+        routing.entry("rules").or_insert_with(|| json!([]))
+            .as_array_mut().ok_or("Поле routing.rules должно быть массивом.")?
+            .insert(0, json!({
+                "type":"field",
+                "inboundTag":[api_tag],
+                "outboundTag":api_outbound_tag
+            }));
+    }
+
+    // In the helper process only the API inbound remains; the active config
+    // keeps every user's other inbound untouched.
+    if isolated {
+        for (_, document) in documents.iter_mut() {
+            if let Some(inbounds) = document.get_mut("inbounds").and_then(Value::as_array_mut) {
+                inbounds.retain(|inbound| inbound.get("tag").and_then(Value::as_str) == Some(api_tag.as_str()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unique_tag(base: &str, existing: &[String]) -> String {
+    if !existing.iter().any(|tag| tag == base) {
+        return base.to_owned();
+    }
+    let mut suffix = 1usize;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !existing.iter().any(|tag| tag == &candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 fn reserve_api_port() -> AppResult<u16> {

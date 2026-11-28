@@ -154,7 +154,7 @@ pub(crate) fn rank_outbounds_speed(
         if second_ranking.is_empty() {
             println!("На втором этапе нет подключений с минимум двумя успешными результатами.");
             finish_child(&mut child);
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // Stage 3: all finalists tested concurrently in each of three rounds.

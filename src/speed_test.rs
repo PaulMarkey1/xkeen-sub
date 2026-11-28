@@ -36,13 +36,12 @@ pub(crate) fn test_outbounds_speed(
     }
 
     println!();
-    println!("Быстрый отбор подключений — общий лимит 40 секунд.");
-    println!("Этап 1: {} подключений, 512 КБ, группы до {} (тайм-аут 3 с).", candidates.len(), FIRST_STAGE_BATCH);
-    println!("Этап 2: до {} лучших, 1 МБ (тайм-аут 5 с).", SECOND_STAGE_TOP);
-    println!("Этап 3: до {} финалистов, 2 МБ (тайм-аут 8 с).", FINAL_STAGE_TOP);
-    println!("Затем ещё 2 параллельных замера финалистов по 2 МБ; победитель — по медиане.");
+    println!("Тестирование подключений без общего ограничения времени.");
+    println!("Этап 1: все {} подключений, 3 прогона, группы по {}, 512 КБ, тайм-аут 3 с.", candidates.len(), FIRST_STAGE_BATCH);
+    println!("Этап 2: до 10 подключений, 3 прогона, группы по 5, 5 МБ, тайм-аут 7 с.");
+    println!("Этап 3: до 3 финалистов, 3 одновременных прогона по 10 МБ, тайм-аут 15 с.");
 
-    let started = Instant::now();
+    let total_started = Instant::now();
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let directory = PathBuf::from("/opt/tmp").join(format!("xkeen-sub-speed-{}-{nonce}", std::process::id()));
     let log_path = PathBuf::from("/tmp").join(format!("xkeen-sub-speed-{}-{nonce}.log", std::process::id()));
@@ -73,126 +72,133 @@ pub(crate) fn test_outbounds_speed(
             .spawn()
             .map_err(|e| format!("Не удалось запустить вспомогательный Xray: {e}"))?;
 
-        let Some(startup_timeout) = remaining_timeout(started, Duration::from_secs(15)) else {
+        if !wait_for_ports(&ports, &mut child, Duration::from_secs(15)) {
             finish_child(&mut child);
-            return Err("Исчерпан лимит времени до запуска вспомогательного Xray.".into());
-        };
-        if !wait_for_ports(&ports, &mut child, startup_timeout) {
-            finish_child(&mut child);
-            return Err("Вспомогательный Xray не запустился в отведённое время.".into());
+            return Err("Вспомогательный Xray не запустился за 15 секунд.".into());
         }
 
+        // Stage 1: three rounds, each round processed in batches of five.
         println!();
-        println!("ЭТАП 1/3 — быстрый отсев");
-        let mut current: Vec<(usize, f64)> = Vec::new();
-        for (batch_index, batch) in candidates.chunks(FIRST_STAGE_BATCH).enumerate() {
-            let Some(timeout) = remaining_timeout(started, Duration::from_secs(STAGE_TIMEOUTS[0])) else {
-                println!("Оставшиеся группы пропущены: достигнут общий лимит времени.");
-                break;
-            };
-            let offset = batch_index * FIRST_STAGE_BATCH;
-            let results = run_parallel_batch(
-                batch,
-                &ports[offset..offset + batch.len()],
-                STAGE_SIZES[0],
-                timeout,
-            );
-            for (local_index, speed) in results.into_iter().enumerate() {
-                let index = offset + local_index;
-                if let Some(speed) = speed {
-                    println!("  {} — {:.2} Мбит/с", candidates[index], speed);
-                    current.push((index, speed));
-                } else {
-                    println!("  {} — нет результата", candidates[index]);
+        println!("ЭТАП 1/3 — первичный отбор");
+        let stage_started = Instant::now();
+        let mut first_measurements: Vec<Vec<f64>> = vec![Vec::new(); candidates.len()];
+        for round in 1..=3 {
+            println!("  Прогон {round}/3");
+            for (batch_index, batch) in candidates.chunks(FIRST_STAGE_BATCH).enumerate() {
+                let offset = batch_index * FIRST_STAGE_BATCH;
+                let results = run_parallel_batch(
+                    batch,
+                    &ports[offset..offset + batch.len()],
+                    STAGE_SIZES[0],
+                    Duration::from_secs(STAGE_TIMEOUTS[0]),
+                );
+                for (local_index, speed) in results.into_iter().enumerate() {
+                    let index = offset + local_index;
+                    if let Some(speed) = speed {
+                        first_measurements[index].push(speed);
+                        println!("    {} — {:.2} Мбит/с", candidates[index], speed);
+                    } else {
+                        println!("    {} — нет результата", candidates[index]);
+                    }
                 }
             }
         }
-        current.sort_by(|a, b| b.1.total_cmp(&a.1));
-        current.truncate(SECOND_STAGE_TOP);
-        if current.is_empty() {
-            println!("На первом этапе не получено успешных результатов.");
+        let mut first_ranking: Vec<(usize, usize, f64)> = first_measurements.iter().enumerate()
+            .filter_map(|(index, values)| median(values).map(|value| (index, values.len(), value)))
+            .filter(|(_, successes, _)| *successes >= 2)
+            .collect();
+        first_ranking.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.total_cmp(&a.2)));
+        first_ranking.truncate(10);
+        println!("Время этапа 1: {:.2} с.", stage_started.elapsed().as_secs_f64());
+        if first_ranking.is_empty() {
+            println!("На первом этапе нет подключений с минимум двумя успешными результатами.");
             finish_child(&mut child);
             return Ok(());
         }
+        println!("В следующий этап проходят {} подключений.", first_ranking.len());
 
+        // Stage 2: three rounds, batches of five, 5 MB per request.
         println!();
-        println!("ЭТАП 2/3 — уточнение ({} подключений, 1 МБ)", current.len());
-        let indices: Vec<usize> = current.iter().map(|v| v.0).collect();
-        let stage2_tags: Vec<String> = indices.iter().map(|&i| candidates[i].clone()).collect();
-        let stage2_ports: Vec<u16> = indices.iter().map(|&i| ports[i]).collect();
-        let stage2_results = if let Some(timeout) = remaining_timeout(started, Duration::from_secs(STAGE_TIMEOUTS[1])) {
-            run_parallel_batch(&stage2_tags, &stage2_ports, STAGE_SIZES[1], timeout)
-        } else {
-            vec![None; stage2_tags.len()]
-        };
-        for (tag, speed) in stage2_tags.iter().zip(stage2_results.iter()) {
-            match speed {
-                Some(speed) => println!("  {} — {:.2} Мбит/с", tag, speed),
-                None => println!("  {} — нет результата", tag),
+        println!("ЭТАП 2/3 — уточнение ({} подключений, 5 МБ)", first_ranking.len());
+        let stage_started = Instant::now();
+        let stage2_indices: Vec<usize> = first_ranking.iter().map(|v| v.0).collect();
+        let stage2_tags: Vec<String> = stage2_indices.iter().map(|&i| candidates[i].clone()).collect();
+        let stage2_ports: Vec<u16> = stage2_indices.iter().map(|&i| ports[i]).collect();
+        let mut second_measurements: Vec<Vec<f64>> = vec![Vec::new(); stage2_tags.len()];
+        for round in 1..=3 {
+            println!("  Прогон {round}/3");
+            for batch_start in (0..stage2_tags.len()).step_by(FIRST_STAGE_BATCH) {
+                let batch_end = (batch_start + FIRST_STAGE_BATCH).min(stage2_tags.len());
+                let results = run_parallel_batch(
+                    &stage2_tags[batch_start..batch_end],
+                    &stage2_ports[batch_start..batch_end],
+                    STAGE_SIZES[1],
+                    Duration::from_secs(STAGE_TIMEOUTS[1]),
+                );
+                for (local_index, speed) in results.into_iter().enumerate() {
+                    let index = batch_start + local_index;
+                    if let Some(speed) = speed {
+                        second_measurements[index].push(speed);
+                        println!("    {} — {:.2} Мбит/с", stage2_tags[index], speed);
+                    } else {
+                        println!("    {} — нет результата", stage2_tags[index]);
+                    }
+                }
             }
         }
-        current = indices.into_iter().zip(stage2_results)
-            .filter_map(|(i, speed)| speed.map(|s| (i, s))).collect();
-        current.sort_by(|a, b| b.1.total_cmp(&a.1));
-        current.truncate(FINAL_STAGE_TOP);
-        if current.is_empty() {
-            println!("На втором этапе не осталось успешных результатов.");
+        let mut second_ranking: Vec<(usize, f64, usize)> = second_measurements.iter().enumerate()
+            .filter_map(|(index, values)| {
+                if values.len() < 2 { return None; }
+                median(values).map(|value| (stage2_indices[index], value, values.len()))
+            }).collect();
+        second_ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+        second_ranking.truncate(3);
+        println!("Время этапа 2: {:.2} с.", stage_started.elapsed().as_secs_f64());
+        if second_ranking.is_empty() {
+            println!("На втором этапе нет подключений с минимум двумя успешными результатами.");
             finish_child(&mut child);
             return Ok(());
         }
 
+        // Stage 3: all finalists tested concurrently in each of three rounds.
         println!();
-        println!("ЭТАП 3/3 — финальный выбор ({} подключения, 2 МБ)", current.len());
-        let finalists: Vec<usize> = current.iter().map(|v| v.0).collect();
+        println!("ЭТАП 3/3 — финальный рейтинг ({} подключения, 10 МБ)", second_ranking.len());
+        let stage_started = Instant::now();
+        let finalists: Vec<usize> = second_ranking.iter().map(|v| v.0).collect();
         let finalist_tags: Vec<String> = finalists.iter().map(|&i| candidates[i].clone()).collect();
         let finalist_ports: Vec<u16> = finalists.iter().map(|&i| ports[i]).collect();
-        let mut measurements: Vec<Vec<f64>> = vec![Vec::new(); finalists.len()];
-
-        let initial_results = if let Some(timeout) = remaining_timeout(started, Duration::from_secs(STAGE_TIMEOUTS[2])) {
-            run_parallel_batch(&finalist_tags, &finalist_ports, STAGE_SIZES[2], timeout)
-        } else {
-            vec![None; finalist_tags.len()]
-        };
-        for (index, speed) in initial_results.into_iter().enumerate() {
-            if let Some(speed) = speed {
-                println!("  {} — первичный замер: {:.2} Мбит/с", finalist_tags[index], speed);
-                measurements[index].push(speed);
-            } else {
-                println!("  {} — первичный замер: нет результата", finalist_tags[index]);
-            }
-        }
-
-        for round in 1..=2 {
-            println!();
-            println!("ПОВТОРНЫЙ ЗАМЕР {round}/2 — 2 МБ");
-            let Some(timeout) = remaining_timeout(started, Duration::from_secs(STAGE_TIMEOUTS[2])) else {
-                println!("Повторный замер пропущен: достигнут общий лимит времени.");
-                break;
-            };
-            let results = run_parallel_batch(&finalist_tags, &finalist_ports, STAGE_SIZES[2], timeout);
+        let mut final_measurements: Vec<Vec<f64>> = vec![Vec::new(); finalists.len()];
+        for round in 1..=3 {
+            println!("  Одновременный прогон {round}/3");
+            let results = run_parallel_batch(
+                &finalist_tags,
+                &finalist_ports,
+                STAGE_SIZES[2],
+                Duration::from_secs(STAGE_TIMEOUTS[2]),
+            );
             for (index, speed) in results.into_iter().enumerate() {
                 if let Some(speed) = speed {
-                    println!("  {} — {:.2} Мбит/с", finalist_tags[index], speed);
-                    measurements[index].push(speed);
+                    final_measurements[index].push(speed);
+                    println!("    {} — {:.2} Мбит/с", finalist_tags[index], speed);
                 } else {
-                    println!("  {} — нет результата", finalist_tags[index]);
+                    println!("    {} — нет результата", finalist_tags[index]);
                 }
             }
         }
-
-        let mut ranking: Vec<(usize, f64, usize)> = measurements.iter().enumerate()
+        let mut ranking: Vec<(usize, f64, usize)> = final_measurements.iter().enumerate()
             .filter_map(|(index, values)| {
                 if values.len() < 2 { return None; }
                 median(values).map(|value| (finalists[index], value, values.len()))
             }).collect();
         ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+        println!("Время этапа 3: {:.2} с.", stage_started.elapsed().as_secs_f64());
 
         println!();
-        println!("ИТОГОВЫЙ РЕЙТИНГ — медиана замеров (2 МБ):");
+        println!("ИТОГОВЫЙ РЕЙТИНГ — медиана замеров (10 МБ):");
         for (rank, (index, value, count)) in ranking.iter().enumerate() {
             println!("  {}. {} — {:.2} Мбит/с ({}/3 замеров)", rank + 1, candidates[*index], value, count);
         }
-        for (index, values) in measurements.iter().enumerate() {
+        for (index, values) in final_measurements.iter().enumerate() {
             if values.len() < 2 {
                 println!("  {} — недостаточно успешных замеров ({}/3)", finalist_tags[index], values.len());
             }
@@ -213,14 +219,8 @@ pub(crate) fn test_outbounds_speed(
     }
     let _ = fs::remove_file(&log_path);
     println!();
-    println!("Общее время проверки: {:.2} с.", started.elapsed().as_secs_f64());
+    println!("Общее время проверки: {:.2} с.", total_started.elapsed().as_secs_f64());
     result
-}
-fn remaining_timeout(started: Instant, stage_limit: Duration) -> Option<Duration> {
-    // Leave a small margin for process startup, thread joining and cleanup.
-    let remaining = TOTAL_DEADLINE.saturating_sub(started.elapsed());
-    let usable = remaining.checked_sub(Duration::from_millis(250))?;
-    if usable.is_zero() { None } else { Some(usable.min(stage_limit)) }
 }
 
 fn median(values: &[f64]) -> Option<f64> {

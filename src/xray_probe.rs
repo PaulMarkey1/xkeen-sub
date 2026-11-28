@@ -341,10 +341,6 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
 
     // The API inbound must be routed to a freedom outbound. Do not overwrite
     // unrelated outbounds or routing rules from a user's existing config.
-    let mut outbound_tags: Vec<String> = documents.iter()
-        .filter_map(|(_, doc)| doc.get("outbounds").and_then(Value::as_array))
-        .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
-        .map(str::to_owned).collect();
     let api_outbound_tag = if documents.iter().any(|(_, doc)| {
         doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
             item.get("tag").and_then(Value::as_str) == Some("api")
@@ -359,10 +355,13 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
             item.get("tag").and_then(Value::as_str) == Some(api_outbound_tag.as_str())
                 && item.get("protocol").and_then(Value::as_str) == Some("freedom"))
     }) {
-        documents[api_index].1.as_object_mut()
-            .ok_or("Корень API-конфигурации должен быть объектом.")?
-            .entry("outbounds").or_insert_with(|| json!([]))
-            .as_array_mut().ok_or("Поле outbounds должно быть массивом.")?
+        let root = documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть объектом.")?;
+        if !root.get("outbounds").map(Value::is_array).unwrap_or(false) {
+            root.insert("outbounds".to_owned(), json!([]));
+        }
+        root.get_mut("outbounds").and_then(Value::as_array_mut)
+            .ok_or("Не удалось подготовить массив outbounds.")?
             .push(json!({"tag":api_outbound_tag,"protocol":"freedom"}));
     }
 
@@ -380,12 +379,18 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
         }
     }
     if !route_found {
-        let routing = documents[api_index].1.as_object_mut()
-            .ok_or("Корень API-конфигурации должен быть объектом.")?
-            .entry("routing").or_insert_with(|| json!({}));
-        let routing = routing.as_object_mut().ok_or("Поле routing должно быть объектом.")?;
-        routing.entry("rules").or_insert_with(|| json!([]))
-            .as_array_mut().ok_or("Поле routing.rules должно быть массивом.")?
+        let root = documents[api_index].1.as_object_mut()
+            .ok_or("Корень API-конфигурации должен быть объектом.")?;
+        if !root.get("routing").map(Value::is_object).unwrap_or(false) {
+            root.insert("routing".to_owned(), json!({}));
+        }
+        let routing = root.get_mut("routing").and_then(Value::as_object_mut)
+            .ok_or("Не удалось подготовить объект routing.")?;
+        if !routing.get("rules").map(Value::is_array).unwrap_or(false) {
+            routing.insert("rules".to_owned(), json!([]));
+        }
+        routing.get_mut("rules").and_then(Value::as_array_mut)
+            .ok_or("Не удалось подготовить массив routing.rules.")?
             .insert(0, json!({
                 "type":"field",
                 "inboundTag":[api_tag],
@@ -569,5 +574,80 @@ impl Drop for HelperProcess {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod api_tests {
+    use super::ensure_api;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn creates_complete_api_for_legacy_configuration_without_api() {
+        let mut docs = vec![(
+            "04_outbounds.json".to_owned(),
+            json!({"outbounds":[{"tag":"node","protocol":"vless"}]}),
+        ), (
+            "05_routing.json".to_owned(),
+            json!({"routing":{"rules":[]}}),
+        )];
+
+        ensure_api(&mut docs, 10085, false).unwrap();
+
+        let api_doc = docs.iter().find(|(_, value)| value.get("api").is_some()).unwrap();
+        let tag = api_doc.1["api"]["tag"].as_str().unwrap();
+        assert_eq!(api_doc.1["api"]["services"], json!(["RoutingService","ObservatoryService"]));
+        assert!(docs.iter().any(|(_, value)| value.get("inbounds").and_then(Value::as_array)
+            .map(|items| items.iter().any(|item| item["tag"] == tag && item["port"] == 10085))
+            .unwrap_or(false)));
+        assert!(docs.iter().any(|(_, value)| value.get("outbounds").and_then(Value::as_array)
+            .map(|items| items.iter().any(|item| item["tag"] == "xkeen-sub-api-out" && item["protocol"] == "freedom"))
+            .unwrap_or(false)));
+        assert!(docs.iter().any(|(_, value)| value.get("routing").and_then(|r| r.get("rules")).and_then(Value::as_array)
+            .map(|rules| rules.iter().any(|rule| rule["inboundTag"][0] == tag))
+            .unwrap_or(false)));
+    }
+
+    #[test]
+    fn repairs_partial_api_and_preserves_existing_services_and_inbounds() {
+        let mut docs = vec![(
+            "00_api.json".to_owned(),
+            json!({
+                "api": {"services":["StatsService"]},
+                "inbounds":[
+                    {"tag":"api","listen":"127.0.0.1","port":10086,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1"}},
+                    {"tag":"socks-in","port":1080,"protocol":"socks"}
+                ]
+            }),
+        ), (
+            "04_outbounds.json".to_owned(),
+            json!({"outbounds":[{"tag":"api","protocol":"freedom"}]}),
+        ), (
+            "05_routing.json".to_owned(),
+            json!({"routing":{"rules":[]}}),
+        )];
+
+        ensure_api(&mut docs, 10085, false).unwrap();
+
+        assert_eq!(docs[0].1["api"]["tag"], "api");
+        assert_eq!(docs[0].1["api"]["services"], json!(["StatsService","RoutingService","ObservatoryService"]));
+        assert_eq!(docs[0].1["inbounds"].as_array().unwrap().len(), 2);
+        assert_eq!(docs[0].1["inbounds"][0]["port"], 10086);
+        assert_eq!(docs[0].1["inbounds"][1]["tag"], "socks-in");
+    }
+
+    #[test]
+    fn helper_api_is_isolated_and_uses_the_ephemeral_port() {
+        let mut docs = vec![(
+            "00_api.json".to_owned(),
+            json!({"api":{"tag":"api","services":["RoutingService"]},
+                "inbounds":[{"tag":"api","port":10085},{"tag":"socks-in","port":1080}]}),
+        )];
+        ensure_api(&mut docs, 45678, true).unwrap();
+        let inbounds = docs[0].1["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 1);
+        assert_eq!(inbounds[0]["tag"], "api");
+        assert_eq!(inbounds[0]["listen"], "127.0.0.1");
+        assert_eq!(inbounds[0]["port"], 45678);
     }
 }

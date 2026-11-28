@@ -13,12 +13,9 @@ const ASSET_DIR: &str = "/opt/etc/xray/dat";
 const XRAY_DEFAULT: &str = "/opt/sbin/xray";
 const CURL_BIN: &str = "/opt/bin/curl";
 const TEST_HOST: &str = "https://speed.cloudflare.com/__down?bytes=";
-const STAGE_SIZES: [u64; 3] = [512_000, 1_000_000, 2_000_000];
-const STAGE_TIMEOUTS: [u64; 3] = [3, 5, 8];
+const STAGE_SIZES: [u64; 3] = [512_000, 5_000_000, 10_000_000];
+const STAGE_TIMEOUTS: [u64; 3] = [3, 7, 15];
 const FIRST_STAGE_BATCH: usize = 5;
-const SECOND_STAGE_TOP: usize = 6;
-const FINAL_STAGE_TOP: usize = 3;
-const TOTAL_DEADLINE: Duration = Duration::from_secs(40);
 
 /// Selects one outbound using staged parallel throughput tests.
 /// One temporary Xray instance serves all candidates; active Xray/configs are untouched.

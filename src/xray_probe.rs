@@ -258,9 +258,24 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
         .filter_map(|(_, doc)| doc.get("inbounds").and_then(Value::as_array))
         .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
         .map(str::to_owned).collect();
-    let api_tag = existing_api_tag
-        .or_else(|| inbound_tags.iter().find(|tag| tag.as_str() == "api").cloned())
-        .unwrap_or_else(|| unique_tag("xkeen-sub-api", &inbound_tags));
+    let existing_outbound_tags: Vec<String> = documents.iter()
+        .filter_map(|(_, doc)| doc.get("outbounds").and_then(Value::as_array))
+        .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
+        .map(str::to_owned).collect();
+    let all_tags: Vec<String> = inbound_tags.iter().chain(existing_outbound_tags.iter()).cloned().collect();
+    let previous_api_tag = existing_api_tag
+        .or_else(|| inbound_tags.iter().find(|tag| tag.as_str() == "api").cloned());
+    let preferred_api_tag = previous_api_tag.clone()
+        .unwrap_or_else(|| unique_tag("api", &all_tags));
+    let api_tag = if documents.iter().any(|(_, doc)| {
+        doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
+            item.get("tag").and_then(Value::as_str) == Some(preferred_api_tag.as_str())
+                && item.get("protocol").and_then(Value::as_str) != Some("freedom"))
+    }) {
+        unique_tag("xkeen-sub-api", &all_tags)
+    } else {
+        preferred_api_tag.clone()
+    };
     let effective_api_port = if isolated {
         api_port
     } else {
@@ -288,7 +303,8 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
         };
         let mut retained_api = None;
         for inbound in inbounds.iter() {
-            if inbound.get("tag").and_then(Value::as_str) == Some(api_tag.as_str()) {
+            if inbound.get("tag").and_then(Value::as_str) == Some(api_tag.as_str())
+                || previous_api_tag.as_deref().map(|tag| inbound.get("tag").and_then(Value::as_str) == Some(tag)).unwrap_or(false) {
                 retained_api = Some(inbound.clone());
                 break;
             }
@@ -312,7 +328,8 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
                 }
                 let mut rebuilt = Vec::with_capacity(inbounds.len());
                 for existing in std::mem::take(inbounds) {
-                    if existing.get("tag").and_then(Value::as_str) == Some(api_tag.as_str()) {
+                    if existing.get("tag").and_then(Value::as_str) == Some(api_tag.as_str())
+                        || previous_api_tag.as_deref().map(|tag| existing.get("tag").and_then(Value::as_str) == Some(tag)).unwrap_or(false) {
                         if !api_inbound_found {
                             rebuilt.push(inbound.clone());
                             api_inbound_found = true;
@@ -323,7 +340,8 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
                 }
                 *inbounds = rebuilt;
             } else {
-                inbounds.retain(|existing| existing.get("tag").and_then(Value::as_str) != Some(api_tag.as_str()));
+                inbounds.retain(|existing| existing.get("tag").and_then(Value::as_str) != Some(api_tag.as_str())
+                    && !previous_api_tag.as_deref().map(|tag| existing.get("tag").and_then(Value::as_str) == Some(tag)).unwrap_or(false));
             }
         } else if isolated {
             inbounds.clear();
@@ -349,19 +367,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
 
     // The API inbound must be routed to a freedom outbound. Do not overwrite
     // unrelated outbounds or routing rules from a user's existing config.
-    let existing_outbound_tags: Vec<String> = documents.iter()
-        .filter_map(|(_, doc)| doc.get("outbounds").and_then(Value::as_array))
-        .flatten().filter_map(|item| item.get("tag").and_then(Value::as_str))
-        .map(str::to_owned).collect();
-    let api_outbound_tag = if documents.iter().any(|(_, doc)| {
-        doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
-            item.get("tag").and_then(Value::as_str) == Some("api")
-                && item.get("protocol").and_then(Value::as_str) == Some("freedom"))
-    }) {
-        "api".to_owned()
-    } else {
-        unique_tag("xkeen-sub-api-out", &existing_outbound_tags)
-    };
+    let api_outbound_tag = api_tag.clone();
     if !documents.iter().any(|(_, doc)| {
         doc.get("outbounds").and_then(Value::as_array).into_iter().flatten().any(|item|
             item.get("tag").and_then(Value::as_str) == Some(api_outbound_tag.as_str())
@@ -383,7 +389,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
             if rules.iter().any(|rule| {
                 rule.get("inboundTag").and_then(Value::as_array).map(|tags|
                     tags.iter().any(|tag| tag.as_str() == Some(api_tag.as_str()))).unwrap_or(false)
-                    && rule.get("outboundTag").and_then(Value::as_str) == Some(api_outbound_tag.as_str())
+                    && rule.get("outboundTag").and_then(Value::as_str) == Some(api_tag.as_str())
             }) {
                 route_found = true;
                 break;
@@ -406,7 +412,7 @@ fn ensure_api(documents: &mut Vec<(String, Value)>, api_port: u16, isolated: boo
             .insert(0, json!({
                 "type":"field",
                 "inboundTag":[api_tag],
-                "outboundTag":api_outbound_tag
+                "outboundTag":api_tag
             }));
     }
 

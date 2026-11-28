@@ -182,33 +182,37 @@ pub(crate) fn rank_outbounds_speed(
                 }
             }
         }
-        let mut ranking: Vec<(usize, f64, usize)> = final_measurements.iter().enumerate()
-            .filter_map(|(index, values)| {
-                if values.len() < 2 { return None; }
-                median(values).map(|value| (finalists[index], value, values.len()))
-            }).collect();
-        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // Keep every finalist in the result. Candidates with at least two
+        // successful measurements are ranked by median speed; candidates
+        // without enough measurements remain after them in stage-2 order.
+        let mut ranking: Vec<(usize, Option<f64>, usize)> = final_measurements.iter().enumerate()
+            .map(|(index, values)| (finalists[index], if values.len() >= 2 { median(values) } else { None }, values.len()))
+            .collect();
+        ranking.sort_by(|a, b| match (a.1, b.1) {
+            (Some(a_speed), Some(b_speed)) => b_speed.total_cmp(&a_speed),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
         println!("Время этапа 3: {:.2} с.", stage_started.elapsed().as_secs_f64());
 
         println!();
         println!("ИТОГОВЫЙ РЕЙТИНГ — медиана замеров (10 МБ):");
-        for (rank, (index, value, count)) in ranking.iter().enumerate() {
-            println!("  {}. {} — {:.2} Мбит/с ({}/3 замеров)", rank + 1, candidates[*index], value, count);
-        }
-        for (index, values) in final_measurements.iter().enumerate() {
-            if values.len() < 2 {
-                println!("  {} — недостаточно успешных замеров ({}/3)", finalist_tags[index], values.len());
+        for (rank, (index, speed, count)) in ranking.iter().enumerate() {
+            match speed {
+                Some(value) => println!("  {}. {} — {:.2} Мбит/с ({}/3 замеров)", rank + 1, candidates[*index], value, count),
+                None => println!("  {}. {} — недостаточно успешных замеров ({}/3); место сохранено по результатам этапа 2", rank + 1, candidates[*index], count),
             }
         }
-        if let Some((index, speed, count)) = ranking.first() {
+        if let Some((index, Some(speed), count)) = ranking.first() {
             println!();
             println!("Победитель: {} — {:.2} Мбит/с (медиана, {count}/3 замеров)", candidates[*index], speed);
         } else {
             println!();
-            println!("Победитель не определён: ни у одного финалиста нет хотя бы двух успешных замеров.");
+            println!("Ни один финалист не набрал двух успешных замеров на третьем этапе; порядок сохранён по результатам этапа 2.");
         }
         finish_child(&mut child);
-        Ok(ranking.iter().map(|(index, speed, count)| (candidates[*index].clone(), *speed, *count)).collect())
+        Ok(ranking.iter().map(|(index, speed, count)| (candidates[*index].clone(), speed.unwrap_or(0.0), *count)).collect())
     })();
 
     if let Err(error) = fs::remove_dir_all(&directory) {

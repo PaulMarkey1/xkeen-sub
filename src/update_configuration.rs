@@ -198,25 +198,23 @@ fn prepare_configuration(
         docs[routing_index].value = original_routing;
         let initial_validation = validate_all(&docs, &final_outbounds, &all_tags, &balancer);
         if initial_validation.is_ok() {
-            let freedom_tags: Vec<String> = final_outbounds.iter()
-                .filter(|outbound| outbound.get("protocol").and_then(Value::as_str) == Some("freedom"))
-                .filter_map(|outbound| outbound.get("tag").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect();
-            if freedom_tags.is_empty() {
-                return Err("В итоговом Outbound не найдено ни одного freedom-подключения для безопасного заполнения селекторов.".into());
-            }
-
-            let freedom_tag = freedom_tags.first()
-                .cloned()
-                .ok_or("В итоговом Outbound не найдено ни одного freedom-подключения для заполнения селекторов.")?;
             let probe_documents: Vec<(String, Value)> = docs.iter()
                 .map(|doc| (doc.file_name.clone(), doc.value.clone()))
                 .collect();
             let ranking = crate::speed_test::rank_outbounds_speed(&probe_documents, &tags)?;
-            let main_tag = ranking.get(0).map(|item| item.0.clone()).unwrap_or_else(|| freedom_tag.clone());
-            let reserve_tag = ranking.get(1).map(|item| item.0.clone()).unwrap_or_else(|| freedom_tag.clone());
-            let rest_tag = ranking.get(2).map(|item| item.0.clone()).unwrap_or_else(|| freedom_tag.clone());
+            let freedom_tag = if ranking.len() < 3 {
+                Some(final_outbounds.iter()
+                    .find(|outbound| outbound.get("protocol").and_then(Value::as_str) == Some("freedom"))
+                    .and_then(|outbound| outbound.get("tag").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .ok_or("Не удалось заполнить свободные позиции: в итоговом Outbound нет подключения с protocol freedom.")?)
+            } else {
+                None
+            };
+            let fallback_tag = freedom_tag.unwrap_or_default();
+            let main_tag = ranking.get(0).map(|item| item.0.clone()).unwrap_or_else(|| fallback_tag.clone());
+            let reserve_tag = ranking.get(1).map(|item| item.0.clone()).unwrap_or_else(|| fallback_tag.clone());
+            let rest_tag = ranking.get(2).map(|item| item.0.clone()).unwrap_or_else(|| fallback_tag.clone());
 
             let main = vec![main_tag.clone()];
             let reserve = vec![reserve_tag.clone()];
@@ -228,6 +226,7 @@ fn prepare_configuration(
                 &rest,
             )?;
             observatory_tags = vec![main_tag.clone(), reserve_tag.clone(), rest_tag.clone()];
+            observatory_tags.dedup();
             advanced_selectors_applied = true;
             backup.event("BALANCER", &format!(
                 "Advanced по результатам speed test: основной {}; резервный {}; третий {}. Не занятые позиции заполнены freedom.",

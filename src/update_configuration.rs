@@ -195,62 +195,32 @@ fn prepare_configuration(
                 return Err("В итоговом Outbound не найдено ни одного freedom-подключения для безопасного заполнения селекторов.".into());
             }
 
-            if tags.is_empty() {
-                // No subscription connections exist at all: keep every selector
-                // valid by filling all three managed balancers with freedom.
-                crate::balancer::apply_advanced_selectors(
-                    &mut docs[routing_index].value,
-                    &freedom_tags,
-                    &freedom_tags,
-                    &freedom_tags,
-                )?;
-                observatory_tags = freedom_tags;
-                advanced_selectors_applied = true;
-                backup.event("BALANCER", "Подписочных подключений нет; все три Advanced-селектора заполнены freedom-подключениями.")?;
-            } else {
-                let probe_documents: Vec<(String, Value)> = docs.iter()
-                    .map(|doc| (doc.file_name.clone(), doc.value.clone()))
-                    .collect();
-                match crate::xray_probe::select_advanced_outbounds(&probe_documents, &tags) {
-                    Ok(selected) if !selected.is_empty() => {
-                        let main_tag = selected[0].0.clone();
-                        let main = vec![main_tag.clone()];
-                        let reserve = selected.get(1)
-                            .map(|(tag, _)| vec![tag.clone()])
-                            .unwrap_or_else(|| freedom_tags.clone());
-                        let rest: Vec<String> = if tags.len() <= 2 {
-                            freedom_tags.clone()
-                        } else {
-                            tags.iter()
-                                .filter(|tag| *tag != &main_tag
-                                    && selected.get(1).map(|(reserve_tag, _)| reserve_tag != *tag).unwrap_or(true))
-                                .cloned()
-                                .collect()
-                        };
-                        crate::balancer::apply_advanced_selectors(
-                            &mut docs[routing_index].value,
-                            &main,
-                            &reserve,
-                            &rest,
-                        )?;
-                        observatory_tags = main;
-                        advanced_selectors_applied = true;
-                        backup.event("BALANCER", &format!(
-                            "Advanced: основное подключение {}; резервное {}; подключений в rest: {}.",
-                            selected[0].0,
-                            selected.get(1).map(|item| item.0.as_str()).unwrap_or("freedom"),
-                            rest.len()
-                        ))?;
-                    }
-                    Ok(_) => {
-                        warning("Не найдено ни одного рабочего подключения. Текущие селекторы трёх балансировщиков и Observatory оставлены без изменений.");
-                        backup.event("BALANCER", "Проверка Advanced не нашла рабочих подключений; прежние три балансировщика и Observatory сохранены.")?;
-                    }
-                    Err(error) => {
-                        warning(&format!("Не удалось получить результаты Observatory. Текущие селекторы Advanced оставлены без изменений: {error}"));
-                        backup.event("BALANCER", &format!("Проверка Advanced не завершилась; прежние селекторы сохранены: {error}"))?;
-                    }
-                }
+            let freedom_tag = freedom_tags.first()
+                .cloned()
+                .ok_or("В итоговом Outbound не найдено ни одного freedom-подключения для заполнения селекторов.")?;
+            let probe_documents: Vec<(String, Value)> = docs.iter()
+                .map(|doc| (doc.file_name.clone(), doc.value.clone()))
+                .collect();
+            let ranking = crate::speed_test::rank_outbounds_speed(&probe_documents, &tags)?;
+            let main_tag = ranking.get(0).map(|item| item.0.clone()).unwrap_or_else(|| freedom_tag.clone());
+            let reserve_tag = ranking.get(1).map(|item| item.0.clone()).unwrap_or_else(|| freedom_tag.clone());
+            let rest_tag = ranking.get(2).map(|item| item.0.clone()).unwrap_or_else(|| freedom_tag.clone());
+
+            let main = vec![main_tag.clone()];
+            let reserve = vec![reserve_tag.clone()];
+            let rest = vec![rest_tag.clone()];
+            crate::balancer::apply_advanced_selectors(
+                &mut docs[routing_index].value,
+                &main,
+                &reserve,
+                &rest,
+            )?;
+            observatory_tags = vec![main_tag.clone(), reserve_tag.clone(), rest_tag.clone()];
+            advanced_selectors_applied = true;
+            backup.event("BALANCER", &format!(
+                "Advanced по результатам speed test: основной {}; резервный {}; третий {}. Не занятые позиции заполнены freedom.",
+                main_tag, reserve_tag, rest_tag
+            ))?;
             }
         }
     } else {

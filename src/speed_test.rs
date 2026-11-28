@@ -19,14 +19,14 @@ const FIRST_STAGE_BATCH: usize = 5;
 
 /// Selects one outbound using staged parallel throughput tests.
 /// One temporary Xray instance serves all candidates; active Xray/configs are untouched.
-pub(crate) fn test_outbounds_speed(
+pub(crate) fn rank_outbounds_speed(
     documents: &[(String, Value)],
     tags: &[String],
-) -> AppResult<()> {
+) -> AppResult<Vec<(String, f64, usize)>> {
     let candidates = eligible_tags(documents, tags);
     if candidates.is_empty() {
         println!("В рабочем 04_outbounds.json нет подключений для замера.");
-        return Ok(());
+        return Ok(Vec::new());
     }
     if !Path::new(ASSET_DIR).is_dir() {
         return Err(format!("Каталог данных Xray не найден: {ASSET_DIR}").into());
@@ -45,7 +45,7 @@ pub(crate) fn test_outbounds_speed(
     fs::create_dir_all("/opt/tmp")?;
     fs::create_dir(&directory)?;
 
-    let result = (|| -> AppResult<()> {
+    let result = (|| -> AppResult<Vec<(String, f64, usize)>> {
         let ports = candidates.iter().map(|_| reserve_port()).collect::<AppResult<Vec<_>>>()?;
         let mut helper_documents = documents.to_vec();
         add_probe_configs(&mut helper_documents, &candidates, &ports)?;
@@ -110,7 +110,7 @@ pub(crate) fn test_outbounds_speed(
         if first_ranking.is_empty() {
             println!("На первом этапе нет подключений с минимум двумя успешными результатами.");
             finish_child(&mut child);
-            return Ok(());
+            return Ok(Vec::new());
         }
         println!("В следующий этап проходят {} подключений.", first_ranking.len());
 
@@ -208,7 +208,7 @@ pub(crate) fn test_outbounds_speed(
             println!("Победитель не определён: ни у одного финалиста нет хотя бы двух успешных замеров.");
         }
         finish_child(&mut child);
-        Ok(())
+        Ok(ranking.iter().map(|(index, speed, count)| (candidates[*index].clone(), *speed, *count)).collect())
     })();
 
     if let Err(error) = fs::remove_dir_all(&directory) {
